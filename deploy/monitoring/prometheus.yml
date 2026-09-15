@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # /metrics у vLLM и Bifrost не требуют ключа, поэтому секреты сюда не попадают.
+  - job_name: vllm
+    static_configs:
+      # vllm-embed без профиля embeddings будет в состоянии down — это ожидаемо.
+      - targets: ["vllm:8000", "vllm-embed:8001"]
+
+  - job_name: bifrost
+    static_configs:
+      - targets: ["bifrost:8080"]
+
+  - job_name: dcgm
+    static_configs:
+      - targets: ["dcgm-exporter:9400"]

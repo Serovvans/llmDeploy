@@ -1,0 +1,21 @@
+# секреты и локальные настройки
+.env
+deploy/certs/
+deploy/caddy-root.crt
+deploy/data/
+scripts/bench-results/
+
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# ide / os
+.idea/
+.vscode/
+.DS_Store

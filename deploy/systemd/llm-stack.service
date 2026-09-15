@@ -1,0 +1,22 @@
+# Автозапуск стека после перезагрузки ВМ (§9).
+# Устанавливает scripts/install.sh: копирует в /etc/systemd/system/ с WorkingDirectory,
+# равным фактическому пути к deploy/, и включает юнит.
+[Unit]
+Description=LLM service stack (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+# up -d завершается сам, а контейнеры живут в dockerd — отдельного процесса-демона нет.
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/llm/deploy
+# Профили берутся из COMPOSE_PROFILES в .env этого каталога.
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+# up ждёт healthy vLLM, а первый старт со скачиванием модели длится десятки минут.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

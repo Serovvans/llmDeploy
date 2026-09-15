@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: llm
+    type: file
+    # Дашборды живут в репозитории; правки через UI терялись бы при пересоздании контейнера.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

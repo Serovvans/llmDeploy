@@ -1,0 +1,229 @@
+# Стек LLM-сервиса: docs/design.md §4 (архитектура), §6 (параметры vLLM), §8 (безопасность).
+# Все переменные обязательны (${VAR:?}): compose интерполирует и сервисы выключенных
+# профилей, поэтому пустой пароль Grafana иначе молча превратился бы в admin/admin.
+
+# Фиксированное имя проекта: имена volumes (llm_bifrost-data и т. д.) не зависят от
+# имени каталога — на них ссылаются бэкап и runbook.
+name: llm
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          # Эквивалент --gpus all; синтаксис deploy работает во всех версиях compose v2,
+          # в отличие от ключа gpus (появился только в 2.30).
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+x-vllm: &vllm
+  <<: *gpu
+  image: vllm/vllm-openai:v0.29.0
+  restart: unless-stopped
+  # PyTorch обменивается тензорами через shared memory; дефолтных 64 МБ /dev/shm мало.
+  ipc: host
+  environment:
+    # Ключ через env, а не --api-key: vLLM читает VLLM_API_KEY сам, и секрет не попадает
+    # в список процессов хоста. В `docker inspect` (Config.Env) он по-прежнему виден.
+    VLLM_API_KEY: ${VLLM_API_KEY:?}
+    HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:?}
+  volumes:
+    - hf-cache:/root/.cache/huggingface
+  networks:
+    - inference
+
+services:
+  caddy:
+    image: caddy:2.11.4
+    restart: unless-stopped
+    depends_on:
+      bifrost:
+        condition: service_healthy
+    ports:
+      # Единственный порт, доступный снаружи ВМ.
+      - "443:443/tcp"
+    environment:
+      LLM_HOSTNAME: ${LLM_HOSTNAME:?}
+      TLS_MODE: ${TLS_MODE:?}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Каталогом, а не файлами: в режиме internal файлов сертификата нет, и bind файла
+      # не смонтировался бы. В режиме corp здесь fullchain.pem и privkey.pem.
+      - ./certs:/certs:ro
+      # Корень internal CA: при потере клиентам придётся раздавать новый (§3.4, бэкап).
+      - caddy-data:/data
+    networks:
+      - edge
+    healthcheck:
+      # Admin API слушает только loopback внутри контейнера — проверка, что Caddy жив,
+      # без проверки корпоративного сертификата, которому контейнер не доверяет.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  bifrost:
+    image: maximhq/bifrost:v2.2.0
+    restart: unless-stopped
+    depends_on:
+      vllm:
+        condition: service_healthy
+    ports:
+      # Админ-UI и REST управления ключами — только через SSH-туннель (§3.3, §8).
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Подставляются в config.json через префикс "env.".
+      VLLM_API_KEY: ${VLLM_API_KEY:?}
+      BIFROST_ADMIN_USERNAME: ${BIFROST_ADMIN_USERNAME:?}
+      BIFROST_ADMIN_PASSWORD: ${BIFROST_ADMIN_PASSWORD:?}
+      BIFROST_ENCRYPTION_KEY: ${BIFROST_ENCRYPTION_KEY:?}
+    volumes:
+      # SQLite (config.db, logs.db) пишется в volume; config.json Bifrost только читает,
+      # поэтому его можно смонтировать read-only поверх того же каталога.
+      - bifrost-data:/app/data
+      - ./bifrost/config.json:/app/data/config.json:ro
+    networks:
+      - edge
+      - inference
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  vllm:
+    <<: *vllm
+    command:
+      - ${MODEL_ID:?}
+      - --served-model-name
+      - default
+      - --max-model-len
+      - ${MAX_MODEL_LEN:?}
+      - --gpu-memory-utilization
+      - ${GPU_MEM_UTIL:?}
+      - --max-num-seqs
+      - "32"
+      - --limit-mm-per-prompt
+      - '{"image": 8}'
+      - --reasoning-parser
+      - qwen3
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+    healthcheck:
+      # В образе гарантированно есть python; /health vLLM не требует API-ключа.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # Первый старт включает скачивание ~30 ГБ весов, затем загрузку в VRAM и
+      # компиляцию CUDA-графов — это десятки минут.
+      start_period: 60m
+
+  vllm-embed:
+    <<: *vllm
+    profiles: [embeddings]
+    depends_on:
+      # Строго после основного: иначе профилировочный прогон одного экземпляра
+      # «увидит» память, которую забирает другой (§3.6).
+      vllm:
+        condition: service_healthy
+    command:
+      - ${EMBED_MODEL_ID:?}
+      # Стабильный алиас, как default у основной модели: config.json Bifrost не
+      # меняется при смене EMBED_MODEL_ID.
+      - --served-model-name
+      - embeddings
+      # Явно, чтобы модель с архитектурой *ForCausalLM не поднялась как генеративная.
+      - --runner
+      - pooling
+      # При дефолтных 32k KV-кеш одной последовательности (~3,5 ГБ) вместе с весами
+      # не помещается в 0.06 (§3.6).
+      - --max-model-len
+      - "8192"
+      - --port
+      - "8001"
+      # 0.85 + 0.06 = 0.91 ≤ 0.92 — запас на CUDA-контексты двух процессов (§3.6, §5).
+      - --gpu-memory-utilization
+      - "0.06"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20m
+
+  dcgm-exporter:
+    <<: *gpu
+    # Вариант ubuntu, а не distroless: в distroless нет shell для healthcheck.
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
+    profiles: [monitoring]
+    restart: unless-stopped
+    networks:
+      - inference
+    healthcheck:
+      # В образе нет curl/wget, но есть bash с /dev/tcp.
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/9400 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    profiles: [monitoring]
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # Порт не публикуется: Prometheus читает только Grafana по docker-сети.
+    networks:
+      - inference
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    profiles: [monitoring]
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      # Только loopback: доступ через SSH-туннель, порт 3000 наружу не открывается (§8).
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - inference
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+networks:
+  edge:
+  inference:
+
+volumes:
+  caddy-data:
+  hf-cache:
+  bifrost-data:
+  prometheus-data:

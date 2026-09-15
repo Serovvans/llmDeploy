@@ -1,0 +1,30 @@
+# Точка входа: TLS и только OpenAI-совместимый API наружу (§3.4).
+# Режим TLS — TLS_MODE: corp (сертификат корпоративного CA) или internal (собственный CA
+# Caddy). {$VAR} подставляется до разбора файла, поэтому import выбирает сниппет по
+# значению переменной; неизвестный режим — ошибка старта «File to import not found».
+{
+	# Корень internal CA в контейнере устанавливать некуда; клиентам он раздаётся вручную.
+	skip_install_trust
+}
+
+(tls-corp) {
+	# Явный tls с файлами отключает ACME для сайта: у ВМ нет публичного DNS.
+	tls /certs/fullchain.pem /certs/privkey.pem
+}
+
+(tls-internal) {
+	tls internal
+}
+
+{$LLM_HOSTNAME} {
+	import tls-{$TLS_MODE}
+
+	# Админ-API и UI Bifrost (/api/*, /) не должны быть доступны через 443.
+	handle /v1/* {
+		reverse_proxy bifrost:8080
+	}
+
+	handle {
+		respond 404
+	}
+}

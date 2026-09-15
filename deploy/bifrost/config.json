@@ -1,0 +1,48 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "encryption_key": "env.BIFROST_ENCRYPTION_KEY",
+  "client": {
+    "enforce_auth_on_inference": true,
+    "whitelisted_routes": ["/metrics"]
+  },
+  "config_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "/app/data/config.db"
+    }
+  },
+  "governance": {
+    "auth_config": {
+      "is_enabled": true,
+      "admin_username": "env.BIFROST_ADMIN_USERNAME",
+      "admin_password": "env.BIFROST_ADMIN_PASSWORD"
+    }
+  },
+  "providers": {
+    "vllm": {
+      "keys": [
+        {
+          "name": "vllm-main",
+          "value": "env.VLLM_API_KEY",
+          "models": ["default"],
+          "weight": 1.0,
+          "vllm_key_config": {
+            "url": "http://vllm:8000",
+            "model_name": "default"
+          }
+        },
+        {
+          "name": "vllm-embed",
+          "value": "env.VLLM_API_KEY",
+          "models": ["embeddings"],
+          "weight": 1.0,
+          "vllm_key_config": {
+            "url": "http://vllm-embed:8001",
+            "model_name": "embeddings"
+          }
+        }
+      ]
+    }
+  }
+}
