@@ -83,6 +83,11 @@ def test_settings_errors(env: dict[str, str], message: str) -> None:
         st.load_settings(env)
 
 
+def test_settings_direct_mode_defaults_to_local_vllm() -> None:
+    settings = st.load_settings({"LLM_API_KEY": "vllm-key"}, direct=True)
+    assert settings.base_url == st.DIRECT_BASE_URL
+
+
 def test_settings_accepts_existing_ca_cert(tmp_path: Path) -> None:
     ca = tmp_path / "ca.pem"
     ca.write_text("dummy")
@@ -470,3 +475,18 @@ def test_main_returns_1_without_config(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_parse_args_rejects_non_positive_attempts() -> None:
     with pytest.raises(SystemExit):
         st.parse_args(["--check-rate-limit", "0"])
+
+
+def _check_names(*, direct: bool) -> list[str]:
+    with Recorder([]).client() as client:
+        return [name for name, _ in st.build_checks(client, "https://llm.example", direct=direct)]
+
+
+def test_build_checks_includes_closed_paths_through_gateway() -> None:
+    assert "closed_paths" in _check_names(direct=False)
+
+
+def test_build_checks_skips_caddy_only_check_in_direct_mode() -> None:
+    names = _check_names(direct=True)
+    assert "closed_paths" not in names
+    assert names == [name for name in _check_names(direct=False) if name != "closed_paths"]

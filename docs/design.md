@@ -158,6 +158,31 @@ DNS-01 (нужны публичная DNS-зона с API, своя сборка
 MIG на этой карте есть, но фиксированные слайсы отняли бы у LLM больше памяти, чем
 нужно эмбеддингам; изоляция того не стоит.
 
+### 3.7 Два этапа развёртывания: сначала модель, потом внешний доступ
+
+Внешний доступ зависит от DevOps (DNS-имя, сертификат корпоративного CA, правила
+файрвола), а модель — нет. Поэтому стек развёртывается двумя независимыми этапами:
+
+| Этап | Сервисы | Что нужно заранее | Как проверяется |
+|---|---|---|---|
+| 1. Модель | `vllm` (+ `vllm-embed`, `monitoring`) | ВМ с GPU и доступ к Hugging Face | `smoke_test.py --direct` и `bench.sh` на `127.0.0.1:8000` |
+| 2. Внешний доступ | `caddy`, `bifrost` — профиль `gateway` | DNS-имя, сертификат (или `TLS_MODE=internal`), открытый 443 | `smoke_test.py` через `https://${LLM_HOSTNAME}/v1` |
+
+Механика: `caddy` и `bifrost` вынесены в compose-профиль `gateway`. Первый этап поднимает
+только vLLM, и `LLM_HOSTNAME` / `TLS_MODE` на нём не нужны — они проверяются лишь тогда,
+когда профиль `gateway` включён. Этап задаётся флагом `scripts/install.sh --stage
+model|gateway`, который управляет наличием профиля в `COMPOSE_PROFILES`; `--stage gateway`
+добавляет профиль, и дальше он остаётся в `.env` (выключить — ручной правкой).
+
+Чтобы модель можно было проверить и отбенчить до появления gateway, vLLM публикует порт
+**только на `127.0.0.1:8000`**: снаружи ВМ он по-прежнему недоступен (§8) и требует
+`VLLM_API_KEY`. Доступ с рабочей станции — через SSH-туннель, как у Bifrost и Grafana.
+
+Смоук-тест на первом этапе (`--direct`) прогоняет те же проверки модели (текст, зрение,
+`json_schema`, tool call, `enable_thinking`), пропуская проверку путей, закрытых Caddy:
+на этом этапе Caddy ещё нет. Так регрессии модели ловятся до второго этапа, а второй
+этап проверяет уже только обвязку.
+
 ## 4. Архитектура
 
 ```
@@ -165,12 +190,12 @@ MIG на этой карте есть, но фиксированные слай�
         │  HTTPS :443   Authorization: Bearer sk-bf-...
         ▼
  ┌────────────────────────── ВМ (Ubuntu, GPU passthrough) ──────────────────────────┐
- │  Caddy (:443, TLS corp CA | internal CA) — только /v1/* → bifrost:8080           │
+ │  Caddy (:443, TLS corp CA | internal CA) — только /v1/* → bifrost:8080     [gw]  │
  │        │                                                                         │
- │  Bifrost (:8080, localhost only) — virtual keys, лимиты, учёт, /metrics          │
+ │  Bifrost (:8080, localhost only) — virtual keys, лимиты, учёт, /metrics    [gw]  │
  │        │  provider "vllm" base_url=http://vllm:8000, ключ VLLM_API_KEY           │
  │        ├──────────────────────────────┐                                          │
- │  vLLM main (:8000, internal)   vLLM embed (:8001, internal, профиль embeddings)  │
+ │  vLLM main (:8000, +127.0.0.1) vLLM embed (:8001, internal, профиль embeddings)  │
  │  Qwen3.8-27B-FP8, util 0.85    Qwen3-Embedding-0.6B, util 0.06                   │
  │        └──────────────┬───────────────┘                                          │
  │                 RTX PRO 5000 72 ГБ                                               │
@@ -180,8 +205,9 @@ MIG на этой карте есть, но фиксированные слай�
  └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Docker-сети: `edge` (caddy ↔ bifrost) и `inference` (bifrost ↔ vllm). vLLM не
-публикует порты на хост. Bifrost публикует 8080 только на `127.0.0.1`.
+Docker-сети: `edge` (caddy ↔ bifrost) и `inference` (bifrost ↔ vllm). `[gw]` —
+сервисы compose-профиля `gateway`, второго этапа развёртывания (§3.7). vLLM и Bifrost
+публикуют порты только на `127.0.0.1` (8000 и 8080), наружу ВМ смотрит один 443.
 
 ## 5. Бюджет видеопамяти (72 ГБ)
 
@@ -226,9 +252,9 @@ vllm serve Qwen/Qwen3.8-27B-FP8
 
 | Переменная | Секрет | Назначение |
 |---|---|---|
-| `COMPOSE_PROFILES` | — | Доп. профили: `embeddings`, `monitoring` (читает и systemd-юнит) |
-| `LLM_HOSTNAME` | — | DNS-имя; клиентский `base_url = https://${LLM_HOSTNAME}/v1` |
-| `TLS_MODE` | — | `corp` — файлы в `deploy/certs/`; `internal` — CA Caddy (§3.4) |
+| `COMPOSE_PROFILES` | — | Профили сверх vLLM: `gateway` (второй этап, §3.7), `embeddings`, `monitoring` (читает и systemd-юнит) |
+| `LLM_HOSTNAME` | — | DNS-имя; клиентский `base_url = https://${LLM_HOSTNAME}/v1`. Нужен на втором этапе (§3.7) |
+| `TLS_MODE` | — | `corp` — файлы в `deploy/certs/`; `internal` — CA Caddy (§3.4). Нужен на втором этапе |
 | `MODEL_ID` | — | HF-идентификатор основной модели |
 | `MAX_MODEL_LEN` | — | Контекст основной модели (65536) |
 | `GPU_MEM_UTIL` | — | Доля VRAM основной модели (0.85); вместе с 0.06 эмбеддингов ≤ 0.92 (§3.6) |
@@ -254,8 +280,8 @@ vllm serve Qwen/Qwen3.8-27B-FP8
 ## 8. Безопасность
 
 - Наружу только 443; 22 — только для админов (решает DevOps).
-- vLLM недоступен извне даже внутри ВМ (без публикации портов) и требует внутренний
-  ключ.
+- vLLM публикует порт только на `127.0.0.1:8000` (смоук-тест и бенчмарк модели на
+  первом этапе, §3.7) и требует внутренний ключ; снаружи ВМ он недоступен.
 - Bifrost UI/API управления — только `127.0.0.1`, доступ через SSH-туннель, с
   admin-auth (логин/пароль).
 - Grafana — только `127.0.0.1:3000`, доступ через SSH-туннель; порт 3000 наружу не
@@ -271,9 +297,14 @@ vllm serve Qwen/Qwen3.8-27B-FP8
 
 ## 9. Эксплуатация
 
+Типовые операции завёрнуты в `Makefile` в корне репозитория (`make help` — список);
+он вызывает те же скрипты и `docker compose`, ничего своего не делает.
+
 | Операция | Действие |
 |---|---|
-| Установка | `sudo scripts/install_host.sh` (драйвер, Docker, Toolkit, uv, NTP) → перезагрузка → `scripts/preflight.sh` → `sudo scripts/install.sh --hostname ... --tls corp\|internal` (`.env` с генерацией секретов, проверка сертификата, предзагрузка весов, systemd, запуск, проверка 401/404 через 443) |
+| Установка, этап 1 (модель) | `make host` (драйвер, Docker, Toolkit, uv, NTP) → перезагрузка → `make preflight` → `make model` = `install.sh --stage model` (`.env` с генерацией секретов, предзагрузка весов, systemd, запуск, проверка 401 и ответа модели на `127.0.0.1:8000`) |
+| Установка, этап 2 (внешний доступ) | `make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=corp\|internal` = `install.sh --stage gateway` (проверка сертификата, профиль `edge`, запуск Caddy и Bifrost, проверка 401/404 через 443) |
+| Проверка модели | `make smoke-model` — `smoke_test.py --direct` напрямую к vLLM (без TLS и gateway); после этапа 2 — `make smoke KEY=sk-bf-...` через 443 |
 | Первый запуск / смена модели | Сначала предзагрузить веса в volume `hf-cache` отдельной командой, затем `up -d`: иначе скачивание ~30 ГБ может не уложиться в `start_period` healthcheck vLLM |
 | Запуск / остановка | `docker compose up -d` / `down`; unit systemd (`deploy/systemd/`) для автозапуска |
 | Смена модели | `MODEL_ID` в `.env`, `docker compose up -d vllm`; алиас `default` сохраняется |
@@ -281,7 +312,7 @@ vllm serve Qwen/Qwen3.8-27B-FP8
 | Отзыв ключа | `scripts/keys.py revoke <id>` (деактивация) |
 | Обновление vLLM | Изменить тег образа, прогнать `scripts/smoke_test.py`, откатить при регрессии |
 | Диагностика | Grafana; `docker compose logs vllm`; `nvidia-smi` |
-| Бенчмарк | `scripts/bench.sh` — `vllm bench serve` внутри контейнера против vLLM напрямую (без TLS и gateway): фиксируем TTFT и throughput модели после установки |
+| Бенчмарк | `make bench` (`scripts/bench.sh`) — `vllm bench serve` внутри контейнера против vLLM напрямую (без TLS и gateway): фиксируем TTFT и throughput модели после первого этапа |
 
 ## 10. Требования к ВМ и чек-лист подготовки
 
@@ -321,6 +352,7 @@ Face, резервное копирование, требования к ВМ.
 LLM/
 ├── CLAUDE.md                 правила проекта для агентов
 ├── README.md                 быстрый старт и ссылки
+├── Makefile                  однострочные команды развёртывания и эксплуатации
 ├── docs/
 │   ├── design.md             этот документ
 │   ├── devops-request.md     заявка DevOps
@@ -333,7 +365,7 @@ LLM/
 │   ├── monitoring/           prometheus.yml, grafana provisioning + dashboards
 │   └── systemd/              llm-stack.service (автозапуск)
 ├── scripts/                  uv-проект: install_host.sh, install.sh, preflight.sh,
-│                             smoke_test.py, keys.py, bench.sh,
+│                             smoke_test.py, keys.py, bench.sh, with_env.sh,
 │                             api_errors.py (общий разбор ошибок API), tests/
 └── .claude/agents/           infra-engineer, scripts-engineer, reviewer
 ```
@@ -346,11 +378,15 @@ LLM/
    валиден; `reviewer` не находит замечаний по безопасности (порты, секреты, пины).
 3. **Скрипты** (агент `scripts-engineer`) → проверка: pytest на `keys.py` и парсинг
    `smoke_test.py`; ruff/mypy чисто.
-4. **Установка на ВМ** (`install_host.sh`, `install.sh`) → проверка: `preflight.sh` зелёный; vLLM стартует, лог
-   показывает ёмкость KV-кеша; `smoke_test.py` проходит текст + картинку + JSON-схему
-   + tool call через HTTPS с ключом Bifrost; запрос без ключа и с неверным ключом
-   получает 401/403; `/api/*`, `/metrics`, `/` через 443 — 404; ключ с малым лимитом
-   получает 429 при превышении; ключ переживает `docker compose restart bifrost`.
+4. **Установка на ВМ, этап 1 — модель** (`install_host.sh`, `install.sh --stage model`)
+   → проверка: `preflight.sh` зелёный; vLLM стартует, лог показывает ёмкость KV-кеша;
+   `smoke_test.py --direct` проходит текст + картинку + JSON-схему + tool call на
+   `127.0.0.1:8000`; запрос без ключа получает 401.
+   **Этап 2 — внешний доступ** (`install.sh --stage gateway`, после DNS-имени и
+   сертификата от DevOps) → проверка: `smoke_test.py` проходит те же проверки через
+   HTTPS с ключом Bifrost; запрос без ключа и с неверным ключом получает 401/403;
+   `/api/*`, `/metrics`, `/` через 443 — 404; ключ с малым лимитом получает 429 при
+   превышении; ключ переживает `docker compose restart bifrost`.
 5. **Бенчмарк и тюнинг** → проверка: `vllm bench serve` фиксирует TTFT/throughput при
    8 параллельных запросах; при нехватке KV — `--kv-cache-dtype fp8`.
 6. **Передача** → runbook, дашборды Grafana, выданные ключи, бэкап `bifrost-data`.

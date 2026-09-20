@@ -10,6 +10,7 @@ scrape_configs:
 
   - job_name: bifrost
     static_configs:
+      # До второго этапа (профиль gateway) Bifrost нет — цель будет down, это ожидаемо.
       - targets: ["bifrost:8080"]
 
   - job_name: dcgm

@@ -1,6 +1,8 @@
 # Стек LLM-сервиса: docs/design.md §4 (архитектура), §6 (параметры vLLM), §8 (безопасность).
-# Все переменные обязательны (${VAR:?}): compose интерполирует и сервисы выключенных
+# Переменные обязательны (${VAR:?}): compose интерполирует и сервисы выключенных
 # профилей, поэтому пустой пароль Grafana иначе молча превратился бы в admin/admin.
+# Исключение — LLM_HOSTNAME и TLS_MODE: на первом этапе развёртывания (§3.7) Caddy не
+# запускается и значений ещё нет; их проверяет install.sh при включении профиля gateway.
 
 # Фиксированное имя проекта: имена volumes (llm_bifrost-data и т. д.) не зависят от
 # имени каталога — на них ссылаются бэкап и runbook.
@@ -36,6 +38,8 @@ x-vllm: &vllm
 services:
   caddy:
     image: caddy:2.11.4
+    # Второй этап развёртывания: внешний доступ (§3.7).
+    profiles: [gateway]
     restart: unless-stopped
     depends_on:
       bifrost:
@@ -44,8 +48,8 @@ services:
       # Единственный порт, доступный снаружи ВМ.
       - "443:443/tcp"
     environment:
-      LLM_HOSTNAME: ${LLM_HOSTNAME:?}
-      TLS_MODE: ${TLS_MODE:?}
+      LLM_HOSTNAME: ${LLM_HOSTNAME:-}
+      TLS_MODE: ${TLS_MODE:-}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Каталогом, а не файлами: в режиме internal файлов сертификата нет, и bind файла
@@ -66,6 +70,7 @@ services:
 
   bifrost:
     image: maximhq/bifrost:v2.2.0
+    profiles: [gateway]
     restart: unless-stopped
     depends_on:
       vllm:
@@ -96,6 +101,10 @@ services:
 
   vllm:
     <<: *vllm
+    ports:
+      # Только loopback: смоук-тест и бенчмарк модели до появления gateway (§3.7, §8).
+      # Наружу ВМ порт не выставляется, запрос всё равно требует VLLM_API_KEY.
+      - "127.0.0.1:8000:8000"
     command:
       - ${MODEL_ID:?}
       - --served-model-name

@@ -1,4 +1,8 @@
-"""Смоук-тест клиентского API LLM-сервиса (Caddy → Bifrost → vLLM), docs/design.md §9, §12.
+"""Смоук-тест API LLM-сервиса (Caddy → Bifrost → vLLM), docs/design.md §9, §12.
+
+С флагом ``--direct`` проверяется только модель, напрямую на ``http://127.0.0.1:8000/v1``
+с ключом ``VLLM_API_KEY``: это первый этап развёртывания, когда Caddy и Bifrost ещё не
+подняты (§3.7). Проверка закрытых путей при этом пропускается — её обеспечивает Caddy.
 
 Проверки через клиентский эндпоинт с ключом Bifrost, модель ``default``:
 текст; ``chat_template_kwargs: {"enable_thinking": false}`` доходит до vLLM через Bifrost
@@ -15,9 +19,10 @@ Qwen3.8 (§3.1): мышление включено по умолчанию с ``
 ``high`` даёт HTTP 500. Поэтому все запросы явно отправляются с ``reasoning_effort=low``.
 
 Окружение:
-    LLM_BASE_URL  клиентский эндпоинт; по умолчанию ``https://${LLM_HOSTNAME}/v1``.
+    LLM_BASE_URL  проверяемый эндпоинт; по умолчанию ``https://${LLM_HOSTNAME}/v1``,
+                  а с ``--direct`` — ``http://127.0.0.1:8000/v1``.
     LLM_HOSTNAME  DNS-имя сервиса, если LLM_BASE_URL не задан.
-    LLM_API_KEY   ключ Bifrost ``sk-bf-...`` (обязателен).
+    LLM_API_KEY   ключ Bifrost ``sk-bf-...``; с ``--direct`` — VLLM_API_KEY (обязателен).
     LLM_CA_CERT   путь к PEM корпоративного CA для проверки TLS. Для сертификата
                   корпоративного CA фактически обязателен: httpx доверяет только набору
                   certifi, а не системному хранилищу ОС. Альтернатива — SSL_CERT_FILE.
@@ -53,6 +58,8 @@ REQUEST_TIMEOUT_S = 300.0
 MAX_TOKENS = 2048
 TEXT_PROMPT = "Сколько будет 2+2? Ответь только числом."
 INVALID_API_KEY = "sk-bf-invalid-smoke-test"
+# Порт vLLM на ВМ открыт только на loopback (§3.7, §8).
+DIRECT_BASE_URL = "http://127.0.0.1:8000/v1"
 # Через 443 Caddy отдаёт только /v1/*; остальное, включая API управления Bifrost, — 404.
 CLOSED_PATHS = ("/api/governance/virtual-keys", "/metrics", "/")
 # vLLM отдаёт рассуждения в reasoning_content (старые версии) или reasoning (новые).
@@ -105,17 +112,22 @@ class Settings:
     ca_cert: str | None
 
 
-def load_settings(env: Mapping[str, str]) -> Settings:
-    """Прочитать настройки из переменных окружения."""
+def load_settings(env: Mapping[str, str], *, direct: bool = False) -> Settings:
+    """Прочитать настройки из переменных окружения; ``direct`` — проверка vLLM напрямую."""
     base_url = env.get("LLM_BASE_URL", "").strip()
     if not base_url:
         hostname = env.get("LLM_HOSTNAME", "").strip()
-        if not hostname:
+        if direct:
+            base_url = DIRECT_BASE_URL
+        elif hostname:
+            base_url = f"https://{hostname}/v1"
+        else:
             raise SmokeTestError("задайте LLM_BASE_URL или LLM_HOSTNAME")
-        base_url = f"https://{hostname}/v1"
     api_key = env.get("LLM_API_KEY", "").strip()
     if not api_key:
-        raise SmokeTestError("задайте LLM_API_KEY (ключ Bifrost sk-bf-...)")
+        raise SmokeTestError(
+            "задайте LLM_API_KEY (ключ Bifrost sk-bf-..., с --direct — VLLM_API_KEY)"
+        )
     ca_cert = env.get("LLM_CA_CERT", "").strip() or None
     if ca_cert and not os.path.isfile(ca_cert):
         raise SmokeTestError(f"LLM_CA_CERT указывает на несуществующий файл: {ca_cert}")
@@ -378,7 +390,8 @@ def check_key_rejected(client: httpx.Client, api_key: str | None) -> str:
     if response.is_success:
         raise SmokeTestError(
             f"запрос принят (HTTP {response.status_code}): проверьте "
-            "client.enforce_auth_on_inference в deploy/bifrost/config.json"
+            "client.enforce_auth_on_inference в deploy/bifrost/config.json "
+            "(с --direct — VLLM_API_KEY в окружении контейнера vllm)"
         )
     raise SmokeTestError(f"ожидался 401/403, получено: {describe_error(response)}")
 
@@ -426,10 +439,34 @@ def run_checks(checks: Sequence[tuple[str, Callable[[], str]]]) -> bool:
     return ok
 
 
+def build_checks(
+    client: httpx.Client, root: str, *, direct: bool
+) -> list[tuple[str, Callable[[], str]]]:
+    """Собрать список проверок; с ``direct`` — без проверки путей, закрытых Caddy."""
+    checks: list[tuple[str, Callable[[], str]]] = [
+        ("text", lambda: check_text(client)),
+        ("thinking_disabled", lambda: check_thinking_disabled(client)),
+        ("image", lambda: check_image(client)),
+        ("json_schema", lambda: check_json_schema(client)),
+        ("tool_call", lambda: check_tool_call(client)),
+        ("no_key", lambda: check_key_rejected(client, None)),
+        ("invalid_key", lambda: check_key_rejected(client, INVALID_API_KEY)),
+    ]
+    if not direct:
+        checks.append(("closed_paths", lambda: check_closed_paths(client, root)))
+    return checks
+
+
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     """Разобрать аргументы командной строки."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--direct",
+        action="store_true",
+        help="проверять vLLM напрямую (первый этап развёртывания, без Caddy и Bifrost): "
+        f"эндпоинт по умолчанию {DIRECT_BASE_URL}, ключ — VLLM_API_KEY",
     )
     parser.add_argument(
         "--check-rate-limit",
@@ -448,12 +485,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
     try:
-        settings = load_settings(os.environ)
+        settings = load_settings(os.environ, direct=args.direct)
     except SmokeTestError as exc:
         logger.error("конфигурация: %s", exc)
         return 1
 
-    logger.info("эндпоинт: %s, модель: %s", settings.base_url, MODEL)
+    mode = "vLLM напрямую" if args.direct else "через Caddy и Bifrost"
+    logger.info("эндпоинт: %s (%s), модель: %s", settings.base_url, mode, MODEL)
     try:
         client = build_client(settings)
     except ssl.SSLError as exc:
@@ -466,16 +504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             attempts: int = args.check_rate_limit
             checks = [("rate-limit", lambda: check_rate_limit(client, attempts))]
         else:
-            checks = [
-                ("text", lambda: check_text(client)),
-                ("thinking_disabled", lambda: check_thinking_disabled(client)),
-                ("image", lambda: check_image(client)),
-                ("json_schema", lambda: check_json_schema(client)),
-                ("tool_call", lambda: check_tool_call(client)),
-                ("no_key", lambda: check_key_rejected(client, None)),
-                ("invalid_key", lambda: check_key_rejected(client, INVALID_API_KEY)),
-                ("closed_paths", lambda: check_closed_paths(client, root)),
-            ]
+            checks = build_checks(client, root, direct=args.direct)
         ok = run_checks(checks)
     print("ИТОГ: PASS" if ok else "ИТОГ: FAIL")
     return 0 if ok else 1
