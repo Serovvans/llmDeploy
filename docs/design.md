@@ -326,11 +326,14 @@ NVIDIA Container Toolkit не зависит от выпуска. Связка �
 проверялась вживую — проверяем на ВМ через `make preflight`.
 
 Подготовку автоматизирует `scripts/install_host.sh` (идемпотентный, запускается от root):
-драйвер `nvidia-driver-580-server-open` (ветка закреплена именем пакета), Docker Engine из
+драйвер `nvidia-driver-580-server-open`, если драйвера нет; уже установленный драйвер
+ветки ≥ 580 с open kernel modules (например `nvidia-driver-595-open`) принимается как есть,
+Docker Engine из
 `download.docker.com` (проверяется версия ≥ 27; патчи безопасности приходят через apt),
 NVIDIA Container Toolkit из `nvidia.github.io` с `nvidia-ctk runtime configure`, `uv`
 закреплённой версии в `/usr/local/bin`, включение NTP. Чужой драйвер NVIDIA или пакет
-`docker.io` скрипт не удаляет — останавливается и говорит, что сделать.
+`docker.io` скрипт не удаляет — останавливается и говорит, что сделать (чужой = ветка
+ниже 580 или проприетарный модуль).
 
 Чек-лист (`scripts/preflight.sh` автоматизирует проверки):
 1. `nvidia-smi` видит RTX PRO 5000, 72 ГБ; драйвер ≥ 580, ветка `-open`

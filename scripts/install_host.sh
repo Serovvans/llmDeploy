@@ -6,13 +6,15 @@
 #   sudo bash scripts/install_host.sh
 #
 # Идемпотентен: уже установленные компоненты пропускаются, повторный запуск безопасен.
-# Чужой драйвер NVIDIA или пакет docker.io не удаляет — останавливается и говорит, что
-# сделать. После установки драйвера нужна перезагрузка; затем — sudo scripts/preflight.sh.
+# Драйвер NVIDIA старой ветки или без open kernel modules, а также пакет docker.io не
+# удаляет — останавливается и говорит, что сделать. После установки драйвера нужна
+# перезагрузка; затем — sudo scripts/preflight.sh.
 set -euo pipefail
 
 readonly SUPPORTED_UBUNTU=("22.04" "24.04" "26.04")
-readonly DRIVER_BRANCH=580
-readonly DRIVER_PACKAGE="nvidia-driver-${DRIVER_BRANCH}-server-open"
+# Минимум для Blackwell; этой же веткой ставим драйвер, если его ещё нет.
+readonly MIN_DRIVER_BRANCH=580
+readonly DRIVER_PACKAGE="nvidia-driver-${MIN_DRIVER_BRANCH}-server-open"
 readonly MIN_DOCKER_MAJOR=27
 readonly UV_VERSION="0.12.15"
 readonly DOCKER_KEYRING="/etc/apt/keyrings/docker.asc"
@@ -56,22 +58,34 @@ install_base_packages() {
   apt_install ca-certificates curl gnupg openssl
 }
 
+# Годится любой драйвер ветки >= MIN_DRIVER_BRANCH с open kernel modules: ветка и вариант
+# читаются из имени пакета nvidia-driver-<ветка>[-server][-open].
+driver_suitable() {
+  local pkg="$1" branch
+  [[ "$pkg" == *-open ]] || return 1
+  branch="${pkg#nvidia-driver-}"
+  branch="${branch%%-*}"
+  [[ "$branch" =~ ^[0-9]+$ && "$branch" -ge "$MIN_DRIVER_BRANCH" ]]
+}
+
 install_driver() {
-  if is_installed "$DRIVER_PACKAGE"; then
+  local installed=() pkg
+  mapfile -t installed < <(dpkg-query -W -f='${Package} ${Status}\n' 'nvidia-driver-*' 2>/dev/null |
+    awk '/install ok installed/ { print $1 }')
+
+  for pkg in "${installed[@]}"; do
+    driver_suitable "$pkg" || continue
     if grep -q "Open Kernel Module" /proc/driver/nvidia/version 2>/dev/null; then
-      log "драйвер ${DRIVER_PACKAGE} установлен и загружен — пропуск"
+      log "драйвер ${pkg} установлен и загружен — пропуск"
     else
-      log "драйвер ${DRIVER_PACKAGE} установлен, но модуль не загружен — нужна перезагрузка"
+      log "драйвер ${pkg} установлен, но модуль не загружен — нужна перезагрузка"
       reboot_required=1
     fi
     return
-  fi
+  done
 
-  local other
-  other=$(dpkg-query -W -f='${Package} ${Status}\n' 'nvidia-driver-*' 2>/dev/null |
-    awk '/install ok installed/ { print $1 }' | paste -sd' ' -) || true
-  [[ -z "$other" ]] ||
-    die "уже установлен другой драйвер NVIDIA: ${other}; Blackwell требует ветку ${DRIVER_BRANCH} с open kernel modules" \
+  [[ "${#installed[@]}" -eq 0 ]] ||
+    die "установлен драйвер NVIDIA ${installed[*]}; Blackwell требует ветку >= ${MIN_DRIVER_BRANCH} с open kernel modules" \
       "sudo apt purge 'nvidia-driver-*' 'libnvidia-*' && sudo apt autoremove, затем повторить скрипт"
 
   log "драйвер ${DRIVER_PACKAGE}"

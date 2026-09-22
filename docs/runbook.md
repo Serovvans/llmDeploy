@@ -103,15 +103,17 @@ make host        # = sudo bash scripts/install_host.sh
 ```
 
 Скрипт ставит:
-- драйвер `nvidia-driver-580-server-open`;
+- драйвер `nvidia-driver-580-server-open` (если драйвера нет; уже установленный драйвер
+  ветки ≥ 580 с open kernel modules скрипт оставляет как есть);
 - Docker Engine и compose-плагин из `download.docker.com`, проверяет, что версия ≥ 27;
 - NVIDIA Container Toolkit из `nvidia.github.io` и регистрирует runtime `nvidia` в Docker;
 - `uv` закреплённой версии в `/usr/local/bin`;
 - синхронизацию времени по NTP.
 
 Скрипт идемпотентен: установленные компоненты пропускаются, запускать повторно
-безопасно. Если в системе уже есть драйвер NVIDIA другой ветки или пакет `docker.io`,
-скрипт ничего не удаляет: он останавливается и выводит команду, которую нужно выполнить.
+безопасно. Если в системе уже есть драйвер NVIDIA ветки ниже 580 или без open kernel
+modules, либо пакет `docker.io`, скрипт ничего не удаляет: он останавливается и выводит
+команду, которую нужно выполнить.
 После установки драйвера скрипт напишет «НУЖНА ПЕРЕЗАГРУЗКА»: выполните `sudo reboot`.
 
 ### 2.2 Проверка готовности: `preflight.sh`
@@ -457,7 +459,7 @@ docker compose start bifrost
 | Симптом | Причина и действие |
 |---|---|
 | `up` падает: `required variable ... is missing` | Не заполнена переменная в `.env`; все, кроме `COMPOSE_PROFILES`, `LLM_HOSTNAME` и `TLS_MODE`, обязательны |
-| `install_host.sh`: «другой драйвер NVIDIA» или «конфликтующие пакеты» | Выполнить команду из «что делать» (удалить старый драйвер или `docker.io`), затем повторить скрипт |
+| `install_host.sh`: «установлен драйвер NVIDIA …» или «конфликтующие пакеты» | Выполнить команду из «что делать» (удалить старый драйвер или `docker.io`), затем повторить скрипт |
 | `install.sh`: ошибка сертификата (просрочен, не то имя, ключ не подходит) | Проверить пару файлов в `deploy/certs/`; если сертификата нет — `make gateway TLS_MODE=internal` (1.1) |
 | `install.sh`: «LLM_HOSTNAME не задан» на этапе gateway | Передать `make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=...` (2.6) |
 | caddy не стартует: `File to import not found: tls-...` | Неверный `TLS_MODE` в `.env`; допустимы `corp` и `internal` |
