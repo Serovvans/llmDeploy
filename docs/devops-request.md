@@ -77,7 +77,7 @@ localhost/docker-сети; Grafana и админ-UI — через SSH-тунн�
 `nvidia.github.io`, `astral.sh`/`github.com` (uv) и репозиториям Ubuntu. Если ставить
 пакеты из интернета нельзя, требования ниже выполняет администратор ВМ.
 
-- Ubuntu 24.04 LTS (допустимо 22.04).
+- Ubuntu 24.04 LTS (допустимо 22.04 и 26.04).
 - Драйвер NVIDIA ветки 580, open kernel modules: `nvidia-driver-580-server-open`.
   Для Blackwell проприетарный модуль не поддерживается.
 - Docker Engine ≥ 27, NVIDIA Container Toolkit, автозапуск docker.

@@ -2,7 +2,7 @@
 # Подготовка ВМ к установке сервиса (docs/design.md §10): драйвер NVIDIA, Docker Engine,
 # NVIDIA Container Toolkit, uv, синхронизация времени.
 #
-# Запуск на ВМ с Ubuntu 22.04/24.04:
+# Запуск на ВМ с Ubuntu 22.04/24.04/26.04:
 #   sudo bash scripts/install_host.sh
 #
 # Идемпотентен: уже установленные компоненты пропускаются, повторный запуск безопасен.
@@ -10,6 +10,7 @@
 # сделать. После установки драйвера нужна перезагрузка; затем — sudo scripts/preflight.sh.
 set -euo pipefail
 
+readonly SUPPORTED_UBUNTU=("22.04" "24.04" "26.04")
 readonly DRIVER_BRANCH=580
 readonly DRIVER_PACKAGE="nvidia-driver-${DRIVER_BRANCH}-server-open"
 readonly MIN_DOCKER_MAJOR=27
@@ -43,8 +44,9 @@ check_system() {
   [[ "$EUID" -eq 0 ]] || die "нужны права root" "sudo bash scripts/install_host.sh"
   # shellcheck source=/dev/null
   source /etc/os-release
-  [[ "${ID:-}" == "ubuntu" && ("${VERSION_ID:-}" == "22.04" || "${VERSION_ID:-}" == "24.04") ]] ||
-    die "поддерживаются Ubuntu 22.04 и 24.04, найдено ${PRETTY_NAME:-неизвестно}" \
+  local supported=" ${SUPPORTED_UBUNTU[*]} "
+  [[ "${ID:-}" == "ubuntu" && "$supported" == *" ${VERSION_ID:-} "* ]] ||
+    die "поддерживаются Ubuntu ${SUPPORTED_UBUNTU[*]}, найдено ${PRETTY_NAME:-неизвестно}" \
       "переустановить ВМ на Ubuntu 24.04 LTS (docs/design.md §10)"
 }
 
