@@ -3,6 +3,8 @@
 # профилей, поэтому пустой пароль Grafana иначе молча превратился бы в admin/admin.
 # Исключение — LLM_HOSTNAME и TLS_MODE: на первом этапе развёртывания (§3.7) Caddy не
 # запускается и значений ещё нет; их проверяет install.sh при включении профиля gateway.
+# То же с PORTAL_LLM_API_KEY: ключ портала выдаёт Bifrost, до второго этапа взять его
+# неоткуда. SITE_MODE пустым не бывает: без значения Caddy работает в режиме api.
 
 # Фиксированное имя проекта: имена volumes (llm_bifrost-data и т. д.) не зависят от
 # имени каталога — на них ссылаются бэкап и runbook.
@@ -50,6 +52,8 @@ services:
     environment:
       LLM_HOSTNAME: ${LLM_HOSTNAME:-}
       TLS_MODE: ${TLS_MODE:-}
+      # portal — третий этап (§3.8): /api/* и статика портала; иначе всё, кроме /v1/*, — 404.
+      SITE_MODE: ${SITE_MODE:-api}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Каталогом, а не файлами: в режиме internal файлов сертификата нет, и bind файла
@@ -227,12 +231,109 @@ services:
       retries: 3
       start_period: 30s
 
+  # Третий этап развёртывания: портал сотрудников (§3.8, docs/portal-design.md §3).
+  # portal-worker появится вместе с командой `portal worker` (этап 4 пайплайна): сейчас
+  # её нет в образе, и сервис уходил бы в бесконечный перезапуск.
+  portal-web:
+    build: ../portal/frontend
+    profiles: [portal]
+    restart: unless-stopped
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  portal-api:
+    build: ../portal/backend
+    profiles: [portal]
+    restart: unless-stopped
+    depends_on:
+      portal-db:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      PORTAL_DB_PASSWORD: ${PORTAL_DB_PASSWORD:?}
+      PORTAL_SECRET_KEY: ${PORTAL_SECRET_KEY:?}
+      PORTAL_LLM_API_KEY: ${PORTAL_LLM_API_KEY:-}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?}
+      # Та же переменная, с которой запущен vLLM: контекст модели портал берёт только из неё.
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:?}
+    volumes:
+      - portal-files:/data/files
+      # Каталогом, а не файлом: накладка config.override.yaml необязательна, и bind
+      # отсутствующего файла создал бы на его месте каталог.
+      - ./portal:/etc/portal:ro
+    networks:
+      - edge
+      - portal
+    healthcheck:
+      # curl и wget в образе нет; /healthz отвечает 503, если база недоступна.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  portal-db:
+    image: postgres:16.15-bookworm
+    profiles: [portal]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: portal
+      POSTGRES_DB: portal
+      POSTGRES_PASSWORD: ${PORTAL_DB_PASSWORD:?}
+    volumes:
+      - portal-db-data:/var/lib/postgresql/data
+    networks:
+      - portal
+    healthcheck:
+      # По TCP, а не через сокет: во время первой инициализации временный сервер слушает
+      # только сокет, и проверка через него объявила бы базу готовой раньше времени.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "portal", "-d", "portal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    profiles: [portal]
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?}
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - portal
+    healthcheck:
+      # В образе нет curl/wget, но есть bash с /dev/tcp; /readyz ключа не требует.
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 networks:
   edge:
   inference:
+  # internal: базе и Qdrant выход за пределы сети не нужен (docs/portal-design.md §8).
+  portal:
+    internal: true
 
 volumes:
   caddy-data:
   hf-cache:
   bifrost-data:
   prometheus-data:
+  portal-db-data:
+  qdrant-data:
+  portal-files:

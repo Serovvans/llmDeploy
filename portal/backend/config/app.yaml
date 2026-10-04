@@ -1,0 +1,61 @@
+# Параметры приложения (docs/portal-api.md §13.6). Секреты здесь не хранятся: они
+# приходят из окружения. Поверх этого каталога накладывается необязательный файл
+# /etc/portal/config.override.yaml (§13.5).
+
+server:
+  # Наибольшее тело запроса без файла.
+  json_body_max_bytes: 1048576
+
+database:
+  host: portal-db
+  port: 5432
+  name: portal
+  user: portal
+
+auth:
+  password:
+    min_length: 12
+    # Защита от растраты процессора на хеширование сверхдлинной строки.
+    max_length: 128
+    # Пароли не короче 12 символов из списка SecLists (лицензия MIT),
+    # Passwords/Common-Credentials/xato-net-10-million-passwords-100000.txt, в нижнем регистре.
+    common_passwords_file: common-passwords.txt
+    # Argon2id: значения профиля RFC 9106 «для ограниченной памяти».
+    argon2:
+      time_cost: 3
+      memory_cost_kib: 65536
+      parallelism: 4
+  session:
+    absolute_ttl_hours: 12
+    idle_ttl_minutes: 60
+    login_step_ttl_minutes: 20
+    stream_recheck_seconds: 3
+  lockout:
+    max_failures: 5
+    base_seconds: 60
+    max_seconds: 3600
+    # Обязан быть больше max_seconds, иначе нарастание блокировки начиналось бы заново.
+    reset_after_minutes: 1440
+  ip_limit:
+    max_failures: 20
+    window_seconds: 300
+  totp:
+    window_steps: 1
+    issuer: Портал сотрудников
+    backup_codes_count: 10
+
+dialogs:
+  message_max_chars: 32000
+
+chat:
+  attachment_max_bytes: 20971520
+  attachment_max_pages: 200
+  attachment_extensions: [".jpg", ".jpeg", ".png", ".pdf", ".docx", ".txt", ".md"]
+  max_attachments: 10
+
+sql:
+  dialects:
+    - id: postgres
+      title: PostgreSQL + PostGIS
+  default_dialect: postgres
+  schema_max_chars: 50000

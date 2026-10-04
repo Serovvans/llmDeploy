@@ -1,10 +1,15 @@
-# Точка входа: TLS и только OpenAI-совместимый API наружу (§3.4).
+# Точка входа: TLS, OpenAI-совместимый API и, при SITE_MODE=portal, портал (§3.4, §3.8).
 # Режим TLS — TLS_MODE: corp (сертификат корпоративного CA) или internal (собственный CA
 # Caddy). {$VAR} подставляется до разбора файла, поэтому import выбирает сниппет по
 # значению переменной; неизвестный режим — ошибка старта «File to import not found».
+# Тем же способом SITE_MODE выбирает, что отдаётся помимо /v1/*: api или portal.
 {
 	# Корень internal CA в контейнере устанавливать некуда; клиентам он раздаётся вручную.
 	skip_install_trust
+	# Клиент, пришедший по IP, не передаёт SNI, а локальный адрес соединения внутри
+	# контейнера — адрес docker-сети: без этой опции Caddy не подберёт сертификат
+	# (docs/portal-design.md §3.1). Для доменного имени опция безвредна.
+	default_sni {$LLM_HOSTNAME}
 }
 
 (tls-corp) {
@@ -16,6 +21,67 @@
 	tls internal
 }
 
+(site-api) {
+	handle {
+		respond 404
+	}
+}
+
+(portal-encode) {
+	# Сжатие ответов портала (docs/portal-design.md §3.2). Типы перечислены явно: в
+	# список по умолчанию входит text/*, а с ним и поток text/event-stream — его
+	# сжимать нельзя, события должны уходить сразу. В /v1/* сниппет не подключается.
+	encode zstd gzip {
+		match {
+			header Content-Type text/html*
+			header Content-Type text/css*
+			header Content-Type text/javascript*
+			header Content-Type text/plain*
+			header Content-Type application/json*
+		}
+	}
+}
+
+(site-portal) {
+	# После проброса порта сайт открыт интернету (docs/portal-design.md §3.2).
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		# 'unsafe-inline' только для стилей: @skbkontur/react-ui вставляет их во время
+		# работы. base-uri, form-action и frame-ancestors заданы явно: default-src на
+		# них не распространяется.
+		Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		# Для браузеров, которые не понимают frame-ancestors.
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+
+	# Наружу уходит только /api/*: /healthz, /docs и /openapi.json бэкенда попадают в
+	# portal-web и получают 404.
+	handle /api/* {
+		import portal-encode
+		# Внешняя граница: заведомо огромное тело не доходит до бэкенда. Предел — чуть
+		# выше наибольшего лимита файла (50 МБ, docs/portal-api.md §13.6); точные
+		# пределы по маршрутам держит бэкенд. Если лимиты файлов в YAML бэкенда
+		# поднимают — поднять и здесь, иначе загрузку оборвёт Caddy.
+		request_body {
+			max_size 64MB
+		}
+		reverse_proxy portal-api:8000 {
+			# Бэкенд считает адресом клиента последний элемент X-Forwarded-For
+			# (ограничение перебора). Заголовок заменяется целиком, поэтому присланное
+			# клиентом значение до бэкенда не доходит, даже если позже появятся
+			# trusted_proxies.
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	handle {
+		import portal-encode
+		reverse_proxy portal-web:8080
+	}
+}
+
 {$LLM_HOSTNAME} {
 	import tls-{$TLS_MODE}
 
@@ -24,7 +90,5 @@
 		reverse_proxy bifrost:8080
 	}
 
-	handle {
-		respond 404
-	}
+	import site-{$SITE_MODE}
 }

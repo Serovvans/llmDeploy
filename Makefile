@@ -15,6 +15,7 @@ SHELL := /bin/bash
 ROOT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 DEPLOY_DIR := $(ROOT_DIR)/deploy
 SCRIPTS_DIR := $(ROOT_DIR)/scripts
+PORTAL_DIR := $(ROOT_DIR)/portal
 COMPOSE_FILE := $(DEPLOY_DIR)/docker-compose.yml
 
 SUDO := $(shell [ "$$(id -u)" -eq 0 ] || echo sudo)
@@ -117,12 +118,21 @@ preload: ## Докачать веса MODEL_ID в volume hf-cache (после с
 
 # --- разработка (локально, без GPU) ---
 
-check: ## Локальные проверки: docker compose config, ruff, mypy, pytest, shellcheck
+# Запускать без sudo: тесты бэкенда портала поднимают PostgreSQL, а он от root не стартует.
+# Первому запуску нужна сеть (uv sync, npm ci).
+check: ## Локальные проверки: docker compose config, ruff, mypy, pytest, shellcheck, портал
 	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
 		sed -e 's/^\([A-Za-z_]*\)=$$/\1=placeholder/' $(DEPLOY_DIR)/.env.example >"$$tmp"; \
-		for profiles in "" "gateway" "gateway,embeddings,monitoring"; do \
+		for profiles in "" "gateway" "gateway,embeddings,monitoring" \
+				"gateway,embeddings,portal" "gateway,embeddings,monitoring,portal"; do \
 			echo "==> docker compose config COMPOSE_PROFILES=$$profiles"; \
 			COMPOSE_PROFILES="$$profiles" docker compose -f $(COMPOSE_FILE) --env-file "$$tmp" config -q || exit 1; \
-		done
+		done; \
+		echo "==> docker compose config portal/dev (стенд)"; \
+		sed -e 's/^\([A-Za-z_]*\)=$$/\1=placeholder/' $(PORTAL_DIR)/dev/.env.example >"$$tmp"; \
+		docker compose -f $(PORTAL_DIR)/dev/docker-compose.yml --env-file "$$tmp" config -q
 	cd $(SCRIPTS_DIR) && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest -q
 	cd $(SCRIPTS_DIR) && bash -n *.sh && uvx --from shellcheck-py shellcheck *.sh
+	cd $(PORTAL_DIR)/backend && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest -q
+	cd $(PORTAL_DIR)/dev && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest -q
+	cd $(PORTAL_DIR)/frontend && npm ci && npm run check

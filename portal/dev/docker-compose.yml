@@ -1,0 +1,142 @@
+# Стенд портала без GPU (docs/portal-design.md §9): тот же набор сервисов, что в профиле
+# portal на ВМ, но вместо Bifrost и vLLM — заглушка под именем bifrost
+# (docs/portal-api.md §12.2). Открывается как https://localhost:8443: cookie сессии
+# всегда Secure, а сертификат выпускает собственный CA Caddy (браузер предупредит).
+# Определения сервисов повторяют deploy/docker-compose.yml: при правке там — править и здесь.
+
+name: portal-dev
+
+services:
+  caddy:
+    image: caddy:2.11.4
+    restart: unless-stopped
+    depends_on:
+      bifrost:
+        condition: service_healthy
+      portal-api:
+        condition: service_healthy
+      portal-web:
+        condition: service_healthy
+    ports:
+      # Только loopback и не 443: стенд не должен быть виден из сети разработчика.
+      - "127.0.0.1:8443:443/tcp"
+    environment:
+      LLM_HOSTNAME: localhost
+      TLS_MODE: internal
+      SITE_MODE: portal
+    volumes:
+      # Рабочий Caddyfile, а не копия: стенд проверяет те же маршруты и заголовки, что на ВМ.
+      - ../../deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Корень CA переживает пересоздание контейнера: исключение в браузере не слетает.
+      - caddy-data:/data
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  bifrost:
+    build: .
+    restart: unless-stopped
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  portal-web:
+    build: ../frontend
+    restart: unless-stopped
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  portal-api:
+    build: ../backend
+    restart: unless-stopped
+    depends_on:
+      portal-db:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      PORTAL_DB_PASSWORD: ${PORTAL_DB_PASSWORD:?}
+      PORTAL_SECRET_KEY: ${PORTAL_SECRET_KEY:?}
+      PORTAL_LLM_API_KEY: ${PORTAL_LLM_API_KEY:?}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?}
+      # Контекст настоящей модели (docs/portal-api.md §13.5).
+      MAX_MODEL_LEN: "65536"
+    volumes:
+      - portal-files:/data/files
+      - ./config.override.yaml:/etc/portal/config.override.yaml:ro
+    networks:
+      - edge
+      - portal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  portal-db:
+    image: postgres:16.15-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: portal
+      POSTGRES_DB: portal
+      POSTGRES_PASSWORD: ${PORTAL_DB_PASSWORD:?}
+    volumes:
+      - portal-db-data:/var/lib/postgresql/data
+    networks:
+      - portal
+    healthcheck:
+      # По TCP: во время первой инициализации временный сервер слушает только сокет.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "portal", "-d", "portal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?}
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - portal
+    healthcheck:
+      # В образе нет curl/wget, но есть bash с /dev/tcp.
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  edge:
+  portal:
+    internal: true
+
+volumes:
+  caddy-data:
+  portal-db-data:
+  qdrant-data:
+  portal-files:

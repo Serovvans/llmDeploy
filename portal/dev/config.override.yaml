@@ -1,0 +1,22 @@
+# Накладка конфигурации стенда (docs/portal-api.md §13.5): монтируется в portal-api как
+# /etc/portal/config.override.yaml. Только для стенда — на ВМ эти значения недопустимы.
+
+auth:
+  # Сквозные тесты проверяют блокировку логина и не могут ждать минуту и час.
+  lockout:
+    base_seconds: 2
+    max_seconds: 8
+    reset_after_minutes: 1
+  # Все тесты приходят с одного адреса: рабочий лимит закрыл бы вход всему прогону.
+  ip_limit:
+    max_failures: 1000
+    window_seconds: 60
+  # Проверка истечения незавершённого входа.
+  session:
+    login_step_ttl_minutes: 5
+  password:
+    # Рабочие параметры Argon2 делают каждый вход в тестах заметно медленнее.
+    argon2:
+      time_cost: 1
+      memory_cost_kib: 8192
+      parallelism: 1

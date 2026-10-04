@@ -1,0 +1,21 @@
+.root {
+  min-height: 320px;
+  height: 100%;
+}
+
+.content {
+  max-width: 420px;
+  padding: 24px;
+  text-align: center;
+}
+
+.title {
+  margin-bottom: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.action {
+  margin-top: 20px;
+}

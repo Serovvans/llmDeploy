@@ -1,0 +1,19 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.links {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.help {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}

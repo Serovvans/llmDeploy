@@ -1,0 +1,46 @@
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--p-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.info {
+  background: var(--p-surface-2);
+}
+
+.info .icon {
+  color: var(--p-text);
+}
+
+.warning {
+  background: var(--p-warning-bg);
+}
+
+.warning .icon {
+  color: var(--p-warning-icon);
+}
+
+.error {
+  background: var(--p-error-bg);
+}
+
+.error .icon {
+  color: var(--p-error-text);
+}
+
+.icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 20px;
+}
+
+.text {
+  flex: 1;
+  min-width: 0;
+}

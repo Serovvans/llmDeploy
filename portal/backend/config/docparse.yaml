@@ -1,0 +1,102 @@
+# Разбор документов: лимиты и шаблоны (docs/portal-api.md §7.3). Шаблон задаёт либо
+# список fields, либо free_form: true. Новый шаблон добавляется без правки кода.
+
+docparse:
+  document_max_bytes: 52428800
+  max_pages: 40
+  document_extensions: [".pdf", ".docx", ".jpg", ".jpeg", ".png"]
+  templates:
+    - id: egrn
+      title: Выписка ЕГРН
+      description: Сведения об объекте недвижимости и правах на него
+      fields:
+        - name: cadastral_number
+          title: Кадастровый номер
+          description: Номер вида 77:01:0004012:345
+        - name: object_type
+          title: Вид объекта
+          description: Земельный участок, здание, помещение, сооружение и так далее
+        - name: address
+          title: Адрес
+          description: Адрес или описание местоположения объекта
+        - name: area
+          title: Площадь
+          description: Площадь с единицей измерения
+        - name: land_category
+          title: Категория земель
+          description: Только для земельного участка
+        - name: permitted_use
+          title: Вид разрешённого использования
+          description: Только для земельного участка
+        - name: cadastral_value
+          title: Кадастровая стоимость
+          description: Сумма в рублях
+        - name: right_holder
+          title: Правообладатель
+          description: Кому принадлежит право
+        - name: right_type
+          title: Вид права
+          description: Вид, номер и дата государственной регистрации права
+        - name: encumbrances
+          title: Ограничения и обременения
+          description: Вид, срок и в чью пользу установлены
+        - name: extract_date
+          title: Дата выписки
+          description: Дата, на которую выданы сведения
+    - id: lease
+      title: Договор аренды
+      description: Стороны, предмет, срок и плата по договору аренды
+      fields:
+        - name: contract_number
+          title: Номер договора
+          description: Номер, под которым договор заключён
+        - name: contract_date
+          title: Дата договора
+          description: Дата заключения
+        - name: lessor
+          title: Арендодатель
+          description: Наименование или ФИО
+        - name: lessee
+          title: Арендатор
+          description: Наименование или ФИО
+        - name: subject
+          title: Предмет аренды
+          description: Что передаётся в аренду, адрес и площадь
+        - name: cadastral_number
+          title: Кадастровый номер
+          description: Номер вида 77:01:0004012:345
+        - name: term
+          title: Срок аренды
+          description: Срок и даты начала и окончания
+        - name: rent
+          title: Арендная плата
+          description: Размер и порядок внесения
+    - id: decree
+      title: Постановление / распоряжение
+      description: Реквизиты и суть акта органа власти
+      fields:
+        - name: issuer
+          title: Орган, издавший акт
+          description: Полное наименование
+        - name: act_type
+          title: Вид акта
+          description: Постановление, распоряжение, приказ и так далее
+        - name: act_number
+          title: Номер
+          description: Номер акта
+        - name: act_date
+          title: Дата
+          description: Дата принятия
+        - name: subject
+          title: О чём акт
+          description: Заголовок или краткая суть
+        - name: cadastral_numbers
+          title: Кадастровые номера
+          description: Все упомянутые кадастровые номера через запятую
+        - name: signer
+          title: Кто подписал
+          description: Должность и ФИО
+    - id: free
+      title: Произвольный документ
+      description: Без таблицы реквизитов заранее, модель сама выделит главное
+      free_form: true

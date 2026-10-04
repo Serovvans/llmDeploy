@@ -1,0 +1,53 @@
+@import './fonts.css';
+
+/* Цвета — только переменные портала (--p-*), их выставляет ThemeBridge из темы библиотеки.
+   До первой отрисовки приложения фон и текст — системные цвета выбранной схемы. */
+
+:root {
+  --p-font: 'Golos Text', Arial, sans-serif;
+  --p-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--p-bg, Canvas);
+  color: var(--p-text, CanvasText);
+  font-family: var(--p-font);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+.p-muted {
+  color: var(--p-text-muted);
+}
+
+.p-mono {
+  font-family: var(--p-font-mono);
+}
+
+.p-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

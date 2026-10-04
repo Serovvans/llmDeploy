@@ -1,0 +1,29 @@
+.root {
+  min-height: 100%;
+  height: auto;
+}
+
+.column,
+.wide {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 48px 24px;
+  text-align: left;
+}
+
+.column {
+  width: 408px;
+}
+
+.wide {
+  width: 768px;
+}
+
+.title {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--p-line);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 32px;
+}

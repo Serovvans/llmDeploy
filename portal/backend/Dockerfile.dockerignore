@@ -1,0 +1,9 @@
+# Белый список: в контекст сборки не попадают .venv, кэши, тесты и локальный .env.
+*
+!pyproject.toml
+!uv.lock
+!alembic.ini
+!src/
+!config/
+!migrations/
+**/__pycache__/

@@ -1,0 +1,22 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.label {
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.error {
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.hint {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}

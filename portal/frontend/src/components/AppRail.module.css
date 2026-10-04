@@ -1,0 +1,74 @@
+.rail {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 88px;
+  padding: 8px 0;
+  border-right: 1px solid var(--p-line);
+  background: var(--p-surface-2);
+  overflow-y: auto;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+}
+
+.item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 88px;
+  min-height: 60px;
+  padding: 8px 2px;
+  border: 0;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--p-surface-3);
+}
+
+.item:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -4px;
+}
+
+/* Текущий раздел — подложка и полоса: цвет не единственный признак (концепция §9). */
+.current {
+  background: var(--p-surface-3);
+}
+
+.current::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--p-accent);
+}
+
+.initials {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--p-line);
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}

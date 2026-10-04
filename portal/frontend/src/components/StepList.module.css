@@ -1,0 +1,35 @@
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.step {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 48px;
+  counter-increment: step;
+}
+
+.step::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: -6px;
+  color: var(--p-text-muted);
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 40px;
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+}

@@ -1,0 +1,87 @@
+.scan {
+  display: flex;
+  gap: 32px;
+  align-items: flex-start;
+}
+
+.scanText {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.manual {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.secret {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  font-size: 16px;
+}
+
+.qr {
+  flex: none;
+  width: 232px;
+}
+
+.qrPlaceholder {
+  width: 232px;
+  height: 232px;
+}
+
+.confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+/* Ошибка под полем может быть длинной: поле кода — 200 px, текст ошибки — на ширину шага. */
+.codeField {
+  flex: 1;
+  min-width: 0;
+}
+
+.codeBox {
+  width: 200px;
+}
+
+.codes {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  gap: 8px 48px;
+  margin: 0;
+  padding: 20px 24px;
+  border-radius: 8px;
+  background: var(--p-surface-2);
+  font-family: var(--p-font-mono);
+  font-size: 18px;
+  line-height: 28px;
+  list-style: none;
+  user-select: text;
+}
+
+.actions {
+  display: flex;
+  gap: 12px;
+}
+
+.saved {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.savedError {
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}

@@ -1,0 +1,14 @@
+/* Единственные цвета вне темы на экранах этапа: модули #000 на подложке #fff (концепция §5.4, §7.3). */
+.frame {
+  flex: none;
+  padding: 16px;
+  border-radius: 8px;
+  background: #fff;
+  line-height: 0;
+}
+
+.code {
+  width: 200px;
+  height: 200px;
+  fill: #000;
+}

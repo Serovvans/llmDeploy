@@ -1,0 +1,10 @@
+# Белый список: в контекст сборки не попадают node_modules, локальная сборка dist и .env.
+*
+!package.json
+!package-lock.json
+!.npmrc
+!index.html
+!tsconfig.json
+!vite.config.ts
+!public/
+!src/

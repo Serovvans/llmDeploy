@@ -1,0 +1,7 @@
+# База знаний. На этапе 2 здесь только значения для GET /api/config (docs/portal-api.md §4);
+# с этапа 4 файл ведёт rag-engineer.
+
+kb:
+  document_max_bytes: 52428800
+  document_max_pages: 500
+  document_extensions: [".pdf", ".docx", ".txt", ".md", ".jpg", ".jpeg", ".png"]

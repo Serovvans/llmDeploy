@@ -1,0 +1,37 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1168px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.privacy {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.name {
+  max-width: 360px;
+  white-space: nowrap;
+}
+
+.ellipsis {
+  display: inline-block;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+.kebab {
+  width: 48px;
+  text-align: right;
+}
+
+.placeholder {
+  height: 240px;
+}

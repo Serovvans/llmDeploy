@@ -1,0 +1,16 @@
+# окружение и кэши инструментов
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# сборка пакета
+dist/
+*.egg-info/
+
+# локальные секреты
+.env

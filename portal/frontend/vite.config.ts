@@ -1,0 +1,29 @@
+import react from '@vitejs/plugin-react';
+import { loadEnv } from 'vite';
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig(({ mode }) => {
+  const apiTarget = loadEnv(mode, '.', 'PORTAL_').PORTAL_API_TARGET;
+  return {
+    plugins: [react()],
+    server: {
+      proxy: apiTarget ? { '/api': { target: apiTarget, changeOrigin: false } } : undefined,
+    },
+    build: {
+      // Файл библиотеки компонентов — около 670 кБ (136 кБ в gzip) и делению не поддаётся;
+      // порог чуть выше него, чтобы предупреждение сработало при заметном росте.
+      chunkSizeWarningLimit: 700,
+      rolldownOptions: {
+        output: {
+          // Библиотека компонентов — отдельным файлом: меняется реже кода портала и дольше живёт в кэше браузера.
+          codeSplitting: { groups: [{ name: 'kontur', test: /node_modules\/@skbkontur\// }] },
+        },
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      setupFiles: ['./src/test/setup.ts'],
+      restoreMocks: true,
+    },
+  };
+});
