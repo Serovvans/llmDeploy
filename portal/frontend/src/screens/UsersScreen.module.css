@@ -35,3 +35,19 @@
 .placeholder {
   height: 240px;
 }
+
+/* Пометка о временной блокировке входа — второй строкой под состоянием (концепция §5.10). */
+.loginLocked {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--p-text);
+}
+
+.loginLockedIcon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 20px;
+  color: var(--p-warning-icon);
+}

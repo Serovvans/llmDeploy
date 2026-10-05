@@ -1,0 +1,16 @@
+# Продление сертификата Let's Encrypt (docs/portal-design.md §3.2). Запускается таймером
+# llm-cert-renew.timer; устанавливает scripts/install.sh так же, как llm-stack.service:
+# копирует в /etc/systemd/system/ с WorkingDirectory, равным фактическому пути к deploy/.
+[Unit]
+Description=LLM service certificate renewal (lego, DNS-01)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/llm/deploy
+# Путь к скрипту относительный: при установке подставляется только WorkingDirectory.
+# Неудача оставляет юнит в состоянии failed и запись в журнале; файлы в certs/ скрипт
+# меняет только после успешного выпуска, работающий сертификат не страдает.
+ExecStart=/usr/bin/bash ../scripts/cert.sh renew

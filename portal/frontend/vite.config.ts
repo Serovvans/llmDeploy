@@ -29,6 +29,9 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: ['./src/test/setup.ts'],
       restoreMocks: true,
+      // Тесты проверяют поведение, а не скорость: порог по умолчанию (5 с) даёт ложные падения,
+      // когда параллельно идут сборка образов и сквозные тесты.
+      testTimeout: 15000,
     },
   };
 });

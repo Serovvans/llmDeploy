@@ -114,6 +114,10 @@ class ThrottleRepository(Protocol):
         """Учесть неудачу с адреса; окно, начатое раньше `window_start`, открывается заново."""
         ...
 
+    async def login_locks(self, keys: Sequence[str], now: datetime) -> dict[str, datetime]:
+        """Действующие блокировки логинов: ключ счётчика → время окончания."""
+        ...
+
     async def delete(self, scope: ThrottleScope, key: str) -> None:
         """Удалить счётчик."""
         ...

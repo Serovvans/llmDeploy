@@ -57,8 +57,14 @@ services:
       bifrost:
         condition: service_healthy
     ports:
-      # Единственный порт, доступный снаружи ВМ.
+      # Три порта хоста на один сайт (docs/portal-design.md §3.2); кроме них и SSH ВМ
+      # ничего не принимает извне. 443 — доступ по IP в VPN до домена (§3.1).
       - "443:443/tcp"
+      # Цель проброса из интернета: 195.122.229.203:18443 → ВМ:8080.
+      - "8080:443/tcp"
+      # Тот же адрес https://<имя>:18443 из сети заказчика и VPN при внутренней
+      # DNS-записи на ВМ — без hairpin NAT на роутере.
+      - "18443:443/tcp"
     environment:
       LLM_HOSTNAME: ${LLM_HOSTNAME:-}
       TLS_MODE: ${TLS_MODE:-}
@@ -92,7 +98,8 @@ services:
         condition: service_healthy
     ports:
       # Админ-UI и REST управления ключами — только через SSH-туннель (§3.3, §8).
-      - "127.0.0.1:8080:8080"
+      # На хосте 8081: 8080 занят пробросом к Caddy (docs/portal-design.md §3.2).
+      - "127.0.0.1:8081:8080"
     environment:
       # Подставляются в config.json через префикс "env.".
       VLLM_API_KEY: ${VLLM_API_KEY:?}
@@ -102,6 +109,11 @@ services:
     volumes:
       # SQLite (config.db, logs.db) пишется в volume; config.json Bifrost только читает,
       # поэтому его можно смонтировать read-only поверх того же каталога.
+      # В logs.db остаются только метаданные запросов: чаты личные, и содержимое
+      # отключено в config.json (disable_content_logging, docs/portal-design.md §8).
+      # Там же провайдеру vllm разрешены частные адреса (allow_private_network): без
+      # этого Bifrost отказывает в соединении с vLLM, у которого в docker-сети всегда
+      # адрес RFC 1918 (docs/design.md §3.3). Адреса заданы в файле, клиент их не меняет.
       - bifrost-data:/app/data
       - ./bifrost/config.json:/app/data/config.json:ro
     networks:
@@ -244,6 +256,27 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # Выпуск и продление сертификата Let's Encrypt по DNS-01 (docs/portal-design.md §3.2).
+  # Разовый запуск: `docker compose --profile cert run --rm lego run ...` — в обычный
+  # старт стека не входит, поэтому без restart и healthcheck.
+  lego:
+    image: goacme/lego:v5.5.2
+    profiles: [cert]
+    environment:
+      # Токен API DNS Timeweb Cloud — только этому сервису. Пустое значение допустимо:
+      # compose интерполирует и выключенные профили, а до привязки домена токена нет.
+      TIMEWEBCLOUD_AUTH_TOKEN: ${TIMEWEBCLOUD_AUTH_TOKEN:-}
+      LEGO_EMAIL: ${ACME_EMAIL:-}
+      # Путь задан здесь, а не аргументом: без него состояние осталось бы внутри
+      # контейнера, и ключ учётной записи ACME пропал бы вместе с ним.
+      LEGO_PATH: /data
+    volumes:
+      # Каталог хоста, а не volume: scripts/cert.sh раскладывает из него файлы в certs/.
+      # Не /lego: в образе это сам исполняемый файл, каталог поверх него не монтируется.
+      - ./lego:/data
+    # Сети не заданы намеренно: сервис попадает в отдельную сеть default с выходом в
+    # интернет и не видит остальные сервисы стека.
 
   # Третий этап развёртывания: портал сотрудников (§3.8, docs/portal-design.md §3).
   portal-web:

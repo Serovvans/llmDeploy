@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from portal.auth.domain import SessionState, User
+from portal.auth.domain import AdminUser, SessionState
 from portal.core.ports import LoginStep, Role
 from portal.core.schemas import ApiTime, RequestModel
 
@@ -134,13 +134,15 @@ class AdminUserOut(BaseModel):
     full_name: str
     role: Role
     state: Literal["blocked", "never_logged_in", "active"]
+    login_locked_until: ApiTime | None
     second_factor_configured: bool
     is_me: bool
     created_at: ApiTime
 
     @classmethod
-    def of(cls, user: User, current_user_id: UUID) -> "AdminUserOut":
+    def of(cls, admin_user: AdminUser, current_user_id: UUID) -> "AdminUserOut":
         """Собрать из учётной записи."""
+        user = admin_user.user
         state: Literal["blocked", "never_logged_in", "active"] = "active"
         if user.is_blocked:
             state = "blocked"
@@ -152,6 +154,7 @@ class AdminUserOut(BaseModel):
             full_name=user.full_name,
             role=user.role,
             state=state,
+            login_locked_until=admin_user.login_locked_until,
             second_factor_configured=user.totp_enabled,
             is_me=user.id == current_user_id,
             created_at=user.created_at,
@@ -163,6 +166,13 @@ class AdminUserWithPasswordOut(BaseModel):
 
     user: AdminUserOut
     temporary_password: str
+
+
+class LoginUnlockOut(BaseModel):
+    """Ответ на снятие блокировки входа: `unlocked` — была ли она снята сейчас."""
+
+    user: AdminUserOut
+    unlocked: bool
 
 
 class AdminUserPageOut(BaseModel):

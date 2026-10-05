@@ -104,6 +104,43 @@ async def test_reset_second_factor_from_command_line(
 
 
 @pytest.mark.usefixtures("command_line")
+async def test_unlock_login_from_command_line(
+    portal: Portal, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async with portal.client() as client:
+        await portal.onboard(client, "owner", role="admin")
+        capsys.readouterr()
+        assert await _in_thread("unlock-login", "--login", "owner") == 0
+        assert capsys.readouterr().out == "Блокировки входа нет: ничего не изменено.\n"
+        assert (await portal.audit_events())[-1][0] == "login_succeeded"
+
+        for _ in range(5):
+            await client.post("/api/auth/login", json={"login": "owner", "password": "неверный"})
+        # Команда сверяет срок с настоящими часами, а не с часами теста.
+        await portal.execute(
+            "UPDATE auth_throttle SET locked_until = now() + interval '1 hour' "
+            "WHERE scope = 'login'"
+        )
+        users = await portal.rows("SELECT * FROM users")
+        assert await _in_thread("unlock-login", "--login", "OWNER") == 0
+        assert capsys.readouterr().out == "Блокировка входа снята: счётчик неудач обнулён.\n"
+        rows = await portal.rows("SELECT scope, failures FROM auth_throttle")
+        assert [tuple(row) for row in rows] == [("ip", 5)]
+        assert await portal.rows("SELECT * FROM users") == users
+        assert (await client.get("/api/auth/session")).status_code == 200
+    rows = await portal.rows(
+        "SELECT actor_id, ip, details FROM audit_log WHERE event = 'login_unlocked'"
+    )
+    assert [tuple(row) for row in rows] == [(None, None, {"via": "cli"})]
+
+    assert await _in_thread("audit", "--event", "login_unlocked") == 0
+    (line,) = capsys.readouterr().out.splitlines()
+    assert line.endswith('\tlogin_unlocked\t-\towner\t-\t{"via": "cli"}')
+    assert await _in_thread("unlock-login", "--login", "nobody") == 1
+    assert capsys.readouterr().err.strip() == "Не найдено."
+
+
+@pytest.mark.usefixtures("command_line")
 async def test_audit_prints_filtered_journal(
     portal: Portal, capsys: pytest.CaptureFixture[str]
 ) -> None:

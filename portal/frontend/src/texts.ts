@@ -33,6 +33,16 @@ export function shortName(fullName: string): string {
   return [surname, ...rest.map((part) => `${part.charAt(0)}.`)].join('\u00a0');
 }
 
+/** Срок временной блокировки входа (§5.10): сегодня — «до 14:35», иначе — «до 06.10.2026, 09:10». */
+export function lockedUntil(iso: string, now: Date): string {
+  const date = new Date(iso);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return date.toDateString() === now.toDateString()
+    ? `до ${time}`
+    : `до ${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()}, ${time}`;
+}
+
 /** Дата по правилу §8.1: сегодня и вчера — словами со временем, иначе `12.09.2026`. */
 export function formatDate(iso: string, now: Date = new Date()): string {
   const date = new Date(iso);
@@ -103,7 +113,9 @@ export const texts = {
     enterLogin: 'Введите логин',
     enterPassword: 'Введите пароль',
     invalidCredentials: 'Неверный логин или пароль',
-    loginLocked: (seconds: number) => `Слишком много неудачных попыток. Попробуйте снова ${retryAfter(seconds)}`,
+    loginLocked: (seconds: number) =>
+      `Слишком много неудачных попыток. Попробуйте снова ${retryAfter(seconds)} ` +
+      'или попросите администратора портала снять блокировку',
     tooManyAttempts: (seconds: number) => `Слишком много попыток входа. Попробуйте снова ${retryAfter(seconds)}`,
     accountBlocked: 'Учётная запись заблокирована. Обратитесь к администратору портала',
     noConnection: 'Не удалось связаться с порталом. Проверьте подключение и попробуйте снова',
@@ -618,11 +630,14 @@ export const texts = {
       never_logged_in: 'Первый вход не завершён',
       blocked: 'Заблокирована',
     } satisfies Record<AdminUserState, string>,
+    loginLocked: (until: string) => `Вход временно заблокирован ${until}, после неудачных попыток`,
     actions: 'Действия',
     menu: {
       edit: 'Изменить',
       resetPassword: 'Сбросить пароль',
       resetSecondFactor: 'Сбросить второй фактор',
+      unlockLogin: 'Снять блокировку входа',
+      unlockLoginComment: 'Пароль и код из приложения останутся прежними',
       block: 'Заблокировать',
       unblock: 'Разблокировать',
     },
@@ -696,6 +711,7 @@ export const texts = {
       secondFactorReset: 'Второй фактор сброшен',
       blocked: 'Пользователь заблокирован',
       unblocked: 'Пользователь разблокирован',
+      loginUnlocked: 'Блокировка входа снята: пользователь может войти с прежним паролем и кодом из приложения',
       cannotModifySelf:
         'Свою учётную запись изменить здесь нельзя. Пароль меняется в профиле, второй фактор сбрасывает ' +
         'другой администратор',

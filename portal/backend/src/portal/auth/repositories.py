@@ -278,6 +278,17 @@ class SqlThrottleRepository:
             )
         )
 
+    async def login_locks(self, keys: Sequence[str], now: datetime) -> dict[str, datetime]:
+        """Действующие блокировки логинов: ключ счётчика → время окончания."""
+        rows = await self._connection.execute(
+            sa.select(auth_throttle.c.key, auth_throttle.c.locked_until).where(
+                auth_throttle.c.scope == "login",
+                auth_throttle.c.key.in_(keys),
+                auth_throttle.c.locked_until > now,
+            )
+        )
+        return {row.key: row.locked_until for row in rows}
+
     async def delete(self, scope: ThrottleScope, key: str) -> None:
         """Удалить счётчик."""
         await self._connection.execute(

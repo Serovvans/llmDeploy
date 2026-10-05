@@ -33,6 +33,13 @@ printf '000'
 """
 PORTAL_CODES = {
     "/v1/chat/completions": 401,
+    "/v1/unknown-route": 404,
+    "/v1/mcp/tools": 404,
+    "/v1/skills": 404,
+    "/v1": 404,
+    "/v1/": 404,
+    "/v1/async/chat/completions": 404,
+    "/v1/mcp/tool/execute": 404,
     "/api/auth/session": 401,
     "/api/governance/virtual-keys": 404,
     "/metrics": 404,
@@ -276,6 +283,16 @@ main --stage portal --skip-preflight
     assert "Этап 3 завершён" in result.stdout
 
 
+def test_gateway_stage_recreates_bifrost_to_apply_config(sandbox: Sandbox) -> None:
+    assert sandbox.run("gateway_enabled=1\napply_bifrost_config").returncode == 0
+    assert sandbox.docker_calls()[-1].endswith("up -d --force-recreate --no-deps --wait bifrost")
+
+
+def test_model_stage_has_no_bifrost_to_recreate(sandbox: Sandbox) -> None:
+    assert sandbox.run("gateway_enabled=0\napply_bifrost_config").returncode == 0
+    assert sandbox.docker_calls() == []
+
+
 # --- проверка через 443 --------------------------------------------------------
 
 VERIFY = "hostname=192.168.25.8\ntls_mode=internal\nportal_enabled={portal}\nverify_gateway"
@@ -303,10 +320,105 @@ def test_verify_portal_failures(sandbox: Sandbox, suffix: str, code: int, fragme
     assert_refused(sandbox.run(VERIFY.format(portal=1)), fragment)
 
 
+@pytest.mark.parametrize("portal", [0, 1])
+@pytest.mark.parametrize(
+    ("suffix", "code", "fragment"),
+    [
+        ("/v1/unknown-route", 200, "GET /v1/unknown-route через 443 закрыт: HTTP 200"),
+        ("/v1/", 200, "GET /v1/ через 443 закрыт: HTTP 200"),
+        ("/v1/mcp/tool/execute", 401, "POST /v1/mcp/tool/execute через 443 закрыт: HTTP 401"),
+    ],
+)
+def test_verify_gateway_fails_when_other_v1_route_reaches_bifrost(
+    sandbox: Sandbox, portal: int, suffix: str, code: int, fragment: str
+) -> None:
+    root_code = 200 if portal else 404
+    sandbox.set_codes({**PORTAL_CODES, "/": root_code, suffix: code})
+    assert_refused(sandbox.run(VERIFY.format(portal=portal)), fragment)
+
+
 def test_verify_gateway_without_portal_still_expects_closed_root(sandbox: Sandbox) -> None:
     assert_refused(sandbox.run(VERIFY.format(portal=0)), "/ через 443 закрыт: HTTP 200")
     sandbox.set_codes({**PORTAL_CODES, "/": 404})
     assert sandbox.run(VERIFY.format(portal=0)).returncode == 0
+
+
+def test_verify_gateway_checks_the_same_site_on_extra_ports(sandbox: Sandbox) -> None:
+    result = sandbox.run(VERIFY.format(portal=1))
+    assert result.returncode == 0, result.stderr
+    assert "порт 8080: запрос к модели без ключа отклоняется" in result.stdout
+    assert "порт 18443: запрос к модели без ключа отклоняется" in result.stdout
+
+
+def test_verify_gateway_fails_when_extra_port_is_not_caddy(sandbox: Sandbox) -> None:
+    """На 8080 отвечает не Caddy (например, прежний админ-порт Bifrost)."""
+    sandbox.set_codes({":8080/v1/chat/completions": 404, **PORTAL_CODES})
+    assert_refused(sandbox.run(VERIFY.format(portal=1)), "порт 8080", "HTTP 404")
+
+
+# --- сертификат и таймер продления (TLS_MODE=corp) -----------------------------
+
+CORP = "hostname=llm.example.ru\ntls_mode=corp\ngateway_enabled=1\n"
+RENEWAL = (
+    CORP
+    + 'install_unit() { echo "unit $(basename "$1")"; }\n'
+    + 'systemctl() { echo "systemctl $*"; }\n'
+    + "install_cert_renewal"
+)
+
+
+def test_missing_certificate_points_to_make_cert_when_acme_is_configured(sandbox: Sandbox) -> None:
+    sandbox.write_env({"ACME_EMAIL": "admin@example.ru"})
+    assert_refused(sandbox.run(CORP + "prepare_tls"), "нет файла", "make cert")
+
+
+def test_missing_certificate_without_acme_points_to_corporate_ca(sandbox: Sandbox) -> None:
+    sandbox.write_env({})
+    result = sandbox.run(CORP + "prepare_tls")
+    assert_refused(result, "нет файла", "корпоративного CA")
+    assert "make cert" not in result.stderr
+
+
+def issued_by_lego(sandbox: Sandbox) -> None:
+    certificates = sandbox.root / "deploy" / "lego" / "certificates"
+    certificates.mkdir(parents=True)
+    (certificates / "llm.example.ru.crt").touch()
+
+
+def test_renewal_timer_is_enabled_for_certificate_issued_by_lego(sandbox: Sandbox) -> None:
+    sandbox.write_env({"TIMEWEBCLOUD_AUTH_TOKEN": "token"})
+    issued_by_lego(sandbox)
+    result = sandbox.run(RENEWAL)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[1:] == [
+        "unit llm-cert-renew.service",
+        "unit llm-cert-renew.timer",
+        "systemctl daemon-reload",
+        "systemctl enable --now llm-cert-renew.timer",
+    ]
+
+
+def test_renewal_timer_is_not_enabled_without_dns_token(sandbox: Sandbox) -> None:
+    """Сертификат выпущен с ручным подтверждением: таймер продлить его не сможет."""
+    sandbox.write_env({})
+    issued_by_lego(sandbox)
+    result = sandbox.run(RENEWAL)
+    assert result.returncode == 0, result.stderr
+    assert "systemctl" not in result.stdout
+    assert "make cert-renew MANUAL=1" in result.stdout
+
+
+@pytest.mark.parametrize("tls_mode", ["corp", "internal"])
+def test_renewal_timer_is_not_touched_without_lego_certificate(
+    sandbox: Sandbox, tls_mode: str
+) -> None:
+    """Сертификат корпоративного CA положен вручную или TLS — собственный CA Caddy."""
+    sandbox.write_env({"TIMEWEBCLOUD_AUTH_TOKEN": "token"})
+    if tls_mode == "internal":
+        issued_by_lego(sandbox)
+    result = sandbox.run(RENEWAL.replace("tls_mode=corp", f"tls_mode={tls_mode}"))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
 
 
 # --- итог ----------------------------------------------------------------------
@@ -320,3 +432,11 @@ def test_portal_summary_reminds_about_secret_key_and_first_admin(sandbox: Sandbo
     assert "вне ВМ" in result.stdout
     assert "make portal-admin LOGIN=" in result.stdout
     assert f"make smoke-portal CA={sandbox.root}/deploy/caddy-root.crt" in result.stdout
+
+
+def test_gateway_summary_gives_new_bifrost_admin_port(sandbox: Sandbox) -> None:
+    body = "hostname=llm.example.ru\ntls_mode=corp\ngateway_enabled=1\nportal_enabled=0\n"
+    result = sandbox.run(body + "print_summary")
+    assert result.returncode == 0, result.stderr
+    assert "ssh -L 8081:127.0.0.1:8081" in result.stdout
+    assert "https://llm.example.ru:18443/v1" in result.stdout

@@ -68,3 +68,20 @@ export async function signOutThroughUi(page: Page): Promise<void> {
 export function toast(page: Page, text: string | RegExp): Locator {
   return page.locator('[data-tid~="ToastView__root"]').filter({ hasText: text });
 }
+
+/**
+ * Отбирает список пользователей по логину и ждёт ответа с отбором: иначе запоздалая
+ * перезагрузка списка перерисует строку, когда тест уже открыл её меню.
+ */
+export async function searchUsers(page: Page, login: string): Promise<void> {
+  const field = page.getByRole('textbox', { name: 'Найти по ФИО или логину' });
+  // Тот же отбор уже действует: нового запроса не будет.
+  if ((await field.inputValue()) === login) {
+    return;
+  }
+  const filtered = page.waitForResponse(
+    (response) => response.url().includes('/api/admin/users?') && response.url().includes(`q=${login}`),
+  );
+  await field.fill(login);
+  await filtered;
+}

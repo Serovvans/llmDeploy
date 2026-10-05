@@ -33,10 +33,29 @@ async def _employee(portal: Portal, client: httpx.AsyncClient, login: str = "pet
     return await portal.onboard(client, login)
 
 
-async def _id_of(admin: httpx.AsyncClient, login: str) -> str:
+async def _listed(admin: httpx.AsyncClient, login: str) -> dict[str, str | None]:
     items = (await admin.get(USERS, params={"q": login})).json()["items"]
-    found: str = next(item["id"] for item in items if item["login"] == login)
+    found: dict[str, str | None] = next(item for item in items if item["login"] == login)
     return found
+
+
+async def _id_of(admin: httpx.AsyncClient, login: str) -> str:
+    found = (await _listed(admin, login))["id"]
+    assert found is not None
+    return found
+
+
+async def _fail_login(client: httpx.AsyncClient, login: str, times: int = 5) -> None:
+    """Неудачные входы; пять подряд закрывают вход для логина на минуту (§2.5)."""
+    for _ in range(times):
+        await client.post("/api/auth/login", json={"login": login, "password": "неверный"})
+
+
+async def _login_throttle(portal: Portal) -> list[int]:
+    rows = await portal.rows(
+        "SELECT failures FROM auth_throttle WHERE scope = 'login' ORDER BY failures"
+    )
+    return [row.failures for row in rows]
 
 
 async def test_create_user_returns_temporary_password_once(
@@ -54,6 +73,7 @@ async def test_create_user_returns_temporary_password_once(
         "full_name": "Петрова Анна Сергеевна",
         "role": "employee",
         "state": "never_logged_in",
+        "login_locked_until": None,
         "second_factor_configured": False,
         "is_me": False,
         "created_at": "2026-10-05T09:00:00Z",
@@ -132,6 +152,7 @@ async def test_employee_cannot_use_admin_routes(portal: Portal, admin: httpx.Asy
             ("PATCH", f"{USERS}/{target}", {"role": "employee"}),
             ("POST", f"{USERS}/{target}/reset-password", None),
             ("POST", f"{USERS}/{target}/reset-second-factor", None),
+            ("POST", f"{USERS}/{target}/unlock-login", None),
             ("POST", f"{USERS}/{target}/block", None),
             ("POST", f"{USERS}/{target}/unblock", None),
         ]
@@ -149,6 +170,7 @@ async def test_admin_cannot_act_on_own_account(admin: httpx.AsyncClient) -> None
         ("PATCH", f"{USERS}/{me}", {"role": "employee"}),
         ("POST", f"{USERS}/{me}/reset-password", None),
         ("POST", f"{USERS}/{me}/reset-second-factor", None),
+        ("POST", f"{USERS}/{me}/unlock-login", None),
         ("POST", f"{USERS}/{me}/block", None),
     ]
     for method, path, body in requests:
@@ -165,6 +187,7 @@ async def test_unknown_user_is_not_found(admin: httpx.AsyncClient) -> None:
             ("PATCH", "", {"role": "admin"}),
             ("POST", "/reset-password", None),
             ("POST", "/reset-second-factor", None),
+            ("POST", "/unlock-login", None),
             ("POST", "/block", None),
             ("POST", "/unblock", None),
         ):
@@ -349,6 +372,7 @@ async def test_session_and_role_are_checked_before_the_resource(
                 ("PATCH", "", {"role": "admin"}),
                 ("POST", "/block", None),
                 ("POST", "/reset-password", None),
+                ("POST", "/unlock-login", None),
             ):
                 path = f"{USERS}/{target}{suffix}"
                 refused = await anonymous.request(method, path, json=body)
@@ -379,3 +403,134 @@ async def test_admin_reset_unlocks_login_but_not_address(
         assert (await client.post("/api/auth/login", json=credentials)).status_code == 200
     rows = await portal.rows("SELECT scope, key, failures FROM auth_throttle")
     assert [tuple(row) for row in rows] == [("ip", "203.0.113.40", 5)]
+
+
+LOCKED_UNTIL = "2026-10-05T09:01:00Z"
+ATTACKER_IP = "203.0.113.40"
+
+
+async def test_login_lock_is_shown_while_it_lasts_whatever_the_state(
+    portal: Portal, admin: httpx.AsyncClient
+) -> None:
+    async with portal.client(ip=ATTACKER_IP) as client:
+        await _fail_login(client, "petrova")  # счётчик ведётся и для логина, которого ещё нет
+        created = await _create(admin, "petrova")
+        target = created["id"]
+        assert (created["state"], created["login_locked_until"]) == (
+            "never_logged_in", LOCKED_UNTIL,
+        )  # fmt: skip
+        await _fail_login(client, "admin", times=4)  # только счётчик — не блокировка
+
+        page = (await admin.get(USERS)).json()["items"]
+        assert [(item["login"], item["login_locked_until"]) for item in page] == [
+            ("admin", None), ("petrova", LOCKED_UNTIL),
+        ]  # fmt: skip
+
+        answers = [
+            await admin.post(f"{USERS}/{target}/block"),
+            await admin.patch(f"{USERS}/{target}", json={"full_name": "Новое имя"}),
+            await admin.post(f"{USERS}/{target}/reset-second-factor"),  # ключа нет: без изменений
+        ]
+        assert [(a.json()["state"], a.json()["login_locked_until"]) for a in answers] == [
+            ("blocked", LOCKED_UNTIL)
+        ] * 3
+        unblocked = (await admin.post(f"{USERS}/{target}/unblock")).json()
+        assert (unblocked["state"], unblocked["login_locked_until"]) == (
+            "never_logged_in", LOCKED_UNTIL,
+        )  # fmt: skip
+
+        portal.clock.advance(seconds=60)
+        assert (await _listed(admin, "petrova"))["login_locked_until"] is None  # срок вышел
+        assert await _login_throttle(portal) == [4, 5]
+
+        await _fail_login(client, "petrova", times=1)
+        assert (await _listed(admin, "petrova"))["login_locked_until"] == "2026-10-05T09:03:00Z"
+        reset = (await admin.post(f"{USERS}/{target}/reset-password")).json()
+        assert reset["user"]["login_locked_until"] is None
+    assert "failures" not in str(page) and ATTACKER_IP not in str(page)
+
+
+async def test_unlock_login_lets_the_user_in_with_the_same_password_and_code(
+    portal: Portal, admin: httpx.AsyncClient
+) -> None:
+    async with portal.client() as working, portal.client(ip=ATTACKER_IP) as client:
+        account = await _employee(portal, working)
+        target = await _id_of(admin, "petrova")
+        await _fail_login(client, "petrova")
+        credentials = {"login": account.login, "password": account.password}
+        assert (await client.post("/api/auth/login", json=credentials)).status_code == 429
+        before = await portal.rows("SELECT * FROM users WHERE login = 'petrova'")
+
+        response = await admin.post(f"{USERS}/{target}/unlock-login")
+        assert response.status_code == 200
+        assert response.json() == {
+            "user": {**await _listed(admin, "petrova"), "login_locked_until": None},
+            "unlocked": True,
+        }
+        assert response.json()["user"]["state"] == "active"
+        rows = await portal.rows("SELECT scope, key, failures FROM auth_throttle")
+        assert [tuple(row) for row in rows] == [("ip", ATTACKER_IP, 5)]
+        assert await portal.rows("SELECT * FROM users WHERE login = 'petrova'") == before
+        assert len(await portal.rows("SELECT 1 FROM backup_codes WHERE used_at IS NULL")) == 20
+
+        assert (await working.get("/api/auth/session")).status_code == 200  # сессия жива
+        await portal.sign_in(client, account)  # прежние пароль и код, до конца срока блокировки
+    rows = await portal.rows(
+        "SELECT actor.login AS actor, subject.login AS subject, host(a.ip) AS ip, a.details "
+        "FROM audit_log a JOIN users actor ON actor.id = a.actor_id "
+        "JOIN users subject ON subject.id = a.subject_user_id WHERE a.event = 'login_unlocked'"
+    )
+    assert [tuple(row) for row in rows] == [("admin", "petrova", "203.0.113.5", {})]
+
+
+async def test_unlock_login_without_a_lock_changes_nothing(
+    portal: Portal, admin: httpx.AsyncClient
+) -> None:
+    target = (await _create(admin, "petrova"))["id"]
+    unlock = f"{USERS}/{target}/unlock-login"
+
+    async def unlocked() -> bool:
+        response = await admin.post(unlock)
+        assert response.status_code == 200
+        assert response.json()["user"]["login_locked_until"] is None
+        result: bool = response.json()["unlocked"]
+        return result
+
+    async with portal.client(ip=ATTACKER_IP) as client:
+        assert await unlocked() is False  # строки нет
+        await _fail_login(client, "petrova", times=4)
+        assert await unlocked() is False  # только счётчик: он не тронут
+        assert await _login_throttle(portal) == [4]
+
+        await _fail_login(client, "petrova", times=1)
+        portal.clock.advance(seconds=60)
+        assert await unlocked() is False  # срок вышел
+        assert await _login_throttle(portal) == [5]
+
+        # У заблокированной администратором записи снимается только блокировка входа.
+        await _fail_login(client, "petrova", times=1)
+        await admin.post(f"{USERS}/{target}/block")
+        response = await admin.post(unlock)
+        assert (response.json()["unlocked"], response.json()["user"]["state"]) == (True, "blocked")
+        assert await _login_throttle(portal) == []
+        assert await unlocked() is False  # повторный вызов
+    events = [event for event, _ in await portal.audit_events()]
+    assert events.count("login_unlocked") == 1
+
+
+async def test_unlock_login_refuses_own_account_and_forged_requests(
+    portal: Portal, admin: httpx.AsyncClient
+) -> None:
+    me = await _id_of(admin, "admin")
+    target = (await _create(admin, "petrova"))["id"]
+    async with portal.client(ip=ATTACKER_IP) as client:
+        await _fail_login(client, "admin")
+        await _fail_login(client, "petrova")
+    assert (await _listed(admin, "admin"))["login_locked_until"] == LOCKED_UNTIL
+
+    own = await admin.post(f"{USERS}/{me}/unlock-login")
+    assert (own.status_code, own.json()["error"]["code"]) == (409, "cannot_modify_self")
+    forged = await admin.post(f"{USERS}/{target}/unlock-login", headers={"X-Portal-Csrf": ""})
+    assert (forged.status_code, forged.json()["error"]["code"]) == (403, "csrf_check_failed")
+    assert await _login_throttle(portal) == [5, 5]
+    assert "login_unlocked" not in [event for event, _ in await portal.audit_events()]

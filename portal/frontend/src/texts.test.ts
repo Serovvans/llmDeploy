@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ApiError, NetworkError } from './api/client';
-import { errorText, retryAfter, texts } from './texts';
+import { errorText, lockedUntil, retryAfter, texts } from './texts';
 
 describe('тексты', () => {
   it('срок блокировки округляется вверх до минут и склоняется', () => {
@@ -14,8 +14,14 @@ describe('тексты', () => {
     expect(retryAfter(21 * 60)).toBe('через 21 минуту');
     expect(retryAfter(22 * 60)).toBe('через 22 минуты');
     expect(texts.login.loginLocked(300)).toBe(
-      'Слишком много неудачных попыток. Попробуйте снова через 5 минут',
+      'Слишком много неудачных попыток. Попробуйте снова через 5 минут или попросите администратора портала снять блокировку',
     );
+  });
+
+  it('срок блокировки входа: сегодня — время, в другой день — дата и время', () => {
+    const now = new Date(2026, 9, 5, 14, 0);
+    expect(lockedUntil(new Date(2026, 9, 5, 14, 35).toISOString(), now)).toBe('до 14:35');
+    expect(lockedUntil(new Date(2026, 9, 6, 9, 10).toISOString(), now)).toBe('до 06.10.2026, 09:10');
   });
 
   it('для отказа без своей формулировки выбирает общий текст', () => {

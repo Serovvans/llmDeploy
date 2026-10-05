@@ -26,6 +26,7 @@ import type {
   SqlSchema,
   SqlSchemaSummary,
   TemporaryPasswordResult,
+  UnlockLoginResult,
 } from './types';
 
 /** Отказ сервера в формате контракта. */
@@ -270,6 +271,8 @@ export const api = {
   blockUser: (id: string) => request<AdminUser>('POST', `/api/admin/users/${id}/block`),
 
   unblockUser: (id: string) => request<AdminUser>('POST', `/api/admin/users/${id}/unblock`),
+
+  unlockUserLogin: (id: string) => request<UnlockLoginResult>('POST', `/api/admin/users/${id}/unlock-login`),
 
   listDialogs: (kind: DialogKind, cursor: string | null) => {
     const params = new URLSearchParams({ kind });

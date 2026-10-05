@@ -42,8 +42,16 @@ export interface AdminUser {
   role: Role;
   state: AdminUserState;
   second_factor_configured: boolean;
+  /** Временная блокировка входа после серии неудач: время окончания (ISO 8601, UTC) или `null`. */
+  login_locked_until: string | null;
   is_me: boolean;
   created_at: string;
+}
+
+/** Ответ `unlock-login`: `unlocked` равно `false`, если блокировки уже не было. */
+export interface UnlockLoginResult {
+  user: AdminUser;
+  unlocked: boolean;
 }
 
 export interface TemporaryPasswordResult {

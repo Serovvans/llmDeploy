@@ -1,0 +1,14 @@
+# Ежедневная проверка срока сертификата (docs/portal-design.md §3.2): lego продлевает
+# его сам, когда подходит срок, остальные запуски ничего не меняют.
+[Unit]
+Description=Daily LLM service certificate renewal check
+
+[Timer]
+OnCalendar=daily
+# Не обращаться к Let's Encrypt ровно в полночь вместе со всеми остальными клиентами.
+RandomizedDelaySec=1h
+# ВМ была выключена в момент срабатывания — проверка выполнится после загрузки.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

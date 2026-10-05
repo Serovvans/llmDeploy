@@ -222,7 +222,7 @@ describe('отказы входа', () => {
   });
 
   it.each([
-    ['login_locked', 429, { retry_after_seconds: 290 }, 'Слишком много неудачных попыток. Попробуйте снова через 5 минут'],
+    ['login_locked', 429, { retry_after_seconds: 290 }, 'Слишком много неудачных попыток. Попробуйте снова через 5 минут или попросите администратора портала снять блокировку'],
     ['too_many_attempts', 429, { retry_after_seconds: 30 }, 'Слишком много попыток входа. Попробуйте снова через минуту'],
     ['account_blocked', 403, undefined, texts.login.accountBlocked],
     ['service_unavailable', 503, undefined, texts.common.serverFailure],
@@ -362,7 +362,7 @@ describe('отказы входа', () => {
   });
 
   it.each([
-    ['login_locked', 429, { retry_after_seconds: 600 }, 'Слишком много неудачных попыток. Попробуйте снова через 10 минут'],
+    ['login_locked', 429, { retry_after_seconds: 600 }, 'Слишком много неудачных попыток. Попробуйте снова через 10 минут или попросите администратора портала снять блокировку'],
     ['login_step_expired', 401, undefined, texts.login.codeStepExpired],
   ])('код: отказ %s возвращает на вход с заметкой', async (code, status, details, text) => {
     mockApi({

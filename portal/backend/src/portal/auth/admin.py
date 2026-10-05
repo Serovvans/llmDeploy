@@ -2,11 +2,18 @@
 
 import asyncio
 import secrets
+from collections.abc import Sequence
 from concurrent.futures import Executor
 from uuid import UUID, uuid4
 
 from portal.auth import errors
-from portal.auth.domain import FULL_NAME_MAX_LENGTH, LOGIN_PATTERN, User, login_throttle_key
+from portal.auth.domain import (
+    FULL_NAME_MAX_LENGTH,
+    LOGIN_PATTERN,
+    AdminUser,
+    User,
+    login_throttle_key,
+)
 from portal.auth.ports import AuthUnitOfWork, AuthUnitOfWorkFactory, PasswordHasher
 from portal.core.errors import field_error, not_found, validation_error
 from portal.core.pagination import Page, PageQuery
@@ -56,19 +63,20 @@ class AdminService:
         self._clock = clock
         self._settings = settings
 
-    async def list_users(self, query: PageQuery) -> Page[User]:
+    async def list_users(self, query: PageQuery) -> Page[AdminUser]:
         """Страница учётных записей по ФИО."""
         if query.sort not in (None, "full_name"):
             raise validation_error([field_error("sort", "unknown_value")])
         async with self._uow_factory() as uow:
-            items, total = await uow.users.search(
+            users, total = await uow.users.search(
                 query.q, query.order or "asc", query.offset, query.page_size
             )
+            items = await self._views(uow, users)
         return Page(items, query.page, query.page_size, total)
 
     async def create_user(
         self, actor: CurrentUser | None, full_name: str, login: str, role: Role
-    ) -> tuple[User, str]:
+    ) -> tuple[AdminUser, str]:
         """Создать учётную запись с временным паролем, который показывается один раз."""
         full_name = _clean_full_name(full_name)
         login = login.lower()
@@ -93,11 +101,11 @@ class AdminService:
             if not await uow.users.add(user):
                 raise errors.login_taken()
             await self._audit(uow, "user_created", actor, user)
-        return user, password
+            return await self._view(uow, user), password
 
     async def update_user(
         self, actor: CurrentUser, user_id: UUID, full_name: str | None, role: Role | None
-    ) -> User:
+    ) -> AdminUser:
         """Изменить ФИО и (или) роль другого пользователя; смена роли гасит его сессии."""
         if full_name is not None:
             full_name = _clean_full_name(full_name)
@@ -116,9 +124,9 @@ class AdminService:
             if changed:
                 await uow.users.update(user, *changed)
                 await self._audit(uow, "user_updated", actor, user, details)
-            return user
+            return await self._view(uow, user)
 
-    async def reset_password(self, actor: CurrentUser, user_id: UUID) -> tuple[User, str]:
+    async def reset_password(self, actor: CurrentUser, user_id: UUID) -> tuple[AdminUser, str]:
         """Выдать новый временный пароль и погасить сессии пользователя."""
         password = generate_temporary_password(self._settings.min_length)
         password_hash = await self._hash(password)
@@ -130,14 +138,14 @@ class AdminService:
             await uow.sessions.delete_for_user(user.id)
             await self._unlock_login(uow, user)
             await self._audit(uow, "password_reset", actor, user)
-            return user, password
+            return await self._view(uow, user), password
 
-    async def reset_second_factor(self, actor: CurrentUser, user_id: UUID) -> User:
+    async def reset_second_factor(self, actor: CurrentUser, user_id: UUID) -> AdminUser:
         """Сбросить второй фактор другого пользователя."""
         async with self._uow_factory() as uow:
             user = await self._other_user(uow, actor, user_id)
             await self._reset_second_factor(uow, actor, user)
-            return user
+            return await self._view(uow, user)
 
     async def reset_second_factor_by_login(self, login: str) -> User:
         """Сбросить второй фактор командой на ВМ; так его сбрасывают и администратору."""
@@ -148,7 +156,21 @@ class AdminService:
             await self._reset_second_factor(uow, None, user)
             return user
 
-    async def set_blocked(self, actor: CurrentUser, user_id: UUID, blocked: bool) -> User:
+    async def unlock_login(self, actor: CurrentUser, user_id: UUID) -> tuple[AdminUser, bool]:
+        """Снять временную блокировку входа другого пользователя; `False` — её не было."""
+        async with self._uow_factory() as uow:
+            user = await self._other_user(uow, actor, user_id)
+            return AdminUser(user, None), await self._unlock_locked_login(uow, actor, user)
+
+    async def unlock_login_by_login(self, login: str) -> bool:
+        """Снять блокировку входа командой на ВМ — так её снимают и администратору."""
+        async with self._uow_factory() as uow:
+            user = await uow.users.by_login(login.lower(), lock=True)
+            if user is None:
+                raise not_found()
+            return await self._unlock_locked_login(uow, None, user)
+
+    async def set_blocked(self, actor: CurrentUser, user_id: UUID, blocked: bool) -> AdminUser:
         """Заблокировать (сессии гасятся) или разблокировать пользователя."""
         async with self._uow_factory() as uow:
             user = (
@@ -162,7 +184,7 @@ class AdminService:
                 if blocked:
                     await uow.sessions.delete_for_user(user.id)
                 await self._audit(uow, "user_blocked" if blocked else "user_unblocked", actor, user)
-            return user
+            return await self._view(uow, user)
 
     async def _hash(self, password: str) -> str:
         return await asyncio.get_running_loop().run_in_executor(
@@ -196,6 +218,25 @@ class AdminService:
         await uow.sessions.delete_for_user(user.id)
         await self._unlock_login(uow, user)
         await self._audit(uow, "second_factor_reset", actor, user)
+
+    async def _views(self, uow: AuthUnitOfWork, users: Sequence[User]) -> list[AdminUser]:
+        """Учётные записи с блокировками входа — одним запросом на всю страницу."""
+        keys = {user.id: login_throttle_key(user.login) for user in users}
+        locks = await uow.throttle.login_locks(list(keys.values()), self._clock.now())
+        return [AdminUser(user, locks.get(keys[user.id])) for user in users]
+
+    async def _view(self, uow: AuthUnitOfWork, user: User) -> AdminUser:
+        return (await self._views(uow, [user]))[0]
+
+    async def _unlock_locked_login(
+        self, uow: AuthUnitOfWork, actor: CurrentUser | None, user: User
+    ) -> bool:
+        """Снять блокировку входа, если она действует; иначе ничего не менять (§3)."""
+        if (await self._view(uow, user)).login_locked_until is None:
+            return False
+        await self._unlock_login(uow, user)
+        await self._audit(uow, "login_unlocked", actor, user)
+        return True
 
     @staticmethod
     async def _unlock_login(uow: AuthUnitOfWork, user: User) -> None:

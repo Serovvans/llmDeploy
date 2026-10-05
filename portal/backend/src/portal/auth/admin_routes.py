@@ -10,6 +10,7 @@ from portal.auth.schemas import (
     AdminUserPageOut,
     AdminUserWithPasswordOut,
     CreateUserRequest,
+    LoginUnlockOut,
     UpdateUserRequest,
 )
 from portal.core.access import Admin, ContainerDep, PageQueryDep
@@ -86,6 +87,13 @@ async def reset_second_factor(
     """Сбросить второй фактор."""
     user = await container.admin.reset_second_factor(admin, target)
     return AdminUserOut.of(user, admin.id)
+
+
+@router.post("/{id}/unlock-login")
+async def unlock_login(target: UserId, admin: Admin, container: ContainerDep) -> LoginUnlockOut:
+    """Снять временную блокировку входа; пароль, второй фактор и сессии не меняются."""
+    user, unlocked = await container.admin.unlock_login(admin, target)
+    return LoginUnlockOut(user=AdminUserOut.of(user, admin.id), unlocked=unlocked)
 
 
 @router.post("/{id}/block")

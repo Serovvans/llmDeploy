@@ -18,6 +18,8 @@ PORTAL_SERVICES = ["vllm", "caddy", "bifrost", "portal-api", "portal-worker", "p
 ARCHIVES = ["portal-files.tgz", "qdrant-data.tgz", "bifrost-data.tgz"]
 COPY_FILES = ["portal-db.dump", *ARCHIVES]
 WRITERS = "portal-worker portal-api qdrant bifrost"
+# Так сервисы возвращаются в работу: отсутствующие контейнеры создаются.
+START = f"up -d --no-recreate {WRITERS}"
 # Вызовы, после которых данные сервиса уже не прежние или сервисы остановлены.
 INTRUSIVE = ("stop ", "ALTER DATABASE", "find . -mindepth")
 STAGE_VOLUME = "sh -c set -e cd /vol rm -rf .restore-new"
@@ -98,7 +100,12 @@ class Sandbox:
         (self.stubs / "signal").write_text(fragment)
 
     def run(
-        self, *args: str, stdin: str = "", closed_output: bool = False, no_reader: bool = False
+        self,
+        *args: str,
+        stdin: str = "",
+        closed_output: bool = False,
+        no_reader: bool = False,
+        script: Path = SCRIPT,
     ) -> subprocess.CompletedProcess[str]:
         """Запускает скрипт; вывод можно сделать недоступным.
 
@@ -111,7 +118,7 @@ class Sandbox:
             "STUB_DIR": str(self.stubs),
             "COMPOSE_FILE": "compose.yml",
         }
-        command = [bash, str(SCRIPT), *args]
+        command = [bash, str(script), *args]
         if closed_output:
             command = [bash, "-c", 'exec "$0" "$@" >&- 2>&-', *command]
         if no_reader:
@@ -137,6 +144,10 @@ class Sandbox:
             env=env,
             check=False,
         )
+
+    def start(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """Запуск стека обёрткой stack_up.sh, как его вызывают юнит и ``make up``."""
+        return self.run(*args, script=SCRIPT.with_name("stack_up.sh"))
 
     def restore(self, copy: Path, answer: str = "yes\n") -> subprocess.CompletedProcess[str]:
         return self.run("restore", str(copy), stdin=answer)
@@ -201,7 +212,7 @@ def test_create_dumps_database_and_archives_volumes_between_stop_and_start(
     ]
     assert all("--numeric-owner" in call for call in archived)
     assert all("--exclude ./.restore-new --exclude ./.restore-new.ready" in c for c in archived)
-    assert actions[-1] == f"start {WRITERS}"
+    assert actions[-1] == START
 
     (copy,) = sandbox.target.iterdir()
     assert copy.name.startswith("llm-backup-") and not copy.name.endswith(".partial")
@@ -248,7 +259,7 @@ def test_create_refuses_when_nothing_to_copy(sandbox: Sandbox) -> None:
 def test_failed_create_restarts_services_and_leaves_partial_copy(sandbox: Sandbox) -> None:
     sandbox.fail_on("pg_dump")
     assert_refused(sandbox.run("create", str(sandbox.target)), "pg_dump не выполнен")
-    assert sandbox.calls()[-1] == f"start {WRITERS}"
+    assert sandbox.calls()[-1] == START
     (copy,) = sandbox.target.iterdir()
     assert copy.name.endswith(".partial")
     assert not (copy / "SHA256SUMS").exists()
@@ -266,16 +277,16 @@ def test_failed_create_restarts_services_when_terminal_is_gone(
     assert result.returncode == 1
     actions = sandbox.actions()
     assert actions[0] == f"stop {WRITERS}"
-    assert actions[-1] == f"start {WRITERS}"
+    assert actions[-1] == START
 
 
 def test_signal_during_final_start_does_not_leave_copy_partial(sandbox: Sandbox) -> None:
     """Архивы уже сняты: сигнал на запуске сервисов не обрывает скрипт молча."""
-    sandbox.signal_on(f"start {WRITERS}")
+    sandbox.signal_on(START)
     result = sandbox.run("create", str(sandbox.target))
     assert result.returncode == 0, result.stderr
     assert "Копия готова" in result.stdout
-    assert sandbox.calls()[-1] == f"start {WRITERS}"
+    assert sandbox.calls()[-1] == START
     (copy,) = sandbox.target.iterdir()
     assert not copy.name.endswith(".partial")
     assert (copy / "SHA256SUMS").exists()
@@ -343,7 +354,7 @@ def test_restore_stages_everything_before_switching(sandbox: Sandbox) -> None:
     assert "--single-transaction" in actions[renamed]
     assert actions[-2:] == [
         "exec -T portal-db dropdb -U portal --if-exists --force portal_previous",
-        f"start {WRITERS}",
+        START,
     ]
     # Рабочая база не удаляется никогда: только переименование.
     assert not any(call.endswith("--force portal") for call in actions)
@@ -436,7 +447,7 @@ def test_services_that_fail_to_stop_are_restarted_and_staging_is_discarded(
     calls = sandbox.calls()
     assert not [call for call in calls if "ALTER DATABASE" in call or "tar xzf" in call]
     assert calls[-2].endswith("dropdb -U portal --if-exists --force portal_restore")
-    assert calls[-1] == f"start {WRITERS}"
+    assert calls[-1] == START
 
 
 def test_archive_that_fails_to_unpack_leaves_old_data_and_restarts_services(
@@ -448,7 +459,7 @@ def test_archive_that_fails_to_unpack_leaves_old_data_and_restarts_services(
     calls = sandbox.calls()
     assert not [call for call in calls if "ALTER DATABASE" in call or "find . -mindepth" in call]
     assert sum(DISCARD_VOLUME in call for call in calls) == 3
-    assert calls[-1] == f"start {WRITERS}"
+    assert calls[-1] == START
 
 
 def test_staging_lost_by_volume_is_noticed_before_anything_is_switched(sandbox: Sandbox) -> None:
@@ -458,7 +469,7 @@ def test_staging_lost_by_volume_is_noticed_before_anything_is_switched(sandbox: 
     assert_refused(result, "не сохранилось в томе qdrant-data", "НЕ изменены")
     calls = sandbox.calls()
     assert not [call for call in calls if "ALTER DATABASE" in call or "find . -mindepth" in call]
-    assert calls[-1] == f"start {WRITERS}"
+    assert calls[-1] == START
 
 
 def test_failed_database_switch_changes_nothing_and_restarts_services(sandbox: Sandbox) -> None:
@@ -467,7 +478,7 @@ def test_failed_database_switch_changes_nothing_and_restarts_services(sandbox: S
     assert_refused(result, "база портала не переключена", "НЕ изменены")
     calls = sandbox.calls()
     assert not any("find . -mindepth" in call for call in calls)
-    assert calls[-1] == f"start {WRITERS}"
+    assert calls[-1] == START
 
 
 def test_failed_volume_switch_reports_what_is_already_new(sandbox: Sandbox) -> None:
@@ -481,7 +492,7 @@ def test_failed_volume_switch_reports_what_is_already_new(sandbox: Sandbox) -> N
         RETRY,
     )
     calls = sandbox.calls()
-    assert not any(call.startswith("start") for call in calls)
+    assert not any(call == START for call in calls)
     # Следы остаются: по ним повтор и create узнают о незавершённом восстановлении.
     assert not any(DISCARD_VOLUME in call for call in calls)
     assert not any(call.endswith("--force portal_previous") for call in calls[-3:])
@@ -495,7 +506,7 @@ def test_failed_switch_of_single_volume_is_not_reported_as_unchanged(sandbox: Sa
     result = sandbox.restore(copy)
     assert_refused(result, "смешанными", RETRY)
     assert "НЕ изменены" not in result.stderr
-    assert not any(call.startswith("start") for call in sandbox.calls())
+    assert not any(call == START for call in sandbox.calls())
 
 
 @pytest.mark.parametrize("present", [".restore-new", ".restore-new.ready"])
@@ -534,13 +545,13 @@ def test_signal_while_unpacking_discards_staging_and_restarts_services(sandbox: 
     assert any(
         call.endswith("dropdb -U portal --if-exists --force portal_restore") for call in calls[-2:]
     )
-    assert calls[-1] == f"start {WRITERS}"
+    assert calls[-1] == START
 
 
 def test_signal_while_stopping_services_restarts_them(sandbox: Sandbox) -> None:
     sandbox.signal_on(f"stop {WRITERS}")
     assert_refused(sandbox.restore(sandbox.make_copy()), "восстановление прервано", "НЕ изменены")
-    assert sandbox.calls()[-1] == f"start {WRITERS}"
+    assert sandbox.calls()[-1] == START
 
 
 def test_signal_while_switching_database_is_not_reported_as_unchanged(sandbox: Sandbox) -> None:
@@ -550,17 +561,25 @@ def test_signal_while_switching_database_is_not_reported_as_unchanged(sandbox: S
     assert_refused(result, "восстановление прервано", "смешанными", RETRY)
     assert "НЕ изменены" not in result.stderr
     calls = sandbox.calls()
-    assert not any(call.startswith("start") for call in calls)
+    assert not any(call == START for call in calls)
     assert not any(DISCARD_VOLUME in call for call in calls)
 
 
 def test_signal_during_final_start_does_not_cut_restore_short(sandbox: Sandbox) -> None:
     """Данные уже новые: сигнал на запуске сервисов не обрывает скрипт молча."""
-    sandbox.signal_on(f"start {WRITERS}")
+    sandbox.signal_on(START)
     result = sandbox.restore(sandbox.make_copy())
     assert result.returncode == 0, result.stderr
     assert "Восстановление завершено" in result.stdout
-    assert sandbox.calls()[-1] == f"start {WRITERS}"
+    assert sandbox.calls()[-1] == START
+
+
+def test_restore_starts_services_whose_containers_were_removed(sandbox: Sandbox) -> None:
+    """После make down контейнеров нет: compose start завершился бы ошибкой."""
+    sandbox.fail_on(f"start {WRITERS}")
+    result = sandbox.restore(sandbox.make_copy())
+    assert result.returncode == 0, result.stderr
+    assert sandbox.calls()[-1] == START
 
 
 # --- следы прерванного восстановления ------------------------------------------
@@ -590,7 +609,7 @@ def test_retry_after_interrupted_restore_completes(sandbox: Sandbox) -> None:
     result = sandbox.restore(sandbox.make_copy())
     assert result.returncode == 0, result.stderr
     assert "следы прерванного восстановления" in result.stdout
-    assert sandbox.calls()[-1] == f"start {WRITERS}"
+    assert sandbox.calls()[-1] == START
 
 
 def test_failed_retry_does_not_claim_old_data_or_running_services(sandbox: Sandbox) -> None:
@@ -608,11 +627,130 @@ def test_failed_retry_does_not_claim_old_data_or_running_services(sandbox: Sandb
     )
     assert "НЕ изменены" not in result.stderr
     calls = sandbox.calls()
-    assert not any(call.startswith("start") for call in calls)
+    assert not any(call == START for call in calls)
     assert not any(DISCARD_VOLUME in call for call in calls)
     assert "pg_restore -U portal -d portal_restore" in calls[-1]
 
 
-@pytest.mark.parametrize("args", [[], ["create"], ["restore"], ["purge", "x"]])
+# --- запуск при следах прерванного восстановления ------------------------------
+
+
+def test_pending_without_traces_changes_nothing(sandbox: Sandbox) -> None:
+    result = sandbox.run("pending")
+    assert result.returncode == 0, result.stderr
+    assert sandbox.actions() == []
+
+
+@pytest.mark.parametrize(
+    ("databases", "directories", "trace"),
+    [
+        ("portal_restore\n", "", "база portal_restore"),
+        ("", ".restore-new\n", "том llm_qdrant-data: .restore-new"),
+    ],
+)
+def test_pending_reports_traces_with_distinct_code(
+    sandbox: Sandbox, databases: str, directories: str, trace: str
+) -> None:
+    sandbox.set_traces(databases, directories)
+    result = sandbox.run("pending")
+    assert result.returncode == 3
+    assert trace in result.stdout.splitlines()
+    assert "восстановление не завершено" in result.stderr and RETRY in result.stderr
+    assert sandbox.actions() == []
+
+
+def test_pending_starts_only_database_when_it_is_down(sandbox: Sandbox) -> None:
+    """После перезагрузки ВМ база не запущена: без неё временные базы не увидеть."""
+    sandbox.fail_on("pg_isready")
+    sandbox.set_traces("portal_previous\n", "")
+    result = sandbox.run("pending")
+    assert result.returncode == 3
+    assert sandbox.actions() == ["up -d --wait portal-db"]
+    assert "база portal_previous" in result.stdout
+
+
+def test_pending_that_cannot_read_database_is_an_error_not_a_clean_result(
+    sandbox: Sandbox,
+) -> None:
+    sandbox.fail_on("FROM pg_database")
+    result = sandbox.run("pending")
+    assert_refused(result, "не удалось прочитать список баз")
+    assert sandbox.actions() == []
+
+
+def test_pending_without_portal_checks_only_bifrost_volume(sandbox: Sandbox) -> None:
+    sandbox.set_services(["vllm", "caddy", "bifrost"])
+    sandbox.set_traces("portal_restore\n", "")
+    result = sandbox.run("pending")
+    assert result.returncode == 0, result.stderr
+    calls = sandbox.calls()
+    assert not any("portal-db" in call for call in calls)
+    assert sum("ls -d .restore-new" in call for call in calls) == 1
+
+
+def test_pending_with_model_only_runs_no_containers(sandbox: Sandbox) -> None:
+    sandbox.set_services(["vllm"])
+    sandbox.set_traces("portal_restore\n", ".restore-new\n")
+    result = sandbox.run("pending")
+    assert result.returncode == 0, result.stderr
+    assert sandbox.calls() == []
+
+
+def test_pending_does_not_create_volumes_that_do_not_exist_yet(sandbox: Sandbox) -> None:
+    """До первого запуска сервиса его тома нет: docker run создал бы его пустым."""
+    sandbox.fail_on("volume inspect llm_qdrant-data")
+    assert sandbox.run("pending").returncode == 0
+    probed = [call.split()[4] for call in sandbox.calls() if "ls -d .restore-new" in call]
+    assert probed == ["llm_portal-files:/vol:ro", "llm_bifrost-data:/vol:ro"]
+
+
+def test_start_without_traces_starts_everything(sandbox: Sandbox) -> None:
+    result = sandbox.start("--wait")
+    assert result.returncode == 0, result.stderr
+    assert sandbox.actions() == ["up -d --wait"]
+
+
+@pytest.mark.parametrize(
+    ("databases", "directories", "trace"),
+    [
+        ("portal_previous\n", "", "база portal_previous"),
+        ("", ".restore-new\n", "том llm_portal-files: .restore-new"),
+    ],
+)
+def test_start_with_traces_stops_writers_and_starts_the_rest(
+    sandbox: Sandbox, databases: str, directories: str, trace: str
+) -> None:
+    sandbox.set_traces(databases, directories)
+    result = sandbox.start("--wait")
+    assert result.returncode == 3
+    # Без --wait; Caddy отдельно и без зависимостей, иначе он запустил бы Bifrost.
+    assert sandbox.actions() == [f"stop {WRITERS}", "up -d vllm portal-db", "up -d --no-deps caddy"]
+    assert trace in result.stderr
+    assert f"сервисы {WRITERS} остановлены и не запущены" in result.stderr
+    assert RETRY in result.stderr
+
+
+def test_start_that_cannot_check_keeps_writers_as_they_are(sandbox: Sandbox) -> None:
+    sandbox.fail_on("FROM pg_database")
+    result = sandbox.start("--wait")
+    assert_refused(result, "не удалось прочитать список баз", "проверить не удалось")
+    assert sandbox.actions() == ["up -d vllm portal-db", "up -d --no-deps caddy"]
+
+
+def test_start_with_traces_without_portal(sandbox: Sandbox) -> None:
+    sandbox.set_services(["vllm", "vllm-embed", "caddy", "bifrost"])
+    sandbox.set_traces("", ".restore-new.ready\n")
+    assert sandbox.start().returncode == 3
+    assert sandbox.actions() == ["stop bifrost", "up -d vllm vllm-embed", "up -d --no-deps caddy"]
+
+
+def test_start_without_gateway_has_nothing_to_check(sandbox: Sandbox) -> None:
+    sandbox.set_services(["vllm"])
+    sandbox.set_traces("portal_restore\n", ".restore-new\n")
+    assert sandbox.start().returncode == 0
+    assert sandbox.calls() == ["up -d"]
+
+
+@pytest.mark.parametrize("args", [[], ["create"], ["restore"], ["purge", "x"], ["pending", "x"]])
 def test_usage_errors(sandbox: Sandbox, args: list[str]) -> None:
     assert_refused(sandbox.run(*args), "ОШИБКА")

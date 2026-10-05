@@ -10,15 +10,31 @@
 	# контейнера — адрес docker-сети: без этой опции Caddy не подберёт сертификат
 	# (docs/portal-design.md §3.1). Для доменного имени опция безвредна.
 	default_sni {$LLM_HOSTNAME}
+	# Без HTTP/3: UDP на хост не публикуется, а заголовок alt-svc звал бы клиентов на
+	# порт 443, которого снаружи нет (docs/portal-design.md §3.2).
+	servers {
+		protocols h1 h2
+	}
 }
 
 (tls-corp) {
-	# Явный tls с файлами отключает ACME для сайта: у ВМ нет публичного DNS.
+	# Явный tls с файлами отключает ACME для сайта: сертификат корпоративного CA кладут
+	# вручную, а Let's Encrypt выпускает отдельный клиент (docs/portal-design.md §3.2).
 	tls /certs/fullchain.pem /certs/privkey.pem
 }
 
 (tls-internal) {
 	tls internal
+}
+
+(bifrost-route) {
+	handle {args[0]} {
+		# Bifrost получает ровно разрешённый путь, а не то, что прислал клиент: матчер
+		# сравнивает нормализованный путь без учёта регистра, и вариант с «..», «//»
+		# или %-кодированием Bifrost мог бы разобрать иначе, чем Caddy.
+		rewrite * {args[0]}
+		reverse_proxy bifrost:8080
+	}
 }
 
 (site-api) {
@@ -88,9 +104,18 @@
 {$LLM_HOSTNAME} {
 	import tls-{$TLS_MODE}
 
-	# Админ-API и UI Bifrost (/api/*, /) не должны быть доступны через 443.
-	handle /v1/* {
-		reverse_proxy bifrost:8080
+	# Только маршруты OpenAI-совместимого API (docs/design.md §3.3). Весь префикс /v1/
+	# отдавать нельзя: под ним у Bifrost есть очередь заданий, MCP и админ-интерфейс,
+	# которые enforce_auth_on_inference ключом не закрывает.
+	import bifrost-route /v1/chat/completions
+	import bifrost-route /v1/completions
+	import bifrost-route /v1/embeddings
+	import bifrost-route /v1/models
+
+	# Остальное под /v1 — 404 здесь же, чтобы в режиме portal запрос не ушёл в статику.
+	@v1-other path /v1 /v1/*
+	handle @v1-other {
+		respond 404
 	}
 
 	import site-{$SITE_MODE}

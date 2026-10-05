@@ -9,7 +9,9 @@
 (в ответе нет рассуждений); изображение; ``response_format: json_schema`` (ответ валидируется
 по схеме); tool call. Отрицательные проверки (лимит ключа не расходуют): запрос без ключа
 и с неверным ключом получает 401/403; ``/api/governance/virtual-keys``, ``/metrics`` и ``/``
-через 443 отдают 404 (Caddy проксирует только ``/v1/*``).
+через 443 отдают 404. Caddy проксирует в Bifrost только четыре пути —
+``/v1/chat/completions``, ``/v1/completions``, ``/v1/embeddings``, ``/v1/models``
+(docs/design.md §3.3); остальное под ``/v1`` — 404 при любом ``SITE_MODE``.
 
 При ``SITE_MODE=portal`` (третий этап, docs/portal-design.md §3, §3.2) вместо «всё, кроме
 ``/v1/*``, — 404» проверяется портал: ``/`` и ``/login`` отдают страницу с заголовками
@@ -31,7 +33,9 @@ Qwen3.8 (§3.1): мышление включено по умолчанию с ``
 
 Окружение:
     LLM_BASE_URL  проверяемый эндпоинт; по умолчанию ``https://${LLM_HOSTNAME}/v1``,
-                  а с ``--direct`` — ``http://127.0.0.1:8000/v1``.
+                  а с ``--direct`` — ``http://127.0.0.1:8000/v1``. Через проброшенный порт
+                  (docs/portal-design.md §3.2) — ``https://llm.<домен>:18443/v1``: корень
+                  сайта для проверок обвязки берётся из этого же адреса, вместе с портом.
     LLM_HOSTNAME  DNS-имя сервиса, если LLM_BASE_URL не задан.
     LLM_API_KEY   ключ Bifrost ``sk-bf-...``; с ``--direct`` — VLLM_API_KEY (обязателен,
                   кроме ``--site-only``).
@@ -42,6 +46,10 @@ Qwen3.8 (§3.1): мышление включено по умолчанию с ``
                   certifi, а не системному хранилищу ОС. Альтернатива — SSL_CERT_FILE.
                   При ``TLS_MODE=internal`` — ``deploy/caddy-root.crt``; адресом может быть
                   и IP (``LLM_HOSTNAME=192.168.25.8``).
+    TLS_MODE      та же переменная, что в ``deploy/.env``. При ``internal`` и незаданном
+                  LLM_CA_CERT берётся ``deploy/caddy-root.crt`` этого клона, если он есть.
+                  При других значениях файл не используется: после перехода на публичный
+                  сертификат он остаётся на диске, но проверять по нему уже нельзя.
 
 Код выхода: 0 — все проверки прошли, 1 — хотя бы одна не прошла или ошибка конфигурации.
 """
@@ -58,6 +66,7 @@ import sys
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -77,8 +86,22 @@ TEXT_PROMPT = "Сколько будет 2+2? Ответь только числ
 INVALID_API_KEY = "sk-bf-invalid-smoke-test"
 # Порт vLLM на ВМ открыт только на loopback (§3.7, §8).
 DIRECT_BASE_URL = "http://127.0.0.1:8000/v1"
-# Через 443 Caddy отдаёт только /v1/*; остальное, включая API управления Bifrost, — 404.
+# Корень собственного CA Caddy: его выгружает install.sh при TLS_MODE=internal.
+INTERNAL_CA_FILE = Path(__file__).resolve().parent.parent / "deploy" / "caddy-root.crt"
+# Через 443 Caddy отдаёт только четыре пути API (docs/design.md §3.3); остальное,
+# включая API управления Bifrost, — 404.
 CLOSED_PATHS = ("/api/governance/virtual-keys", "/metrics", "/")
+# Под /v1 закрыто всё, кроме тех четырёх путей, при любом SITE_MODE: Bifrost принимал
+# /v1/async/* и /v1/mcp/* без ключа, а под неизвестными путями отдавал админ-интерфейс.
+V1_CLOSED_ROUTES = (
+    ("GET", "/v1/unknown-route"),
+    ("GET", "/v1/mcp/tools"),
+    ("GET", "/v1/skills"),
+    ("GET", "/v1"),
+    ("GET", "/v1/"),
+    ("POST", "/v1/async/chat/completions"),
+    ("POST", "/v1/mcp/tool/execute"),
+)
 SITE_MODES = ("api", "portal")
 # Не /api/*: уходят в статику портала, а не в бэкенд и не в Bifrost (docs/portal-api.md §1.1).
 PORTAL_CLOSED_PATHS = ("/metrics", "/healthz", "/docs", "/redoc", "/openapi.json")
@@ -164,6 +187,8 @@ def load_settings(
     ca_cert = env.get("LLM_CA_CERT", "").strip() or None
     if ca_cert and not os.path.isfile(ca_cert):
         raise SmokeTestError(f"LLM_CA_CERT указывает на несуществующий файл: {ca_cert}")
+    if not ca_cert and env.get("TLS_MODE", "").strip() == "internal" and INTERNAL_CA_FILE.is_file():
+        ca_cert = str(INTERNAL_CA_FILE)
     site_mode = env.get("SITE_MODE", "").strip() or "api"
     if site_mode not in SITE_MODES:
         raise SmokeTestError(f"SITE_MODE={site_mode!r}: ожидается api или portal")
@@ -435,7 +460,7 @@ def check_key_rejected(client: httpx.Client, api_key: str | None) -> str:
 
 
 def check_closed_paths(client: httpx.Client, root: str) -> str:
-    """Всё, кроме ``/v1/*``, через 443 отдаёт 404 (запросы без ключа)."""
+    """Всё, кроме путей API под ``/v1``, через 443 отдаёт 404 (запросы без ключа)."""
     unexpected = []
     for path in CLOSED_PATHS:
         response = send_with_key(client, "GET", root + path, api_key=None)
@@ -443,9 +468,27 @@ def check_closed_paths(client: httpx.Client, root: str) -> str:
             unexpected.append(f"{path} → HTTP {response.status_code}")
     if unexpected:
         raise SmokeTestError(
-            "ожидался 404 (Caddy должен проксировать только /v1/*): " + ", ".join(unexpected)
+            "ожидался 404 (Caddy должен проксировать только четыре пути API под /v1): "
+            + ", ".join(unexpected)
         )
     return "404: " + ", ".join(CLOSED_PATHS)
+
+
+def check_v1_closed_routes(client: httpx.Client, root: str) -> str:
+    """Под ``/v1`` всё, кроме четырёх путей API, отдаёт 404 от Caddy (запросы без ключа)."""
+    routes = [f"{method} {path}" for method, path in V1_CLOSED_ROUTES]
+    unexpected = []
+    for (method, path), route in zip(V1_CLOSED_ROUTES, routes, strict=True):
+        body: JsonObject | None = {} if method == "POST" else None
+        response = send_with_key(client, method, root + path, api_key=None, body=body)
+        if response.status_code != httpx.codes.NOT_FOUND:
+            unexpected.append(f"{route} → HTTP {response.status_code}")
+    if unexpected:
+        raise SmokeTestError(
+            "ожидался 404 (Caddy должен проксировать только /v1/chat/completions, "
+            "/v1/completions, /v1/embeddings и /v1/models): " + ", ".join(unexpected)
+        )
+    return "404: " + ", ".join(routes)
 
 
 def _get_without_key(client: httpx.Client, url: str) -> httpx.Response:
@@ -634,10 +677,12 @@ Check = tuple[str, Callable[[], str]]
 
 
 def build_site_checks(client: httpx.Client, root: str, site_mode: str) -> list[Check]:
-    """Проверки того, что сайт отдаёт помимо ``/v1/*``: всё закрыто (``api``) или портал."""
+    """Проверки того, что сайт отдаёт помимо путей API: всё закрыто (``api``) или портал."""
+    v1_closed: Check = ("v1_closed_routes", lambda: check_v1_closed_routes(client, root))
     if site_mode != "portal":
-        return [("closed_paths", lambda: check_closed_paths(client, root))]
+        return [v1_closed, ("closed_paths", lambda: check_closed_paths(client, root))]
     return [
+        v1_closed,
         ("portal_page", lambda: check_portal_page(client, root)),
         ("portal_closed_paths", lambda: check_portal_closed_paths(client, root)),
         ("portal_session_required", lambda: check_portal_session_required(client, root)),

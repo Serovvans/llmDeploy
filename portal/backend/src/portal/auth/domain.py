@@ -34,6 +34,14 @@ class User:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class AdminUser:
+    """Учётная запись в ответах администратору: с временной блокировкой входа (§3)."""
+
+    user: User
+    login_locked_until: datetime | None
+
+
 @dataclass
 class Session:
     """Сессия; значение cookie хранится только хешем."""

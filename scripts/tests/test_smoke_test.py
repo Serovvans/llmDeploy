@@ -95,6 +95,28 @@ def test_settings_accepts_existing_ca_cert(tmp_path: Path) -> None:
     assert st.load_settings(env).ca_cert == str(ca)
 
 
+@pytest.mark.parametrize(("tls_mode", "used"), [("internal", True), ("corp", False), ("", False)])
+def test_caddy_root_is_default_ca_only_for_internal_tls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tls_mode: str, used: bool
+) -> None:
+    """После перехода на публичный сертификат caddy-root.crt остаётся на диске."""
+    root = tmp_path / "caddy-root.crt"
+    root.write_text("pem")
+    monkeypatch.setattr(st, "INTERNAL_CA_FILE", root)
+    env = {"LLM_HOSTNAME": "h", "LLM_API_KEY": "k", "TLS_MODE": tls_mode}
+    assert st.load_settings(env).ca_cert == (str(root) if used else None)
+
+
+def test_explicit_ca_wins_over_caddy_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "caddy-root.crt"
+    explicit = tmp_path / "corp.pem"
+    for path in (root, explicit):
+        path.write_text("pem")
+    monkeypatch.setattr(st, "INTERNAL_CA_FILE", root)
+    env = {"LLM_HOSTNAME": "h", "LLM_API_KEY": "k", "TLS_MODE": "internal"}
+    assert st.load_settings({**env, "LLM_CA_CERT": str(explicit)}).ca_cert == str(explicit)
+
+
 @pytest.mark.parametrize(
     ("base_url", "root"),
     [
@@ -380,6 +402,46 @@ def test_check_closed_paths_reports_open_paths() -> None:
         st.check_closed_paths(client, "https://llm.example")
 
 
+def test_check_v1_closed_routes_sends_each_route_without_key() -> None:
+    recorder = run_check(
+        lambda client: st.check_v1_closed_routes(client, "https://llm.example"),
+        *[httpx.Response(404) for _ in st.V1_CLOSED_ROUTES],
+    )
+    sent = [(request.method, request.url.raw_path.decode()) for request in recorder.requests]
+    assert sent == [
+        ("GET", "/v1/unknown-route"),
+        ("GET", "/v1/mcp/tools"),
+        ("GET", "/v1/skills"),
+        ("GET", "/v1"),
+        ("GET", "/v1/"),
+        ("POST", "/v1/async/chat/completions"),
+        ("POST", "/v1/mcp/tool/execute"),
+    ]
+    assert all("Authorization" not in request.headers for request in recorder.requests)
+
+
+@pytest.mark.parametrize(
+    ("index", "status", "fragment"),
+    [
+        # Bifrost отдаёт под неизвестным путём админ-интерфейс.
+        (0, 200, "GET /v1/unknown-route → HTTP 200"),
+        # Запрос дошёл до Bifrost, а не остановлен Caddy.
+        (5, 401, "POST /v1/async/chat/completions → HTTP 401"),
+        (6, 200, "POST /v1/mcp/tool/execute → HTTP 200"),
+    ],
+)
+def test_check_v1_closed_routes_reports_routes_reaching_bifrost(
+    index: int, status: int, fragment: str
+) -> None:
+    responses = [httpx.Response(404) for _ in st.V1_CLOSED_ROUTES]
+    responses[index] = httpx.Response(status)
+    with (
+        Recorder(responses).client() as client,
+        pytest.raises(st.SmokeTestError, match=fragment),
+    ):
+        st.check_v1_closed_routes(client, "https://llm.example")
+
+
 # --- лимит ключа -------------------------------------------------------------
 
 
@@ -489,8 +551,9 @@ def test_build_checks_includes_closed_paths_through_gateway() -> None:
 
 def test_build_checks_skips_caddy_only_check_in_direct_mode() -> None:
     names = _check_names(direct=True)
-    assert "closed_paths" not in names
-    assert names == [name for name in _check_names(direct=False) if name != "closed_paths"]
+    caddy_only = {"closed_paths", "v1_closed_routes"}
+    assert not caddy_only & set(names)
+    assert names == [name for name in _check_names(direct=False) if name not in caddy_only]
 
 
 # --- портал (SITE_MODE=portal) ------------------------------------------------
@@ -739,6 +802,7 @@ def test_run_compose_reports_missing_docker(monkeypatch: pytest.MonkeyPatch) -> 
 
 MODEL_CHECKS = ["text", "thinking_disabled", "image", "json_schema", "tool_call"]
 PORTAL_CHECKS = [
+    "v1_closed_routes",
     "portal_page",
     "portal_closed_paths",
     "portal_session_required",
@@ -746,8 +810,11 @@ PORTAL_CHECKS = [
 ]
 
 
+API_CHECKS = ["v1_closed_routes", "closed_paths"]
+
+
 def test_build_checks_api_mode_is_unchanged() -> None:
-    assert _check_names(direct=False) == [*MODEL_CHECKS, "no_key", "invalid_key", "closed_paths"]
+    assert _check_names(direct=False) == [*MODEL_CHECKS, "no_key", "invalid_key", *API_CHECKS]
 
 
 def test_build_checks_portal_mode_replaces_closed_paths() -> None:
@@ -756,7 +823,7 @@ def test_build_checks_portal_mode_replaces_closed_paths() -> None:
 
 
 def test_build_checks_site_only_makes_no_model_requests() -> None:
-    assert _check_names(direct=False, site_only=True) == ["no_key", "closed_paths"]
+    assert _check_names(direct=False, site_only=True) == ["no_key", *API_CHECKS]
     names = _check_names(direct=False, site_only=True, site_mode="portal", compose_file="c.yml")
     assert names == ["no_key", *PORTAL_CHECKS, "services"]
 
@@ -780,6 +847,7 @@ def test_main_site_only_runs_without_key(
     monkeypatch.setenv("SITE_MODE", "portal")
     responses = [
         httpx.Response(401, json={"error": {"message": "vk"}}),
+        *[httpx.Response(404) for _ in st.V1_CLOSED_ROUTES],
         page_response(),
         page_response(),
         *closed_path_responses(),

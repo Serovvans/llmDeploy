@@ -134,6 +134,7 @@ test('маршруты администратора закрыты сотруд�
     'сброс второго фактора': (api) => api.post(`${target}/reset-second-factor`),
     'блокировка': (api) => api.post(`${target}/block`),
     'разблокировка': (api) => api.post(`${target}/unblock`),
+    'снятие блокировки входа': (api) => api.post(`${target}/unlock-login`),
   };
   for (const [name, call] of Object.entries(calls)) {
     const response = await call(employee.api);

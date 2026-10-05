@@ -11,7 +11,7 @@ import { pngImage, textFile } from '../support/files';
 import { expect, test, type Member } from '../support/fixtures';
 import { must } from '../support/must';
 import { addKbDocument, askChat, createDialog, eventsOf, parseStream, stubReply } from '../support/portal';
-import { expectAnswerReady, fillLogin } from '../support/ui';
+import { expectAnswerReady, fillLogin, searchUsers } from '../support/ui';
 
 type Theme = 'light' | 'dark';
 
@@ -298,7 +298,7 @@ for (const theme of ['light', 'dark'] as const) {
     await checkScreen(page, theme, 'разбор-результат', testInfo, [...dataWords, ...stubFields]);
 
     await page.goto('/admin/users');
-    await page.getByRole('textbox', { name: 'Найти по ФИО или логину' }).fill(member.account.login);
+    await searchUsers(page, member.account.login);
     await expect(page.getByRole('row').filter({ hasText: member.account.login })).toHaveCount(1);
     await checkScreen(page, theme, 'пользователи', testInfo);
     await page.getByRole('button', { name: 'Добавить пользователя' }).click();

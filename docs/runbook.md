@@ -1,7 +1,9 @@
 # Runbook: установка и эксплуатация LLM-сервиса
 
 Практическая инструкция для администратора ВМ. Решения и их обоснование — в
-[`design.md`](design.md), сетевые требования — в [`devops-request.md`](devops-request.md).
+[`design.md`](design.md) и [`portal-design.md`](portal-design.md) (портал сотрудников),
+сетевые требования — в [`devops-request.md`](devops-request.md). Порядок запуска портала
+в VPN и открытия доступа из интернета — в [`vpn-launch.md`](vpn-launch.md).
 
 Пометка **[ВМ]** — шаг не проверялся локально (нет GPU/Docker), его результат нужно
 подтвердить при первой установке и при необходимости поправить этот документ.
@@ -9,22 +11,34 @@
 ## 0. Как устроен проект
 
 ```
-Клиент ──HTTPS:443──▶ Caddy ──/v1/*──▶ Bifrost (ключи sk-bf-, лимиты) ──▶ vLLM (модель "default")
-                                          127.0.0.1:8080 (админка)        [vllm-embed "embeddings"]
+Клиент ──HTTPS:443──▶ Caddy ──/v1/…──▶ Bifrost (ключи sk-bf-, лимиты) ──▶ vLLM (модель "default")
+                                          127.0.0.1:8081 (админка)        [vllm-embed "embeddings"]
 ```
+
+Через Caddy доступны только четыре маршрута API: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`. Всё остальное под `/v1` —
+404; HTTP/3 отключён (`design.md` §3.3).
+
+Caddy слушает три порта хоста, все ведут на один сайт: 443, 8080 (цель проброса из
+интернета) и 18443 (тот же адрес `https://llm.<домен>:18443` изнутри сети) —
+`portal-design.md` §3.2. С профилем `portal` тот же Caddy отдаёт ещё портал: `/api/*` — `portal-api`, остальное —
+`portal-web`; схема — `portal-design.md` §3.
 
 | Каталог | Что там |
 |---|---|
-| `deploy/` | `docker-compose.yml`, `.env.example`, `caddy/`, `bifrost/config.json`, `monitoring/`, `systemd/` |
+| `deploy/` | `docker-compose.yml`, `.env.example`, `caddy/`, `bifrost/config.json`, `monitoring/`, `systemd/`; на ВМ — ещё `.env`, `certs/`, `lego/` (состояние клиента Let's Encrypt) и необязательный `portal/config.override.yaml` (3.6) |
 | `Makefile` | однострочные команды: `make help` |
-| `scripts/` | `install_host.sh`, `install.sh`, `preflight.sh`, `smoke_test.py`, `keys.py`, `bench.sh`, `with_env.sh`, тесты (uv-проект) |
-| `docs/` | дизайн, заявка DevOps, этот runbook |
-| `.claude/agents/` | агенты для разработки: `infra-engineer`, `scripts-engineer`, `reviewer` |
+| `scripts/` | `install_host.sh`, `install.sh`, `preflight.sh`, `cert.sh`, `stack_up.sh`, `smoke_test.py`, `keys.py`, `backup.sh`, `bench.sh`, `dev_stand.sh`, `with_env.sh`, тесты (uv-проект) |
+| `portal/` | портал сотрудников: `backend/`, `frontend/` (со сквозными тестами в `e2e/`), `dev/` — стенд без GPU |
+| `docs/` | дизайн сервиса и портала, заявка DevOps, этот runbook, `vpn-launch.md`, `domain-setup.md` (развёртывание с доменом), памятка сотруднику `user-guide.md` |
+| `.claude/agents/` | агенты для разработки; состав — в `CLAUDE.md` |
 
 Compose-профили: базовый (только vllm), `gateway` (caddy, bifrost — второй этап
 развёртывания, `design.md` §3.7), `embeddings` (vllm-embed), `monitoring` (dcgm-exporter,
-Prometheus, Grafana). Имя проекта фиксировано — `llm`, поэтому volumes называются
-`llm_hf-cache`, `llm_bifrost-data`, `llm_caddy-data`, `llm_prometheus-data`.
+Prometheus, Grafana), `portal` (portal-web, portal-api, portal-worker, portal-db, qdrant —
+третий этап, `design.md` §3.8), `cert` (lego — разовый запуск из `make cert`, в старт
+стека не входит). Имя проекта фиксировано — `llm`, поэтому volumes
+называются `llm_hf-cache`, `llm_bifrost-data`, `llm_caddy-data`, `llm_prometheus-data`,
+`llm_portal-db-data`, `llm_qdrant-data`, `llm_portal-files`.
 
 ## 1. Перед установкой
 
@@ -59,16 +73,20 @@ Prometheus, Grafana). Имя проекта фиксировано — `llm`, п
 ВМ, и системное доверие распространилось бы на любые домены. Когда корпоративный
 сертификат появится, перейдите на `corp` (4.3), клиентский код менять не придётся.
 
-Почему не другие варианты: Let's Encrypt требует публичной DNS-зоны с API и сборки Caddy
-с плагином, к тому же имя хоста попадёт в публичные CT-логи. Самоподписанный сертификат
+Для доступа из интернета по доменному имени режим `corp` получает сертификат Let's
+Encrypt: его выпускает и продлевает `make cert` (отдельный клиент lego, DNS-01), файлы
+ложатся в те же `deploy/certs/`. Порядок — [`domain-setup.md`](domain-setup.md).
+
+Почему не другие варианты: самоподписанный сертификат
 не продлевается сам, и клиенты в итоге отключают проверку. HTTP без TLS передаёт ключи
 `sk-bf-` открытым текстом (`design.md` §3.4).
 
 ## 2. Установка
 
-Установка разбита на два этапа (`design.md` §3.7). Первый не зависит от DevOps: модель
+Установка разбита на этапы (`design.md` §3.7, §3.8). Первый не зависит от DevOps: модель
 разворачивается и проверяется сразу. Второй добавляет внешний доступ, когда появятся
-DNS-имя, сертификат и правило файрвола на 443.
+DNS-имя, сертификат и правило файрвола на 443. Третий, необязательный, добавляет портал
+сотрудников (2.9).
 
 Все команды выполняются на ВМ, из каталога с клоном репозитория. `make` сам подставляет
 `sudo`, если запущен не от root; `make help` показывает список целей.
@@ -90,6 +108,10 @@ make gateway LLM_HOSTNAME=llm.<корп.домен> TLS_MODE=corp        # 2.6
 # или без корпоративного сертификата:
 make gateway LLM_HOSTNAME=llm.<корп.домен> TLS_MODE=internal
 make key NAME=smoke && make smoke KEY=sk-bf-...                 # 2.7
+
+# --- этап 3: портал сотрудников (2.9) ---
+make key NAME=portal      # значение sk-bf-... вписать в PORTAL_LLM_API_KEY в deploy/.env
+make portal               # если профиль embeddings ещё не включён: make portal PROFILES=embeddings
 ```
 
 Путь `/opt/llm` не обязателен: `install.sh` пропишет в systemd-юнит фактический путь к
@@ -152,9 +174,11 @@ make model PROFILES=monitoring    # вместе с Prometheus и Grafana
 Что делает скрипт, по шагам:
 1. Запускает `preflight.sh`.
 2. Создаёт `deploy/.env` (root, 600) и генерирует пустые секреты: `VLLM_API_KEY`,
-   `BIFROST_ADMIN_PASSWORD`, `BIFROST_ENCRYPTION_KEY`, `GRAFANA_ADMIN_PASSWORD`. Логин
-   админки Bifrost — `admin`. Уже заданные значения не меняются. Секреты Bifrost
-   генерируются сразу, хотя понадобятся только на втором этапе.
+   `BIFROST_ADMIN_PASSWORD`, `BIFROST_ENCRYPTION_KEY`, `GRAFANA_ADMIN_PASSWORD`,
+   `PORTAL_DB_PASSWORD`, `QDRANT_API_KEY`, `PORTAL_SECRET_KEY`. Логин админки Bifrost —
+   `admin`. Уже заданные значения не меняются. Секреты Bifrost и портала генерируются
+   сразу, хотя понадобятся только на следующих этапах: compose требует их при любом
+   наборе профилей.
 3. Выполняет `docker compose config` и `pull`.
 4. Скачивает веса моделей в volume `llm_hf-cache`. Это ~30 ГБ, занимает десятки минут.
    Отдельный шаг нужен, потому что загрузка внутри запуска могла бы не уложиться в
@@ -233,15 +257,21 @@ make gateway LLM_HOSTNAME=llm.<корп.домен> TLS_MODE=corp
 | `PROFILES` | если нужно поменять набор дополнительных профилей |
 
 Команда добавляет к работающей модели профиль `gateway` — Caddy и Bifrost — и:
-1. Проверяет сертификат для `corp` (2.5).
-2. Выполняет `docker compose pull` и поднимает стек целиком, ожидая healthy.
-3. Для `internal` выгружает корневой сертификат в `deploy/caddy-root.crt`.
-4. Проверяет через 443, что запрос к модели без ключа получает 401/403, а `/` — 404.
+1. Проверяет сертификат для `corp` (2.5). Сам сертификат она не выпускает: Let's
+   Encrypt — заранее, `make cert` (`domain-setup.md`).
+2. Выполняет `docker compose pull` и поднимает стек целиком, ожидая healthy; затем
+   пересоздаёт Bifrost, чтобы применился текущий `deploy/bifrost/config.json` (4.5).
+3. Для `corp` с сертификатом от `make cert` и заданным `TIMEWEBCLOUD_AUTH_TOKEN` включает
+   таймер продления `llm-cert-renew.timer`.
+4. Для `internal` выгружает корневой сертификат в `deploy/caddy-root.crt`.
+5. Проверяет через 443, что запрос к модели без ключа получает 401/403, а `/` — 404, и
+   что на портах 8080 и 18443 отвечает тот же сайт.
 
 Заданные значения записываются в `deploy/.env` (`LLM_HOSTNAME`, `TLS_MODE`,
 `COMPOSE_PROFILES`), поэтому повторный `make gateway` можно запускать без параметров.
 Профиль `gateway` из `COMPOSE_PROFILES` сам не убирается: чтобы вернуться к одной
-модели, уберите его из `deploy/.env` и выполните `make up`.
+модели, уберите его из `deploy/.env` и выполните `make up`. `LLM_HOSTNAME` может быть и
+IP-адресом ВМ — так сервис запускается до привязки домена (`vpn-launch.md`, часть A).
 
 Preflight на этом этапе не повторяется: готовность ВМ уже подтверждена на первом.
 
@@ -257,7 +287,8 @@ make key NAME=smoke REQUESTS=100
 make key NAME=smoke-limit REQUESTS=3
 
 # 2. Основной смоук-тест через HTTPS. При TLS_MODE=internal корневой сертификат
-#    подставляется сам; для corp укажите CA=<PEM корпоративного корневого CA>
+#    подставляется сам; для сертификата корпоративного CA укажите CA=<PEM его корня>;
+#    для Let's Encrypt CA не нужен
 make smoke KEY=sk-bf-...
 
 # 3. Проверка лимита
@@ -268,7 +299,9 @@ sudo docker compose -f deploy/docker-compose.yml restart bifrost
 make keys
 ```
 
-`LLM_CA_CERT` обязателен для `corp`: httpx не читает системное хранилище сертификатов.
+`CA` (`LLM_CA_CERT`) нужен только для сертификата корпоративного CA: httpx не читает
+системное хранилище сертификатов, а проверяет по стандартному набору публичных корней.
+Сертификат Let's Encrypt проверяется без него.
 
 Смоук-тест выполняет те же проверки модели, что и `make smoke-model`, плюс проверки
 обвязки: 401/403 без ключа и с неверным ключом, 404 на `/api/*`, `/metrics` и `/`
@@ -276,18 +309,26 @@ make keys
 тестовые ключи: `make revoke ID=<id>`.
 
 Отдельные проверки при первой установке **[ВМ]**:
-- `/v1/*` с ключом `sk-bf-...` работает при включённой admin-auth. По исходникам v2.2.0
+- разрешённые маршруты `/v1` с ключом `sk-bf-...` работают при включённой admin-auth. По исходникам v2.2.0
   это так; документация Bifrost намекает на `disable_auth_on_inference`. Если не
   работает, добавить этот параметр в `config.json`, предварительно внеся в дизайн;
 - модель `default` принимается Bifrost без префикса `vllm/`;
-- `curl -s http://127.0.0.1:8080/metrics` отвечает без пароля, а
-  `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/governance/virtual-keys`
-  без Basic-auth возвращает 401.
+- `curl -s http://127.0.0.1:8081/metrics` отвечает без пароля, а
+  `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/governance/virtual-keys`
+  без Basic-auth возвращает 401;
+- чат, поток и эмбеддинги через Bifrost отвечают 200, в `make logs SERVICE=bifrost` нет
+  «connection to private IP» (провайдеру `vllm` разрешены частные адреса, 4.5);
+- закрытые маршруты под `/v1` отвечают 404 без обращения к Bifrost:
+  `POST /v1/async/chat/completions`, `GET /v1/skills`, `/v1/responses`,
+  `/v1/models/<id>`; в заголовках ответов нет `alt-svc`; `POST /v1/completions` с ключом
+  отвечает 200;
+- запросы с моделью `default` и `embeddings` без префикса `vllm/` проходят. Если ответ —
+  400 «could not auto resolve a provider», нужно решение владельца (`design.md` §13).
 
 С рабочей станции администратора UI Bifrost и Grafana открываются через туннель:
 
 ```bash
-ssh -L 8080:127.0.0.1:8080 -L 3000:127.0.0.1:3000 <админ>@<вм>
+ssh -L 8081:127.0.0.1:8081 -L 3000:127.0.0.1:3000 <админ>@<вм>
 ```
 
 ### 2.8 Предзагрузка весов вручную
@@ -300,6 +341,51 @@ make preload
 
 После загрузки можно поставить `HF_HUB_OFFLINE=1`: сервис перестанет обращаться к
 Hugging Face.
+
+### 2.9 Этап 3: портал сотрудников
+
+Пошаговый порядок с учётными записями и чек-листом проверки — в `vpn-launch.md`
+(часть A, шаги 6–8); здесь — что делает установка.
+
+```bash
+make key NAME=portal              # ключ Bifrost для портала; значение показывается один раз
+sudoedit deploy/.env              # вписать его в PORTAL_LLM_API_KEY=
+make portal                       # = sudo bash scripts/install.sh --stage portal --skip-preflight
+make portal-admin LOGIN=<логин> NAME="<ФИО>"   # первый администратор; временный пароль выводится один раз
+make smoke-portal                 # что отдаёт сайт через 443 и здоровы ли сервисы
+```
+
+| Параметр | Значение |
+|---|---|
+| `PROFILES` | `embeddings` или `embeddings,monitoring`, если профиль `embeddings` ещё не включён |
+
+Условия: уже включён профиль `gateway` (этап 2), в наборе профилей есть `embeddings`
+(нужен базе знаний), `PORTAL_LLM_API_KEY` в `deploy/.env` не пуст. Если условие не
+выполнено, установка останавливается и пишет, что сделать.
+
+`make portal` **[ВМ]**:
+1. Добавляет профиль `portal` в `COMPOSE_PROFILES` и выставляет `SITE_MODE=portal`.
+2. Выполняет `docker compose pull` и собирает образы `portal-api`, `portal-worker` и
+   `portal-web` из клона — при каждом запуске. Первая сборка занимает несколько минут и
+   требует доступа к Docker Hub, PyPI и npm.
+3. Предзагружает веса моделей, включая модель эмбеддингов (`EMBED_MODEL_ID`).
+4. Поднимает стек и ждёт healthy. Миграции базы применяет `portal-api` при старте.
+5. Проверяет через 443: `/` отдаёт страницу входа (200), `/api/auth/session` без сессии —
+   401, `/api/governance/virtual-keys` и `/metrics` — 404, запрос к модели без ключа —
+   401/403.
+
+`make smoke-portal` проверяет то же подробнее и без запросов к модели: заголовки
+безопасности на `/` и `/login`, 404 на `/healthz`, `/docs`, `/redoc`, `/openapi.json`, 403
+на `POST` без `X-Portal-Csrf`, состояние сервисов включённых профилей. При
+`TLS_MODE=internal` корневой сертификат подставляется сам, для другого корня укажите
+`CA=<PEM корневого CA>`.
+
+Профиль `portal` сам не убирается: чтобы вернуться к этапу 2, уберите `portal` из
+`COMPOSE_PROFILES`, очистите `SITE_MODE` в `deploy/.env` и выполните `make up`.
+
+> **Сразу после установки** сохраните копию `PORTAL_SECRET_KEY` из `deploy/.env` вне ВМ,
+> вместе с `BIFROST_ENCRYPTION_KEY`. Им зашифрованы секреты второго фактора: без него
+> после восстановления из копии второй фактор всем придётся настраивать заново.
 
 ## 3. Ежедневная эксплуатация
 
@@ -319,7 +405,7 @@ make revoke ID=<id>                                # деактивация: д�
 `sudo bash scripts/with_env.sh uv run keys.py create --name app-crm --description "CRM" --period 1h`.
 
 Значение `sk-bf-...` показывается один раз, при создании. Передавайте его владельцу
-по защищённому каналу. То же можно сделать в UI Bifrost: `http://localhost:8080`
+по защищённому каналу. То же можно сделать в UI Bifrost: `http://localhost:8081`
 через туннель (2.7).
 
 ### 3.2 Что сообщить клиентам
@@ -334,6 +420,8 @@ client.chat.completions.create(
 )
 ```
 
+- Адрес из интернета — с портом: `base_url="https://llm.<домен>:18443/v1"`
+  (`domain-setup.md`).
 - Модель всегда `default`: при смене модели на сервере код клиентов не меняется.
 - Допустимые значения `reasoning_effort`: `low`, `medium`, `xhigh`. Значение
   **`high` даёт HTTP 500**.
@@ -341,6 +429,8 @@ client.chat.completions.create(
   `extra_body={"chat_template_kwargs": {"enable_thinking": False}}`.
 - Изображения передаются как `image_url` (data URL или ссылка), до 8 штук на запрос.
   Контекст — до 64k токенов.
+- Доступные маршруты: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`. Другие пути под `/v1` (например, `/v1/responses`
+  или `/v1/models/<id>`) отвечают 404.
 - Эмбеддинги доступны только при включённом профиле: `model="embeddings"`,
   `/v1/embeddings`.
 - Клиенту нужен корневой сертификат: при `TLS_MODE=corp` это корпоративный CA, при
@@ -378,9 +468,108 @@ client.chat.completions.create(
 
 ```bash
 make ps
-make logs SERVICE=vllm                   # или bifrost, caddy, vllm-embed
+make logs SERVICE=vllm                   # или bifrost, caddy, vllm-embed, portal-api, portal-worker, portal-web, portal-db, qdrant
 nvidia-smi
 ```
+
+Журналы контейнеров ограничены: до 5 файлов по 50 МБ на сервис.
+
+### 3.5 Портал: учётные записи, журнал, база знаний
+
+Первого администратора создаёт `make portal-admin` (2.9). Остальные учётные записи
+ведутся в интерфейсе, раздел «Пользователи»: «Добавить пользователя», в меню строки —
+«Изменить», «Сбросить пароль», «Сбросить второй фактор», «Заблокировать» /
+«Разблокировать». Удаления учётных записей нет. Переписка и личные документы
+сотрудников администратору недоступны.
+
+```bash
+make portal-reset-2fa LOGIN=<логин>      # сброс второго фактора с ВМ, в том числе администратору
+make portal-unlock-login LOGIN=<логин>   # снять временную блокировку входа, в том числе администратору
+make portal-audit                        # последние 100 записей журнала аудита
+make portal-audit SINCE=2026-10-01 EVENT=login_failed LIMIT=500
+make portal-reindex ONLY_ERRORS=1        # вернуть в очередь документы базы знаний с ошибкой
+make portal-reindex                      # вернуть в очередь все документы
+make portal-reindex-recreate             # пересоздать коллекцию Qdrant и переиндексировать всё
+make portal-eval-search                  # оценка поиска на контрольном наборе
+```
+
+- Журнал аудита читается только командой, экрана в интерфейсе нет. Строка — поля через
+  табуляцию: время (UTC), событие, кто, над кем, адрес, `details` в JSON. `SINCE` — дата
+  или время ISO 8601. События и поля `details` — `portal-api.md` §9.5.
+- Своя учётная запись в разделе «Пользователи» не меняется: второй фактор
+  администратору сбрасывает другой администратор или `make portal-reset-2fa`.
+- `make portal-reindex` на время обработки убирает готовые документы из ответов:
+  запускайте, когда порталом не пользуются. `make portal-reindex-recreate` нужен после
+  смены модели эмбеддингов (`EMBED_MODEL_ID`) и при потере или повреждении векторов;
+  он сам останавливает и запускает `portal-worker`. Подробности —
+  `portal-api.md` §13.4.
+
+**Блокировка входа после неудачных попыток.** После 5 неудач подряд (пароль или код)
+вход для логина закрывается на 1 минуту, с каждой следующей неудачей срок удваивается
+до 1 часа; счётчик обнуляется через сутки без неудач или после успешного входа
+(`auth.lockout` в `portal/backend/config/app.yaml`). Это известное свойство: зная
+логин, вход сотрудника можно держать закрытым, вводя неверные пароли. Кто и откуда
+подбирает — видно в `make portal-audit EVENT=login_failed`: у попытки, вызвавшей
+блокировку, в `details` есть `lock_seconds`.
+
+Сотрудник видит: «Слишком много неудачных попыток. Попробуйте снова через … или
+попросите администратора портала снять блокировку». Администратор в разделе
+«Пользователи» видит у строки пометку «Вход временно заблокирован до …, после неудачных
+попыток» и в меню строки выбирает «Снять блокировку входа». Пароль и второй фактор не
+сбрасываются: сотрудник сразу входит с прежними. Свою блокировку в интерфейсе снять
+нельзя — это делает другой администратор или команда на ВМ:
+
+```bash
+make portal-unlock-login LOGIN=<логин>
+make portal-audit EVENT=login_unlocked      # кто и кому снимал блокировку
+```
+
+Ограничение по адресу (3.6) этим не снимается. Против настойчивого автоматического
+перебора снятие не помогает: счётчик начинается с нуля, и блокировка наступит снова —
+тогда адрес источника закрывают на роутере. Сброс пароля или второго фактора тоже
+снимает блокировку.
+
+### 3.6 Портал: параметры конфигурации
+
+Параметры портала — YAML в `portal/backend/config/` (`app.yaml`, `kb.yaml`,
+`docparse.yaml`), вшиты в образ. На ВМ их меняют, не пересобирая образ, накладкой
+`deploy/portal/config.override.yaml`: каталог `deploy/portal/` смонтирован в
+`portal-api` и `portal-worker` как `/etc/portal` (только чтение) и в репозиторий не
+попадает. В накладке указываются только изменяемые ключи: словари объединяются, списки
+и простые значения заменяются целиком.
+
+```bash
+sudo install -d deploy/portal
+sudoedit deploy/portal/config.override.yaml
+sudo docker compose -f deploy/docker-compose.yml restart portal-api portal-worker
+```
+
+```yaml
+# deploy/portal/config.override.yaml — пример
+auth:
+  password:
+    argon2:
+      workers: 8
+files:
+  reader_workers: 8
+```
+
+| Параметр (`app.yaml`) | По умолчанию | Что задаёт | Когда менять |
+|---|---|---|---|
+| `auth.password.argon2.workers` | 4 | Сколько паролей проверяется одновременно. Память — до `workers` × `memory_cost_kib`, то есть × 64 МиБ | Поднять, если при одновременном входе многих сотрудников вход заметно ждёт; учитывать память ВМ |
+| `files.reader_workers` | 4 | Сколько файлов `portal-api` разбирает одновременно (тип, число страниц, текст, изображение страницы); остальные ждут в очереди | Поднять, если загрузки вложений ждут друг друга. PDF при любом значении читается строго по одному |
+| `auth.ip_limit.max_failures`, `auth.ip_limit.window_seconds` | 20, 300 | Сколько неудачных попыток входа с одного адреса за окно закрывают вход с этого адреса | Только если все клиенты видны порталу под одним адресом — `vpn-launch.md`, часть B, шаг 5 |
+
+Секретов в накладке нет: они задаются только в `deploy/.env`. Если поднимаете лимиты
+размера файлов выше 64 МБ, поднимите и `max_size` в `deploy/caddy/Caddyfile`, иначе
+загрузку оборвёт Caddy.
+
+**Известное поведение: тяжёлая страница PDF.** PDF в процессе `portal-api` читается
+строго по одному. Пока читается или отрисовывается одна тяжёлая страница, ждут все
+операции с файлами у всех сотрудников: загрузки и ответы с изображениями страниц. Вход,
+текстовый чат и экспорт в DOCX при этом не задерживаются. Проверка **[ВМ]**: на 5–10
+самых тяжёлых PDF заказчика измерить, сколько занимает чтение и отрисовка страницы
+(время от прикрепления файла до готовности вложения и до начала ответа).
 
 ## 4. Изменения и обслуживание
 
@@ -401,11 +590,17 @@ nvidia-smi
 Сначала изменение вносится в `design.md`, затем в `docker-compose.yml`. Образы
 пинятся по точному тегу, `latest` запрещён.
 
-1. Сделать бэкап `bifrost-data` (4.4).
+1. Сделать резервную копию: `make backup DIR=<каталог>` (4.4).
 2. Поменять тег в `docker-compose.yml`, выполнить
    `sudo docker compose -f deploy/docker-compose.yml pull` и `make up`.
 3. Прогнать `make smoke-model` и `make bench`, сравнить с базовыми цифрами.
 4. При регрессии вернуть прежний тег и повторить `make up`.
+
+Обновление кода из репозитория (скрипты, конфигурация, портал) **[ВМ]**: сделать копию
+(4.4), затем `git pull` и повторить текущий этап установки — `make model`,
+`make gateway` или `make portal`. Параметры берутся из `deploy/.env`, секреты не
+меняются. Образы портала собираются из клона, поэтому после `git pull` одного
+`make up` мало: их пересобирает только `make portal`. Затем — `make smoke-portal`.
 
 ### 4.3 Ротация секретов
 
@@ -416,49 +611,212 @@ nvidia-smi
 | Пароль админки Bifrost | Новое значение в `.env`, затем `make up` **[ВМ]**: убедиться, что новый пароль применился |
 | Пароль Grafana | Новое значение в `.env`, затем `make up` |
 | TLS-сертификат (`corp`) | Заменить файлы в `deploy/certs/`, `make gateway` (проверит сертификат) и `sudo docker compose -f deploy/docker-compose.yml restart caddy`; срок действия — из заявки DevOps |
+| TLS-сертификат Let's Encrypt | Продлевает таймер `llm-cert-renew.timer`; вручную — `make cert-renew` (`domain-setup.md`, шаг 8). Перезапуск Caddy не нужен |
 | TLS (`internal`) | Серверный сертификат продлевается сам; корень действует 10 лет. При потере `llm_caddy-data` появится новый корень: снова раздать `caddy-root.crt` клиентам |
 | Переход `internal` → `corp` | Положить файлы (2.5), `make gateway TLS_MODE=corp`, `sudo docker compose -f deploy/docker-compose.yml restart caddy`; клиенты должны доверять корпоративному CA |
 | `BIFROST_ENCRYPTION_KEY` | Не менять без миграции базы Bifrost |
+| `PORTAL_LLM_API_KEY` | `make revoke ID=<id>`, `make key NAME=portal`, новое значение в `.env`, затем `make up` **[ВМ]** |
+| `PORTAL_SECRET_KEY` | Не менять: им зашифрованы секреты второго фактора, после смены второй фактор всем придётся сбрасывать и настраивать заново |
+| Пароль пользователя портала | «Сбросить пароль» в разделе «Пользователи» (3.5) |
 
 ### 4.4 Резервное копирование и восстановление
 
-Критичные данные хранятся в volume `llm_bifrost-data`:
-- `config.db` — ключи, лимиты, admin-auth;
-- `logs.db` — логи запросов.
+```bash
+sudo install -d -m 700 /var/backups/llm          # каталог для копий, вне репозитория
+make backup DIR=/var/backups/llm                 # = sudo bash scripts/backup.sh create КАТАЛОГ
+make restore FROM=/var/backups/llm/llm-backup-ГГГГММДД-ЧЧММСС   # = ... backup.sh restore КАТАЛОГ_КОПИИ
+```
 
-При `TLS_MODE=internal` в бэкап входит и `llm_caddy-data`: там корень CA с приватным ключом,
-храните его как секрет. Кроме того, сохраните `deploy/.env` в хранилище секретов.
+**Состав копии.** `make backup` создаёт каталог `llm-backup-ГГГГММДД-ЧЧММСС` (права 700,
+файлы 600) с данными сервисов включённых профилей:
 
-Volume с моделями (`llm_hf-cache`) в бэкап не включается: веса можно скачать заново.
+| Файл | Что в нём |
+|---|---|
+| `portal-db.dump` | база портала, дамп `pg_dump` |
+| `portal-files.tgz` | volume `llm_portal-files`: оригиналы документов и вложения |
+| `qdrant-data.tgz` | volume `llm_qdrant-data`: векторы базы знаний |
+| `bifrost-data.tgz` | volume `llm_bifrost-data`: ключи клиентов, лимиты, журнал запросов без содержимого (4.5). Копии, снятые до отключения хранения содержимого, содержат прежний журнал с текстами |
+| `SHA256SUMS` | контрольные суммы; пишется последним |
 
-Ежедневный бэкап выполняет DevOps в рамках общего регламента ВМ. Ручной бэкап,
-например перед обновлением **[ВМ]**:
+Без профиля `portal` в копии только `bifrost-data.tgz` и `SHA256SUMS`. Пока копия не
+завершена или если она оборвалась, каталог носит суффикс `.partial` — такой каталог для
+восстановления не принимается.
+
+На время копирования и восстановления останавливаются `portal-api`, `portal-worker`,
+`qdrant` и `bifrost`: портал и API в это время недоступны.
+
+**В копию не входят:**
+- `deploy/.env`. `PORTAL_SECRET_KEY` и `BIFROST_ENCRYPTION_KEY` храните отдельно, вне ВМ,
+  в хранилище секретов: без первого второй фактор всем придётся настраивать заново, без
+  второго база ключей Bifrost не читается;
+- volume `llm_caddy-data` — корень CA с приватным ключом при `TLS_MODE=internal`
+  (ниже);
+- `deploy/lego/` — ключ учётной записи Let's Encrypt и ключи сертификатов; сохраните
+  отдельно, как секрет (`domain-setup.md`, шаг 3);
+- volume `llm_hf-cache` — веса моделей скачиваются заново.
+
+**Копию храните как секрет**, на другой машине: в ней переписка и личные данные
+сотрудников.
+
+Ежедневный бэкап выполняет DevOps в рамках общего регламента ВМ; `make backup` —
+ручная копия, например перед обновлением.
+
+Если вывод `make backup` направлен в другую программу (`make backup DIR=... | tee
+backup.log`) и она завершилась раньше, команда вернёт код 1, хотя копия может быть
+готова. Проверьте каталог копии: он без суффикса `.partial` и в нём есть `SHA256SUMS`.
+
+**Восстановление [ВМ].** `make restore` заменяет текущие данные содержимым копии.
+Запускайте его в `tmux` или `screen`: обрыв SSH-сеанса посреди восстановления прерывает
+его так же, как Ctrl-C.
+
+1. До любых изменений проверяются контрольные суммы и читаемость дампа и архивов.
+   Набор профилей в `deploy/.env` должен быть тем же, что при создании копии.
+2. Команда спрашивает подтверждение: введите `yes`.
+3. Подготовка: дамп загружается во временную базу `portal_restore`, архивы
+   распаковываются во временный каталог `.restore-new` внутри каждого тома. Прежние
+   данные не тронуты.
+4. Переключение: база и тома переходят на новое содержимое, сервисы запускаются.
+5. После сообщения «Восстановление завершено» проверьте: `make ps`, `make smoke-portal`.
+
+В `deploy/.env` должны стоять те же `PORTAL_SECRET_KEY` и `BIFROST_ENCRYPTION_KEY`, что
+при создании копии. Векторы базы знаний восстановимы и без копии:
+`make portal-reindex-recreate` пересоздаёт коллекцию и переиндексирует документы.
+
+**Прерванное восстановление.** Что произошло, видно по сообщению команды:
+
+| Сообщение | Состояние | Что делать |
+|---|---|---|
+| «…данные сервиса НЕ изменены, сервисы работают на прежних данных» | Прервано на подготовке: временное удалено, сервисы запущены | Устранить причину (место на диске, `make logs SERVICE=portal-db`) и повторить `make restore` |
+| «…Данные могут быть смешанными: часть из копии, часть прежние. Сервисы … этим запуском не запущены» | Прервано на переключении | Повторить `make restore FROM=<каталог копии>` — он доведёт восстановление до конца, затем `make up`. До этого `make up` пишущие сервисы не запустит |
+
+Следы незавершённого восстановления: базы `portal_restore` и `portal_previous`, каталог
+`.restore-new` и отметка `.restore-new.ready` в томах. Пока они есть:
+- `make backup` отказывает («восстановление не завершено»): копию со смешанных данных
+  снимать нельзя;
+- пишущие сервисы (`portal-worker`, `portal-api`, `qdrant`, `bifrost`) не запускаются —
+  ни `make up`, ни автозапуском после перезагрузки (ниже);
+- повторный `make restore` сообщает «найдены следы прерванного восстановления» и
+  доводит дело до конца.
+
+Ctrl-C во время финального запуска сервисов не действует: данные уже новые, запуск
+завершается.
+
+**Запуск при следах восстановления.** Юнит `llm-stack` и `make up` запускают стек
+через `scripts/stack_up.sh`, который сначала ищет следы. Если они есть:
+- четыре пишущих сервиса останавливаются и не запускаются; модель, `caddy`, `portal-db`,
+  `portal-web` и мониторинг работают. Страница портала отдаётся, `/api/*` и `/v1/*`
+  отвечают 502;
+- юнит остаётся в состоянии `failed`; в `systemctl status llm-stack` и
+  `sudo journalctl -u llm-stack` — перечень следов и указание на `make restore`;
+- `make up` завершается с той же ошибкой.
+
+Выход: `make restore FROM=<каталог копии>`, затем `make up`, чтобы юнит `llm-stack` стал
+`active`. `make restore` требует работающую базу `portal-db`. Если перед этим выполняли
+`make down`, порядок такой: `make up` (завершится с ошибкой, но поднимет `portal-db`),
+`make restore FROM=<каталог копии>` (контейнеры пишущих сервисов он создаст сам), снова
+`make up`. Если следы проверить не
+удалось (например, нет образа `caddy`), пишущие сервисы тоже не запускаются: устраните
+причину из сообщения и повторите `make up`.
+
+**После SIGKILL или потери питания** скрипт убрать за собой не успевает, и следы могут
+остаться даже от подготовки. Основной путь тот же: повторить
+`make restore FROM=<каталог копии>`, затем `make up`.
+
+Если нужно не восстанавливаться, а вернуться к работе на прежних данных, следы можно
+убрать вручную — только при всех трёх условиях:
+- включён профиль `portal` (без базы портала по следам нельзя понять, началось ли
+  переключение);
+- прерванный запуск был первым: до него следов не было, сообщения «найдены следы
+  прерванного восстановления» он не выводил;
+- база `portal_restore` есть, а базы `portal_previous` нет. Это значит, что
+  переключение не начиналось и данные прежние.
+
+```bash
+cd /opt/llm
+# 1. Какие следы есть в базе: в выводе должна быть только portal_restore
+sudo docker compose -f deploy/docker-compose.yml exec -T portal-db \
+  psql -At -U portal -d postgres \
+  -c "SELECT datname FROM pg_database WHERE datname IN ('portal_restore', 'portal_previous')"
+
+# 2. Удалить временную базу и временные каталоги в томах
+sudo docker compose -f deploy/docker-compose.yml exec -T portal-db \
+  dropdb -U portal --if-exists --force portal_restore
+for volume in portal-files qdrant-data bifrost-data; do
+  sudo docker run --rm -v "llm_${volume}:/vol" caddy:2.11.4 \
+    rm -rf /vol/.restore-new /vol/.restore-new.ready
+done
+
+# 3. Запустить сервисы и проверить
+make up && make smoke-portal
+```
+
+Образ в шаге 2 — тот же, что у сервиса `caddy` в `docker-compose.yml`; при обновлении
+тега поправьте команду. Если база `portal_previous` есть или условия не выполнены,
+вручную ничего не удаляйте: только повторный `make restore`.
+
+**Корень CA Caddy (`TLS_MODE=internal`).** Volume `llm_caddy-data` в `make backup` не
+входит: в нём приватный ключ корня, храните его копию как секрет, отдельно. Ручная
+копия и восстановление **[ВМ]**:
 
 ```bash
 cd /opt/llm/deploy
-docker compose stop bifrost    # согласованная копия SQLite; клиенты получат ошибку на несколько секунд
-docker run --rm -v llm_bifrost-data:/data:ro -v "$PWD":/backup busybox:1.37.0 \
-  tar czf /backup/bifrost-data-$(date +%F).tgz -C /data .
-docker compose start bifrost
+docker compose stop caddy      # клиенты получат ошибку на несколько секунд
+docker run --rm -v llm_caddy-data:/data:ro -v "$PWD":/backup busybox:1.37.0 \
+  tar czf /backup/caddy-data-$(date +%F).tgz -C /data .
+docker compose start caddy
 ```
-
-Восстановление:
 
 ```bash
-docker compose stop bifrost
-docker run --rm -v llm_bifrost-data:/data -v "$PWD":/backup busybox:1.37.0 \
-  sh -c 'rm -rf /data/* && tar xzf /backup/bifrost-data-YYYY-MM-DD.tgz -C /data'
-docker compose start bifrost
+docker compose stop caddy
+docker run --rm -v llm_caddy-data:/data -v "$PWD":/backup busybox:1.37.0 \
+  sh -c 'rm -rf /data/* && tar xzf /backup/caddy-data-YYYY-MM-DD.tgz -C /data'
+docker compose start caddy
 ```
 
-При восстановлении в `.env` должен стоять тот же `BIFROST_ENCRYPTION_KEY`, что и при
-создании бэкапа. Для `llm_caddy-data` те же команды: сервис `caddy`, файл `caddy-data-*.tgz`.
+Архив создаётся в `deploy/`: перенесите его в хранилище секретов и удалите с ВМ.
+
+### 4.5 Конфигурация и журнал Bifrost
+
+`deploy/bifrost/config.json` задаёт, в частности:
+- `client.disable_content_logging: true` — содержимое запросов и ответов в журнал не
+  пишется. В журнале остаются ключ, модель, токены, задержки и текст ошибки модели;
+- `providers.vllm.network_config.allow_private_network: true` — без этого Bifrost v2.2.0
+  отказывает в соединении с vLLM в docker-сети (502 «connection to private IP»).
+
+**Применение изменений.** Этапы `make gateway` и `make portal` сами пересоздают Bifrost
+после запуска стека. Вручную — именно пересоздание, `restart` файл не перечитывает:
+
+```bash
+cd /opt/llm/deploy
+sudo docker compose up -d --force-recreate bifrost
+```
+
+Проверка **[ВМ]** (логин и пароль — `BIFROST_ADMIN_USERNAME` и `BIFROST_ADMIN_PASSWORD`
+из `deploy/.env`; не вставляйте пароль в командную строку — `curl` спросит его сам):
+
+```bash
+curl -s -u "<логин>" http://127.0.0.1:8081/api/config     # в ответе disable_content_logging: true
+```
+
+**Очистка накопленного журнала [ВМ].** На ВМ, где Bifrost уже работал со старой
+конфигурацией, в `logs.db` остались тексты прежних запросов. Файл удаляется целиком:
+
+```bash
+cd /opt/llm/deploy
+sudo docker compose stop bifrost
+sudo docker compose run --rm --no-deps --entrypoint sh bifrost \
+  -c 'rm -f /app/data/logs.db /app/data/logs.db-wal /app/data/logs.db-shm'
+sudo docker compose start bifrost
+```
+
+Ключи и лимиты (`config.db`) при этом не затрагиваются. Старые резервные копии
+`bifrost-data.tgz` содержат прежний журнал: удалите их или храните с учётом этого.
 
 ## 5. Типовые проблемы
 
 | Симптом | Причина и действие |
 |---|---|
-| `up` падает: `required variable ... is missing` | Не заполнена переменная в `.env`; все, кроме `COMPOSE_PROFILES`, `LLM_HOSTNAME` и `TLS_MODE`, обязательны |
+| `up` падает: `required variable ... is missing` | Не заполнена переменная в `.env`; все, кроме `COMPOSE_PROFILES`, `LLM_HOSTNAME`, `TLS_MODE`, `SITE_MODE`, `PORTAL_LLM_API_KEY`, `TIMEWEBCLOUD_AUTH_TOKEN` и `ACME_EMAIL`, обязательны. В `.env`, созданном до появления портала, нет его секретов: их допишет повтор текущего этапа установки |
 | `install_host.sh`: «установлен драйвер NVIDIA …» или «конфликтующие пакеты» | Выполнить команду из «что делать» (удалить старый драйвер или `docker.io`), затем повторить скрипт |
 | `install.sh`: ошибка сертификата (просрочен, не то имя, ключ не подходит) | Проверить пару файлов в `deploy/certs/`; если сертификата нет — `make gateway TLS_MODE=internal` (1.1) |
 | `install.sh`: «LLM_HOSTNAME не задан» на этапе gateway | Передать `make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=...` (2.6) |
@@ -469,31 +827,69 @@ docker compose start bifrost
 | vllm-embed не стартует | Нехватка памяти в 0.06 или неверный runner — лог `make logs SERVICE=vllm-embed`; временно убрать `embeddings` из `COMPOSE_PROFILES` |
 | Клиент: `CERTIFICATE_VERIFY_FAILED` | `corp`: у клиента нет корпоративного CA или в `fullchain.pem` нет промежуточного сертификата. `internal`: клиенту не передан `caddy-root.crt` (3.2) или корень сменился после потери `llm_caddy-data`. Клиент обращается по IP, а не по `LLM_HOSTNAME` |
 | Клиент: 401/403 | Нет ключа, ключ неверный или отозван (`make keys`) |
-| Клиент: 404 | Путь не начинается с `/v1/`; Caddy пропускает только `/v1/*` |
+| Клиент: 404 | Путь не из разрешённых: Caddy пропускает только `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models` |
 | Клиент: 429 | Исчерпан лимит ключа; поднять лимит в UI Bifrost или выдать отдельный ключ |
 | Клиент: 500 при `reasoning_effort` | Передан `high`; допустимы `low`, `medium`, `xhigh` |
 | Клиент: ошибка модели / `model not found` | Имя модели не `default` (или не `embeddings` при выключенном профиле) |
 | Медленные ответы | Запросы без `reasoning_effort: "low"` (по умолчанию `xhigh`); очередь vLLM в Grafana |
 | `keys.py`: 401 | Не заданы или неверны `BIFROST_ADMIN_USERNAME`/`BIFROST_ADMIN_PASSWORD` |
-| `keys.py`: соединение отклонено | Bifrost не запущен — не пройден этап 2 или стек лежит (`make ps`); с рабочей станции — не открыт SSH-туннель на 8080 |
+| `keys.py`: соединение отклонено | Bifrost не запущен — не пройден этап 2 или стек лежит (`make ps`); с рабочей станции — не открыт SSH-туннель на 8081 (8080 на ВМ занят Caddy) |
 | `make smoke-model`: соединение отклонено | Стек не запущен (`make ps`) или порт vLLM занят другим процессом |
+| `make portal`: «портал требует профиль gateway» | Сначала этап 2: `make gateway LLM_HOSTNAME=<имя или IP> TLS_MODE=corp\|internal PROFILES=embeddings` |
+| `make portal`: «портал требует профиль embeddings» | `make portal PROFILES=embeddings` (с мониторингом — `PROFILES=embeddings,monitoring`) |
+| `make portal`: «PORTAL_LLM_API_KEY … пуст» | `make key NAME=portal`, вписать `sk-bf-...` в `PORTAL_LLM_API_KEY` в `deploy/.env`, повторить (2.9) |
+| `make portal`: «не удалось собрать образы портала» | Нет доступа к Docker Hub, PyPI или npm; повторить после восстановления доступа |
+| Портал: вместо страницы входа — 404 | В `deploy/.env` не `SITE_MODE=portal` или нет профиля `portal` в `COMPOSE_PROFILES`; повторить `make portal` |
+| Портал: «Слишком много неудачных попыток…» у одного сотрудника | Блокировка логина после серии неудач: «Снять блокировку входа» в разделе «Пользователи» или `make portal-unlock-login LOGIN=<логин>` (3.5) |
+| Портал: «Слишком много попыток входа…» у всех сразу | Сработал лимит по адресу: все клиенты видны порталу под одним адресом (`vpn-launch.md`, часть B, шаг 5). Проходит само через 5 минут после начала серии |
+| Портал: загрузки файлов и ответы с изображениями «висят» у всех | Читается тяжёлая страница PDF (3.6); `make logs SERVICE=portal-api` |
+| Документ базы знаний в состоянии «Ошибка» | В меню строки — «Обработать заново»; для всех сразу — `make portal-reindex ONLY_ERRORS=1` |
+| `make backup`: «восстановление не завершено» | Остались следы прерванного восстановления: повторить `make restore` (4.4) |
+| `make up` или юнит `llm-stack`: «восстановление не завершено … сервисы … остановлены и не запущены»; портал отдаёт страницу, но `/api/*` и `/v1/*` — 502 | То же: `make restore FROM=<каталог копии>`, затем `make up`; после `make down` — сначала `make up`, он поднимет `portal-db` (4.4) |
+| Bifrost: 502 «connection to private IP» | Bifrost работает со старым `config.json`: пересоздать (4.5) |
+| `make up`: «стек запущен, но юнит llm-stack не стартовал или не установлен» | Сервисы работают, но автозапуска после перезагрузки нет: юнит ставит этап установки (`make model`, `make gateway` или `make portal`) — повторить текущий |
+| `make cert` / `make cert-renew`: «сертификат разложен, но Caddy его не перечитал и отдаёт прежний» | `make logs SERVICE=caddy`, затем повторить `make cert-renew`; перечитывание повторит и таймер (`domain-setup.md`, шаг 8) |
+| `make cert` / `make cert-renew`: «не удалось скопировать сертификат и ключ в …/deploy/certs» | Проверить место на диске и повторить; рабочие файлы не тронуты |
+| `make gateway`: сертификат просрочен или «нет файла …/fullchain.pem» при Let's Encrypt | `make cert` или `make cert-renew`; почему не сработал таймер — `sudo journalctl -u llm-cert-renew` (`domain-setup.md`) |
+| `make restore`: «в копии нет …» или «контрольные суммы копии не совпадают» | Копия оборвалась или повреждена при переносе — взять другую; набор профилей в `deploy/.env` должен быть тем же, что при её создании |
 
 ## 6. Разработка проекта
 
 Локально GPU нет. Изменения проверяются без запуска модели:
 
 ```bash
-make check      # docker compose config для всех профилей, ruff, mypy, pytest, shellcheck
+make check      # docker compose config для всех профилей и стенда, ruff, mypy, pytest, shellcheck, проверки портала и типов сквозных тестов
 ```
 
+`make check` запускается без `sudo` (тесты бэкенда портала поднимают PostgreSQL, а он от
+root не стартует); первому запуску нужна сеть (`uv sync`, `npm ci`).
+
+Портал проверяется на стенде без GPU `portal/dev/`: те же сервисы, вместо Bifrost и
+vLLM — заглушка. Стенд открывается на `https://localhost:8443` (сертификат собственного
+CA Caddy, браузер предупредит); секреты стенда — `portal/dev/.env` по образцу
+`portal/dev/.env.example`. На поднятом стенде идут сквозные тесты (Playwright,
+`portal/frontend/e2e/`); администратора прогона они создают сами.
+
+```bash
+make dev-up                 # собрать образы из текущего дерева, поднять, дождаться healthy
+make dev-reset              # пересоздать с чистой базой; том caddy-data стенда остаётся
+make dev-down               # остановить и удалить контейнеры; данные в томах сохраняются
+make dev-test-install       # один раз: зависимости и браузеры Playwright
+make dev-test               # сквозные тесты; один браузер — PROJECT=chromium|firefox|webkit|chrome
+```
+
+Цели `dev-*` запускаются без `sudo` и рабочий стек (`deploy/`) не трогают. Не запускайте
+`make dev-test` одновременно с `make check`: `check` переустанавливает зависимости
+тестов. Накладка стенда
+`portal/dev/config.override.yaml` (короткие блокировки, ослабленный Argon2) — только
+для стенда, на ВМ эти значения недопустимы.
+
 Правила (подробно — `CLAUDE.md`):
-- сначала `design.md`, потом код;
+- сначала `design.md` или `portal-design.md`, потом код;
 - образы пинятся по тегу;
-- наружу публикуется только 443;
+- наружу публикуется только Caddy (443, 8080, 18443);
 - секреты хранятся только в `.env`;
 - всё, что требует GPU, помечается «проверить на ВМ».
 
-Для задач в Claude Code есть агенты:
-- `infra-engineer` — `deploy/`;
-- `scripts-engineer` — `scripts/`;
-- `reviewer` — ревью, только читает.
+Для задач в Claude Code есть агенты (`.claude/agents/`); их зоны и пайплайн разработки
+портала — в `CLAUDE.md`.

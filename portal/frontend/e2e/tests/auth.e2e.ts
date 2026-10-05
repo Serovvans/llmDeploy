@@ -223,7 +223,10 @@ test.describe('Ограничение перебора', () => {
 
     await page.goto('/login');
     await fillLogin(page, account.login, account.password);
-    await expect(page.getByRole('alert')).toHaveText('Слишком много неудачных попыток. Попробуйте снова через минуту');
+    await expect(page.getByRole('alert')).toHaveText(
+      'Слишком много неудачных попыток. Попробуйте снова через минуту ' +
+        'или попросите администратора портала снять блокировку',
+    );
 
     // Блокировка временная: на стенде она длится секунды (portal/dev/config.override.yaml).
     await expect

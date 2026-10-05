@@ -1,3 +1,7 @@
 # Необязательная накладка конфигурации портала (portal/config.override.yaml) — локальная
 # настройка ВМ; каталог монтируется в portal-api и portal-worker как /etc/portal.
 portal/
+
+# Состояние ACME-клиента: ключ учётной записи и закрытые ключи сертификатов
+# (docs/portal-design.md §3.2).
+lego/

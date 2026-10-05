@@ -358,66 +358,83 @@ describe('SQL-помощник', () => {
     expect(screen.getByText('Новый ответ')).toBeInTheDocument();
   });
 
-  it('«Мои схемы»: создание с ошибками, правка запрашивает схему целиком, удаление', async () => {
-    let schemas = [{ id: 's-1', name: 'Кадастр', updated_at: '2026-10-01T09:00:00Z' }];
-    const { server, user } = setup('sql', '/sql', [], { 'GET /api/sql/schemas': () => ok({ items: schemas }) });
+  describe('«Мои схемы»', () => {
     const s = t.schemas;
+    const SCHEMAS = [{ id: 's-1', name: 'Кадастр', updated_at: '2026-10-01T09:00:00Z' }];
 
-    await user.click(await screen.findByRole('button', { name: t.mySchemas }));
-    expect(await screen.findByText(s.privacy)).toBeInTheDocument();
-    expect(await screen.findByText('Кадастр', { selector: 'span' })).toBeInTheDocument();
+    /** Открытая панель со списком из одной схемы; `current` — что сервер отдаёт в списке. */
+    async function openPanel(extra: Parameters<typeof mockApi>[0] = {}) {
+      const current = { items: SCHEMAS };
+      const opened = setup('sql', '/sql', [], { 'GET /api/sql/schemas': () => ok({ items: current.items }), ...extra });
+      await opened.user.click(await screen.findByRole('button', { name: t.mySchemas }));
+      expect(await screen.findByText(s.privacy)).toBeInTheDocument();
+      expect(await screen.findByText('Кадастр', { selector: 'span' })).toBeInTheDocument();
+      return { ...opened, current };
+    }
 
-    await user.click(screen.getByRole('button', { name: s.add }));
-    await user.click(screen.getByRole('button', { name: s.save }));
-    expect(screen.getByText(s.enterName)).toBeInTheDocument();
-    expect(screen.getByText(s.enterContent)).toBeInTheDocument();
-    expect(screen.getByText(s.contentHint)).toBeInTheDocument();
+    it('создание: ошибки пустой и слишком длинной формы проверяет интерфейс', async () => {
+      const { server, user } = await openPanel();
+      await user.click(screen.getByRole('button', { name: s.add }));
+      await user.click(screen.getByRole('button', { name: s.save }));
+      expect(screen.getByText(s.enterName)).toBeInTheDocument();
+      expect(screen.getByText(s.enterContent)).toBeInTheDocument();
+      expect(screen.getByText(s.contentHint)).toBeInTheDocument();
 
-    await user.type(screen.getByLabelText(s.name), 'я'.repeat(101));
-    fireEvent.change(screen.getByLabelText(s.content), { target: { value: 'x'.repeat(50001) } });
-    await user.click(screen.getByRole('button', { name: s.save }));
-    expect(screen.getByText(s.nameTooLong)).toBeInTheDocument();
-    expect(screen.getByText('Описание слишком длинное — сократите до 50 000 символов')).toBeInTheDocument();
-    expect(server.callsTo('POST /api/sql/schemas')).toHaveLength(0);
-
-    await user.clear(screen.getByLabelText(s.name));
-    await user.type(screen.getByLabelText(s.name), 'ЕГРН');
-    fireEvent.change(screen.getByLabelText(s.content), { target: { value: 'CREATE TABLE parcels (id int);' } });
-    server.on('POST /api/sql/schemas', () => fail(409, 'schema_name_taken'));
-    await user.click(screen.getByRole('button', { name: s.save }));
-    expect(await screen.findByText(s.nameTaken)).toBeInTheDocument();
-    server.on('POST /api/sql/schemas', () => fail(409, 'schema_limit_reached'));
-    await user.click(screen.getByRole('button', { name: s.save }));
-    expect(await screen.findByText('Сохранено 50 схем — больше нельзя. Удалите ненужную, чтобы добавить новую')).toBeInTheDocument();
-
-    server.on('POST /api/sql/schemas', (body) => {
-      schemas = [...schemas, { id: 's-2', name: 'ЕГРН', updated_at: '2026-10-05T09:00:00Z' }];
-      return ok({ id: 's-2', updated_at: '2026-10-05T09:00:00Z', ...(body as object) }, 201);
+      // Длинные значения ставятся одним событием: посимвольный набор сотни знаков здесь ничего не проверяет.
+      fireEvent.change(screen.getByLabelText(s.name), { target: { value: 'я'.repeat(101) } });
+      fireEvent.change(screen.getByLabelText(s.content), { target: { value: 'x'.repeat(50001) } });
+      await user.click(screen.getByRole('button', { name: s.save }));
+      expect(screen.getByText(s.nameTooLong)).toBeInTheDocument();
+      expect(screen.getByText('Описание слишком длинное — сократите до 50 000 символов')).toBeInTheDocument();
+      expect(server.callsTo('POST /api/sql/schemas')).toHaveLength(0);
     });
-    await user.click(screen.getByRole('button', { name: s.save }));
-    expect(await screen.findByText(s.saved)).toBeInTheDocument();
-    // Новая схема сразу выбрана в «Схема базы».
-    await waitFor(() => expect(window.localStorage.getItem('portal.sql.schema')).toBe('s-2'));
 
-    // Правка: схема запрашивается целиком, сохранение отправляет оба поля.
-    server.on('GET /api/sql/schemas/s-1', () => ok({ id: 's-1', name: 'Кадастр', content: 'CREATE TABLE a (id int);', updated_at: '' }));
-    server.on('PUT /api/sql/schemas/s-1', (body) => ok({ id: 's-1', updated_at: '', ...(body as object) }));
-    await user.click(await screen.findByRole('button', { name: 'Действия: Кадастр' }));
-    await user.click(menuItems().find((item) => item.textContent === s.edit) as HTMLElement);
-    await waitFor(() => expect(screen.getByLabelText(s.content)).toHaveValue('CREATE TABLE a (id int);'));
-    await user.type(screen.getByLabelText(s.name), ' 2');
-    await user.click(screen.getByRole('button', { name: s.save }));
-    await waitFor(() =>
-      expect(server.callsTo('PUT /api/sql/schemas/s-1')[0]?.body).toEqual({ name: 'Кадастр 2', content: 'CREATE TABLE a (id int);' }),
-    );
+    it('создание: отказы сервера — у поля и над формой; сохранённая схема сразу выбрана', async () => {
+      const { server, user, current } = await openPanel();
+      await user.click(screen.getByRole('button', { name: s.add }));
+      fireEvent.change(screen.getByLabelText(s.name), { target: { value: 'ЕГРН' } });
+      fireEvent.change(screen.getByLabelText(s.content), { target: { value: 'CREATE TABLE parcels (id int);' } });
 
-    // Удаление; схема, удалённая в другой вкладке, — своё уведомление.
-    server.on('DELETE /api/sql/schemas/s-1', () => fail(404, 'not_found'));
-    await user.click(await screen.findByRole('button', { name: 'Действия: Кадастр' }));
-    await user.click(menuItems().find((item) => item.textContent === s.remove) as HTMLElement);
-    expect(await screen.findByText('Удалить схему „Кадастр“?')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: s.remove }));
-    expect(await screen.findByText(s.alreadyRemoved)).toBeInTheDocument();
+      server.on('POST /api/sql/schemas', () => fail(409, 'schema_name_taken'));
+      await user.click(screen.getByRole('button', { name: s.save }));
+      expect(await screen.findByText(s.nameTaken)).toBeInTheDocument();
+      server.on('POST /api/sql/schemas', () => fail(409, 'schema_limit_reached'));
+      await user.click(screen.getByRole('button', { name: s.save }));
+      expect(await screen.findByText('Сохранено 50 схем — больше нельзя. Удалите ненужную, чтобы добавить новую')).toBeInTheDocument();
+
+      server.on('POST /api/sql/schemas', (body) => {
+        current.items = [...SCHEMAS, { id: 's-2', name: 'ЕГРН', updated_at: '2026-10-05T09:00:00Z' }];
+        return ok({ id: 's-2', updated_at: '2026-10-05T09:00:00Z', ...(body as object) }, 201);
+      });
+      await user.click(screen.getByRole('button', { name: s.save }));
+      expect(await screen.findByText(s.saved)).toBeInTheDocument();
+      // Новая схема сразу выбрана в «Схема базы».
+      await waitFor(() => expect(window.localStorage.getItem('portal.sql.schema')).toBe('s-2'));
+    });
+
+    it('правка запрашивает схему целиком, сохранение отправляет оба поля', async () => {
+      const { server, user } = await openPanel({
+        'GET /api/sql/schemas/s-1': () => ok({ id: 's-1', name: 'Кадастр', content: 'CREATE TABLE a (id int);', updated_at: '' }),
+        'PUT /api/sql/schemas/s-1': (body) => ok({ id: 's-1', updated_at: '', ...(body as object) }),
+      });
+      await user.click(await screen.findByRole('button', { name: 'Действия: Кадастр' }));
+      await user.click(menuItems().find((item) => item.textContent === s.edit) as HTMLElement);
+      await waitFor(() => expect(screen.getByLabelText(s.content)).toHaveValue('CREATE TABLE a (id int);'));
+      await user.type(screen.getByLabelText(s.name), ' 2');
+      await user.click(screen.getByRole('button', { name: s.save }));
+      await waitFor(() =>
+        expect(server.callsTo('PUT /api/sql/schemas/s-1')[0]?.body).toEqual({ name: 'Кадастр 2', content: 'CREATE TABLE a (id int);' }),
+      );
+    });
+
+    it('удаление: подтверждение; схема, удалённая в другой вкладке, — своё уведомление', async () => {
+      const { user } = await openPanel({ 'DELETE /api/sql/schemas/s-1': () => fail(404, 'not_found') });
+      await user.click(await screen.findByRole('button', { name: 'Действия: Кадастр' }));
+      await user.click(menuItems().find((item) => item.textContent === s.remove) as HTMLElement);
+      expect(await screen.findByText('Удалить схему „Кадастр“?')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: s.remove }));
+      expect(await screen.findByText(s.alreadyRemoved)).toBeInTheDocument();
+    });
   });
 });
 

@@ -92,7 +92,10 @@ describe('профиль', () => {
     // Серия неверных текущих паролей блокирует логин: заметка в окне, окно открыто, поля не очищены.
     server.on('POST /api/auth/password', () => fail(429, 'login_locked', { details: { retry_after_seconds: 300 } }));
     await user.click(dialog.getByRole('button', { name: texts.password.submit }));
-    expect(await dialog.findByText('Слишком много неудачных попыток. Попробуйте снова через 5 минут')).toBeInTheDocument();
+    expect(await dialog.findByText(
+        'Слишком много неудачных попыток. Попробуйте снова через 5 минут или попросите администратора портала снять блокировку',
+      ),
+    ).toBeInTheDocument();
     expect(dialog.getByLabelText(texts.password.currentLabel)).toHaveValue('старый пароль');
     expect(dialog.getByRole('button', { name: texts.password.submit })).toBeEnabled();
     expect(screen.getByTestId('path')).toHaveTextContent('/profile');

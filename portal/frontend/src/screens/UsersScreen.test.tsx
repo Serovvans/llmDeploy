@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { AdminUser } from '../api/types';
 import { ADMIN, fail, mockApi, ok, session } from '../test/mockApi';
@@ -17,6 +17,7 @@ function adminUser(overrides: Partial<AdminUser>): AdminUser {
     role: 'employee',
     state: 'active',
     second_factor_configured: true,
+    login_locked_until: null,
     is_me: false,
     created_at: '2026-10-04T09:00:00Z',
     ...overrides,
@@ -304,5 +305,125 @@ describe('пользователи: окна-формы', () => {
     setup();
     const search = await screen.findByLabelText(t.search);
     expect(search.closest('label')?.querySelector('svg')).not.toBeNull();
+  });
+});
+
+describe('пользователи: временная блокировка входа', () => {
+  const NOTE = /^Вход временно заблокирован до \d\d:\d\d, после неудачных попыток$/;
+  /** Время окончания через `ms` от текущего момента. */
+  const inFuture = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+  function setupLocked(users: AdminUser[]) {
+    const server = mockApi({
+      'GET /api/auth/session': () => ok(session('ready', ADMIN)),
+      'GET /api/admin/users': () => page(users),
+    });
+    renderApp('/admin/users');
+    return { server, user: userEvent.setup() };
+  }
+
+  async function menuOf(user: ReturnType<typeof userEvent.setup>, name: string): Promise<string[]> {
+    await user.click(within(await row(name)).getByRole('button', { name: `${t.actions}: ${name}` }));
+    await screen.findByText(t.menu.edit);
+    return menuItems().map((item) => item.textContent ?? '');
+  }
+
+  it('пометка — второй строкой под состоянием; пункт меню с пояснением — перед блокировкой; без пометки пункта нет', async () => {
+    const { user } = setupLocked([
+      adminUser({ login_locked_until: inFuture(10 * 60 * 1000) }),
+      adminUser({ id: 'u-2', login: 'petrova', full_name: 'Петрова Анна Сергеевна' }),
+    ]);
+
+    const locked = within(await row('Иванов Иван Иванович'));
+    expect(locked.getByText('Активна', { exact: false })).toBeInTheDocument();
+    expect(locked.getByText(NOTE)).toBeInTheDocument();
+    expect(within(await row('Петрова Анна Сергеевна')).queryByText(NOTE)).not.toBeInTheDocument();
+
+    expect(await menuOf(user, 'Иванов Иван Иванович')).toEqual([
+      t.menu.edit,
+      t.menu.resetPassword,
+      t.menu.resetSecondFactor,
+      `${t.menu.unlockLogin}${t.menu.unlockLoginComment}`,
+      t.menu.block,
+    ]);
+    await user.keyboard('{Escape}');
+    expect(await menuOf(user, 'Петрова Анна Сергеевна')).not.toContain(`${t.menu.unlockLogin}${t.menu.unlockLoginComment}`);
+  });
+
+  it('срок не сегодня — с датой', async () => {
+    const until = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+    setupLocked([adminUser({ login_locked_until: until.toISOString() })]);
+    const cell = within(await row('Иванов Иван Иванович'));
+    expect(cell.getByText(/^Вход временно заблокирован до \d\d\.\d\d\.\d{4}, \d\d:\d\d, после неудачных попыток$/)).toBeInTheDocument();
+  });
+
+  it('срок наступил — пометка и пункт меню исчезают сами, без запроса к серверу', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { server } = setupLocked([adminUser({ login_locked_until: inFuture(60 * 1000) })]);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      expect(within(await row('Иванов Иван Иванович')).getByText(NOTE)).toBeInTheDocument();
+      const calls = server.callsTo('GET /api/admin/users').length;
+
+      await vi.advanceTimersByTimeAsync(61 * 1000);
+      await waitFor(() => expect(screen.queryByText(NOTE)).not.toBeInTheDocument());
+      expect(server.callsTo('GET /api/admin/users')).toHaveLength(calls);
+      expect(await menuOf(user, 'Иванов Иван Иванович')).toEqual([
+        t.menu.edit,
+        t.menu.resetPassword,
+        t.menu.resetSecondFactor,
+        t.menu.block,
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('снятие: пометка исчезает, уведомление; блокировки уже нет — строка обновляется без сообщения', async () => {
+    const lockedUser = adminUser({ login_locked_until: inFuture(10 * 60 * 1000) });
+    const other = adminUser({ id: 'u-2', login: 'petrova', full_name: 'Петрова Анна Сергеевна', login_locked_until: inFuture(10 * 60 * 1000) });
+    const { server, user } = setupLocked([lockedUser, other]);
+    server.on('POST /api/admin/users/u-1/unlock-login', () => ok({ user: { ...lockedUser, login_locked_until: null }, unlocked: true }));
+    server.on('POST /api/admin/users/u-2/unlock-login', () => ok({ user: { ...other, login_locked_until: null }, unlocked: false }));
+
+    await openMenu(user, 'Иванов Иван Иванович', t.menu.unlockLogin);
+    expect(await screen.findByText(t.toast.loginUnlocked)).toBeInTheDocument();
+    expect(within(await row('Иванов Иван Иванович')).queryByText(NOTE)).not.toBeInTheDocument();
+    expect(within(await row('Иванов Иван Иванович')).getByText('Активна')).toBeInTheDocument();
+    // Подтверждения нет, список не перезапрашивается.
+    expect(server.callsTo('GET /api/admin/users')).toHaveLength(1);
+
+    await user.click(screen.getByText(t.toast.loginUnlocked));
+    await openMenu(user, 'Петрова Анна Сергеевна', t.menu.unlockLogin);
+    await waitFor(() => expect(screen.queryByText(NOTE)).not.toBeInTheDocument());
+    expect(server.callsTo('POST /api/admin/users/u-2/unlock-login')).toHaveLength(1);
+    expect(screen.queryByText(texts.common.actionFailed)).not.toBeInTheDocument();
+  });
+
+  it('отказ: «Не получилось», список перезапрашивается, пометка остаётся', async () => {
+    const { server, user } = setupLocked([adminUser({ login_locked_until: inFuture(10 * 60 * 1000) })]);
+    server.on('POST /api/admin/users/u-1/unlock-login', () => fail(500, 'internal_error'));
+
+    await openMenu(user, 'Иванов Иван Иванович', t.menu.unlockLogin);
+    expect(await screen.findByText(texts.common.actionFailed)).toBeInTheDocument();
+    await waitFor(() => expect(server.callsTo('GET /api/admin/users')).toHaveLength(2));
+    expect(within(await row('Иванов Иван Иванович')).getByText(NOTE)).toBeInTheDocument();
+  });
+
+  it('у записи «Заблокирована» действие доступно; в своей строке пометка видна, меню нет', async () => {
+    const { user } = setupLocked([
+      adminUser({ id: 'u-3', login: 'sidorov', full_name: 'Сидоров Олег Петрович', state: 'blocked', login_locked_until: inFuture(10 * 60 * 1000) }),
+      adminUser({ id: 'u-0', login: 'serov', full_name: 'Серов Иван', role: 'admin', is_me: true, login_locked_until: inFuture(10 * 60 * 1000) }),
+    ]);
+
+    const blocked = within(await row('Сидоров Олег Петрович'));
+    expect(blocked.getByText('Заблокирована', { exact: false })).toBeInTheDocument();
+    expect(blocked.getByText(NOTE)).toBeInTheDocument();
+    const items = await menuOf(user, 'Сидоров Олег Петрович');
+    expect(items.slice(-2)).toEqual([`${t.menu.unlockLogin}${t.menu.unlockLoginComment}`, t.menu.unblock]);
+
+    const me = within(await row('Серов Иван'));
+    expect(me.getByText(NOTE)).toBeInTheDocument();
+    expect(me.queryByRole('button')).not.toBeInTheDocument();
   });
 });

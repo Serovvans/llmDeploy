@@ -20,9 +20,11 @@ API reference ``/api-reference/governance/*`` на 2026-09-15; перепров�
 и ключ не привязывается к его имени.
 
 Окружение:
-    BIFROST_ADMIN_URL       адрес API управления; по умолчанию http://127.0.0.1:8080
+    BIFROST_ADMIN_URL       адрес API управления; по умолчанию http://127.0.0.1:8081
                             (с рабочей станции — через SSH-туннель
-                            ``ssh -L 8080:127.0.0.1:8080 <вм>``).
+                            ``ssh -L 8081:127.0.0.1:8081 <вм>``). Порт 8080 на ВМ занят
+                            Caddy: на него идёт проброс из интернета
+                            (docs/portal-design.md §3.2).
     BIFROST_ADMIN_USERNAME  логин admin-auth Bifrost (``governance.auth_config``). Нужен:
                             admin-auth включена (§3.3), без него API отвечает 401.
     BIFROST_ADMIN_PASSWORD  пароль admin-auth Bifrost; значения — в deploy/.env на ВМ.
@@ -43,7 +45,9 @@ from api_errors import describe_error
 
 logger = logging.getLogger("keys")
 
-DEFAULT_ADMIN_URL = "http://127.0.0.1:8080"
+# Порт Bifrost на хосте, только loopback (deploy/docker-compose.yml).
+ADMIN_PORT = 8081
+DEFAULT_ADMIN_URL = f"http://127.0.0.1:{ADMIN_PORT}"
 VIRTUAL_KEYS_PATH = "/api/governance/virtual-keys"
 REQUEST_TIMEOUT_S = 30.0
 LIST_PAGE_SIZE = 100
@@ -262,9 +266,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except httpx.TransportError as exc:
         logger.error(
             "нет связи с %s: %s. Bifrost запущен? С рабочей станции нужен SSH-туннель: "
-            "ssh -L 8080:127.0.0.1:8080 <вм>",
+            "ssh -L %d:127.0.0.1:%d <вм>",
             settings.admin_url,
             exc,
+            ADMIN_PORT,
+            ADMIN_PORT,
         )
         return 1
     return 0

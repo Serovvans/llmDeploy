@@ -142,3 +142,25 @@ export async function signIn(account: Account): Promise<APIRequestContext> {
 export async function adoptSession(context: BrowserContext, api: APIRequestContext): Promise<void> {
   await context.addCookies((await api.storageState()).cookies);
 }
+
+/** Наибольший срок блокировки входа на стенде (`auth.lockout.max_seconds` в portal/dev/config.override.yaml). */
+const STAND_MAX_LOCK_SECONDS = 8;
+
+/**
+ * Закрывает вход для логина серией неверных паролей и доводит блокировку до наибольшего на
+ * стенде срока: первая блокировка длится пару секунд, каждая неудача после её конца удлиняет
+ * следующую. Так у сценария остаётся запас времени, пока блокировка действует.
+ */
+export async function lockLogin(login: string): Promise<void> {
+  const api = await newApi();
+  await expect
+    .poll(
+      async () => {
+        const response = await api.post('/api/auth/login', { data: { login, password: 'неверный-пароль-000' } });
+        return response.status() === 429 ? (await response.json()).error.details.retry_after_seconds : 0;
+      },
+      { timeout: 45_000, intervals: [100] },
+    )
+    .toBeGreaterThanOrEqual(STAND_MAX_LOCK_SECONDS - 1);
+  await api.dispose();
+}

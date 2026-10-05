@@ -3,6 +3,7 @@
   "encryption_key": "env.BIFROST_ENCRYPTION_KEY",
   "client": {
     "enforce_auth_on_inference": true,
+    "disable_content_logging": true,
     "whitelisted_routes": ["/metrics"]
   },
   "config_store": {
@@ -21,6 +22,9 @@
   },
   "providers": {
     "vllm": {
+      "network_config": {
+        "allow_private_network": true
+      },
       "keys": [
         {
           "name": "vllm-main",

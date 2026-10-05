@@ -32,7 +32,7 @@ def virtual_key(**overrides: Any) -> dict[str, Any]:
 
 
 def make_client(handler: Handler, auth: tuple[str, str] | None = None) -> httpx.Client:
-    settings = keys.Settings(admin_url="http://127.0.0.1:8080", auth=auth)
+    settings = keys.Settings(admin_url="http://127.0.0.1:8081", auth=auth)
     return keys.build_client(settings, transport=httpx.MockTransport(handler))
 
 
@@ -46,7 +46,7 @@ def body(request: httpx.Request) -> dict[str, Any]:
 
 def test_settings_defaults_to_localhost_without_auth() -> None:
     settings = keys.load_settings({})
-    assert settings == keys.Settings(admin_url="http://127.0.0.1:8080", auth=None)
+    assert settings == keys.Settings(admin_url="http://127.0.0.1:8081", auth=None)
 
 
 def test_settings_reads_url_and_basic_auth() -> None:
@@ -107,7 +107,7 @@ def test_create_key_posts_payload_with_basic_auth() -> None:
     assert created["value"] == "sk-bf-secret"
     request = seen[0]
     assert request.method == "POST"
-    assert str(request.url) == "http://127.0.0.1:8080/api/governance/virtual-keys"
+    assert str(request.url) == "http://127.0.0.1:8081/api/governance/virtual-keys"
     assert body(request) == payload
     expected_auth = "Basic " + base64.b64encode(b"admin:pw").decode()
     assert request.headers["Authorization"] == expected_auth

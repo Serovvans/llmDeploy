@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -242,30 +243,63 @@ def test_question_starting_with_a_wider_set_of_words_is_a_query() -> None:
     assert question_dangers("Почему BEGIN; DELETE FROM t; удаляет всё?", RULES) is None
 
 
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "DELETE FROM t WHERE x = '" + "a" * 2_000_000,  # незакрытая строка
-        "SELECT 1 /* " + "/* " * 300_000,  # незакрытые вложенные комментарии
-        "SELECT " + "(" * 500_000 + "1",  # глубокая вложенность скобок
-        "SELECT " + "(" * 200_000 + "DELETE FROM t" + ")" * 200_000,
-        "DELETE FROM t WHERE id IN (" + ", ".join(["1"] * 300_000) + ")",  # длинная строка
-        "'" * 1_000_001,
-        "$a$" + "$" * 500_000,
-        ("-- комментарий\n" * 100_000) + "DROP TABLE t",
-        "e'" + "\\'" * 500_000,
-        ";" * 1_000_000,
-        "\n".join(["hint = 1,"] * 100_000),  # много строк на проверку шаблонами
-    ],
-)
-def test_danger_scan_is_linear_and_survives_pathological_input(sql: str) -> None:
-    """Разбор не зависает и не падает: время линейно по длине текста."""
+# Во сколько раз полный вход длиннее малого и предел отношения времён их разбора:
+# линейный разбор даёт около 8, квадратичный — около 64.
+_FULL_SCALE = 8
+_LINEAR_RATIO_LIMIT = 24
+# Разбор полного входа быстрее этого сравнивать незачем: отношение было бы шумом таймера.
+_NEGLIGIBLE_CPU_SECONDS = 0.05
+
+
+def _scan_cpu_seconds(sql: str) -> float:
+    """Процессорное время разбора: от загрузки машины, в отличие от настенного, не зависит.
+
+    Сборщик мусора на время замера выключен: его проходы зависят от числа живых объектов
+    во всём процессе тестов и на глубокой вложенности скобок удваивают время сами по себе.
+    """
+    import gc
     import time
 
-    started = time.perf_counter()
-    result = find_dangers([sql], RULES)
-    assert time.perf_counter() - started < 3
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        started = time.process_time()
+        result = find_dangers([sql], RULES)
+        elapsed = time.process_time() - started
+    finally:
+        if gc_was_enabled:
+            gc.enable()
     assert isinstance(result, list)
+    return elapsed
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda k: "DELETE FROM t WHERE x = '" + "a" * (250_000 * k),  # незакрытая строка
+        lambda k: "SELECT 1 /* " + "/* " * (37_500 * k),  # незакрытые вложенные комментарии
+        lambda k: "SELECT " + "(" * (62_500 * k) + "1",  # глубокая вложенность скобок
+        lambda k: "SELECT " + "(" * (25_000 * k) + "DELETE FROM t" + ")" * (25_000 * k),
+        lambda k: "DELETE FROM t WHERE id IN (" + ", ".join(["1"] * (37_500 * k)) + ")",
+        lambda k: "'" * (125_000 * k + 1),
+        lambda k: "$a$" + "$" * (62_500 * k),
+        lambda k: ("-- комментарий\n" * (12_500 * k)) + "DROP TABLE t",
+        lambda k: "e'" + "\\'" * (62_500 * k),
+        lambda k: ";" * (125_000 * k),
+        lambda k: "\n".join(["hint = 1,"] * (12_500 * k)),  # много строк на проверку шаблонами
+    ],
+)
+def test_danger_scan_is_linear_and_survives_pathological_input(
+    build: Callable[[int], str],
+) -> None:
+    """Разбор не зависает и не падает: время линейно по длине текста.
+
+    Сравниваются времена разбора одного и того же входа двух размеров, а не время с
+    порогом в секундах: отношение не зависит ни от скорости машины, ни от её загрузки.
+    """
+    small = min(_scan_cpu_seconds(build(1)) for _ in range(3))
+    full = _scan_cpu_seconds(build(_FULL_SCALE))
+    assert full <= max(_LINEAR_RATIO_LIMIT * small, _NEGLIGIBLE_CPU_SECONDS)
 
 
 # Начала строк, с которых шаблоны из конфигурации начинают разбирать сообщение СУБД.

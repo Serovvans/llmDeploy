@@ -76,6 +76,12 @@ async def _reset_second_factor(container: AdminContainer, login: str) -> str:
     return "Второй фактор сброшен: при следующем входе настройка пройдёт заново.\n"
 
 
+async def _unlock_login(container: AdminContainer, login: str) -> str:
+    if await container.admin.unlock_login_by_login(login):
+        return "Блокировка входа снята: счётчик неудач обнулён.\n"
+    return "Блокировки входа нет: ничего не изменено.\n"
+
+
 async def _audit(
     container: AdminContainer, since: datetime | None, event: str | None, limit: int
 ) -> str:
@@ -168,6 +174,8 @@ def _parser() -> argparse.ArgumentParser:
     create_admin.add_argument("--full-name", required=True)
     reset = commands.add_parser("reset-second-factor", help="сбросить второй фактор")
     reset.add_argument("--login", required=True)
+    unlock = commands.add_parser("unlock-login", help="снять временную блокировку входа")
+    unlock.add_argument("--login", required=True)
     audit = commands.add_parser("audit", help="показать журнал аудита")
     audit.add_argument("--since", type=_parse_since, help="дата или время ISO 8601 (UTC)")
     audit.add_argument("--event", help="только события этого вида")
@@ -196,6 +204,8 @@ async def _run_admin_command(settings: Settings, args: argparse.Namespace) -> st
             return await _create_admin(container, args.login, args.full_name)
         if args.command == "reset-second-factor":
             return await _reset_second_factor(container, args.login)
+        if args.command == "unlock-login":
+            return await _unlock_login(container, args.login)
         return await _audit(container, args.since, args.event, args.limit)
     finally:
         container.hash_executor.shutdown()

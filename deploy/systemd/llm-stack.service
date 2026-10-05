@@ -13,7 +13,15 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/llm/deploy
 # Профили берутся из COMPOSE_PROFILES в .env этого каталога.
-ExecStart=/usr/bin/docker compose up -d
+# Не прямой `docker compose up -d`: пока есть следы прерванного восстановления, пишущие
+# сервисы запускать нельзя — портал заработал бы на смешанных данных
+# (docs/portal-design.md §8). Скрипт тогда поднимает остальное, пишет причину в журнал
+# и завершается с ошибкой: юнит остаётся failed, это видно в `systemctl status llm-stack`.
+# Restart= не задан намеренно — повторный запуск следы не уберёт, нужен `make restore`.
+# Путь относительный: при установке подставляется только WorkingDirectory.
+ExecStart=/usr/bin/bash ../scripts/stack_up.sh
+# После неудачного старта systemd ExecStop не выполняет: запущенные модель и точка
+# входа продолжают работать.
 ExecStop=/usr/bin/docker compose down
 # up ждёт healthy vLLM, а первый старт со скачиванием модели длится десятки минут.
 TimeoutStartSec=infinity

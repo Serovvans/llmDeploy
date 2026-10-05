@@ -9,7 +9,9 @@
 #       нужны; модель доступна на 127.0.0.1:8000 для смоук-теста и бенчмарка.
 #
 #   sudo bash scripts/install.sh --stage gateway --hostname llm.corp.example --tls corp
-#       Этап 2 — внешний доступ: добавляет профиль gateway (Caddy + Bifrost) и 443.
+#       Этап 2 — внешний доступ: добавляет профиль gateway (Caddy + Bifrost). Caddy
+#       слушает 443, 8080 и 18443 (docs/portal-design.md §3.2). Сертификат Let's Encrypt
+#       для --tls corp выпускается заранее отдельным шагом: make cert (scripts/cert.sh).
 #
 #   sudo bash scripts/install.sh --stage portal
 #       Этап 3 — портал сотрудников (docs/portal-design.md §3, §7): добавляет профиль
@@ -36,15 +38,18 @@
 #   2. deploy/.env из .env.example; пустые секреты генерируются, заданные не меняются.
 #      Секреты портала дописываются на любом этапе: compose интерполирует сервисы и
 #      выключенных профилей, без них не выполнится ни одна команда docker compose;
-#   3. (gateway + corp) проверка сертификата: срок, имя хоста, соответствие ключу;
+#   3. (gateway + corp) проверка сертификата в deploy/certs/: срок, имя хоста,
+#      соответствие ключу. Сам сертификат скрипт не выпускает;
 #   4. docker compose config и pull; (portal) сборка образов portal-api, portal-worker
 #      и portal-web из этого клона — при каждом запуске, чтобы после git pull образы
 #      соответствовали коду;
 #   5. предзагрузка весов моделей в volume hf-cache;
 #   6. systemd-юнит llm-stack с путём к этому клону, запуск и ожидание healthy;
+#      (gateway + corp, сертификат выпущен make cert) таймер продления llm-cert-renew;
 #   7. (gateway + internal) выгрузка корневого сертификата Caddy в deploy/caddy-root.crt;
 #   8. проверка: этап model — на 127.0.0.1:8000 запрос без ключа даёт 401, с ключом
-#      модель отвечает; этап gateway — через 443 запрос без ключа 401/403, / — 404;
+#      модель отвечает; этап gateway — через 443 запрос без ключа 401/403, / — 404,
+#      на 8080 и 18443 отвечает тот же сайт;
 #      этап portal — через 443 / отдаёт страницу входа, /api/auth/session без сессии —
 #      401, админ-API Bifrost и /metrics — 404, запрос к модели без ключа — 401/403.
 # Идемпотентен: повторный запуск применяет изменения .env и compose.
@@ -60,6 +65,16 @@ readonly CERTS_DIR="${DEPLOY_DIR}/certs"
 readonly ROOT_CERT_FILE="${DEPLOY_DIR}/caddy-root.crt"
 readonly UNIT_SOURCE="${DEPLOY_DIR}/systemd/llm-stack.service"
 readonly UNIT_TARGET="/etc/systemd/system/llm-stack.service"
+# Таймер продления сертификата Let's Encrypt (scripts/cert.sh renew) и состояние lego.
+readonly SYSTEMD_DIR="/etc/systemd/system"
+readonly RENEW_UNITS=("${DEPLOY_DIR}/systemd/llm-cert-renew.service" "${DEPLOY_DIR}/systemd/llm-cert-renew.timer")
+readonly RENEW_TIMER="llm-cert-renew.timer"
+readonly LEGO_CERTS_DIR="${DEPLOY_DIR}/lego/certificates"
+# Порты хоста помимо 443, на которых Caddy отдаёт тот же сайт: цель проброса из
+# интернета и тот же адрес из сети заказчика (docs/portal-design.md §3.2).
+readonly CADDY_EXTRA_PORTS=(8080 18443)
+# Админ-порт Bifrost на хосте, только loopback: 8080 занят Caddy.
+readonly BIFROST_ADMIN_PORT=8081
 readonly CADDY_ROOT_CERT_PATH="/data/caddy/pki/authorities/local/root.crt"
 readonly DEFAULT_ADMIN_USERNAME="admin"
 readonly CERT_WARN_DAYS=30
@@ -73,6 +88,13 @@ readonly PORTAL_PROFILE="portal"
 # и portal-worker — один код в двух образах, поэтому собираются одной командой.
 readonly PORTAL_BUILD_SERVICES=(portal-api portal-worker portal-web)
 readonly VLLM_LOCAL_URL="http://127.0.0.1:8000"
+# Под /v1 Caddy проксирует в Bifrost только /v1/chat/completions, /v1/completions,
+# /v1/embeddings и /v1/models (docs/design.md §3.3); эти запросы без ключа должны
+# получать 404 от Caddy при любом SITE_MODE. Тот же список — в smoke_test.py.
+readonly V1_CLOSED_ROUTES=(
+  "GET /v1/unknown-route" "GET /v1/mcp/tools" "GET /v1/skills" "GET /v1" "GET /v1/"
+  "POST /v1/async/chat/completions" "POST /v1/mcp/tool/execute"
+)
 readonly MINIMAL_CHAT_BODY='{"model": "default", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}'
 # Первый запрос к прогретой модели укладывается в секунды; запас — на загруженную ВМ.
 readonly HTTP_TIMEOUT_S=60
@@ -286,6 +308,12 @@ prepare_env() {
 check_corp_certificate() {
   local cert="${CERTS_DIR}/fullchain.pem" key="${CERTS_DIR}/privkey.pem"
   local fix="положить сертификат корпоративного CA в ${cert} и ключ в ${key}, либо установить с --tls internal"
+  local renew="запросить перевыпуск у DevOps (docs/devops-request.md §1.2)"
+  # Заданный ACME_EMAIL значит, что сертификат — от Let's Encrypt (scripts/cert.sh).
+  if [[ -n "$(env_file_value ACME_EMAIL)" ]]; then
+    fix="выпустить сертификат Let's Encrypt: make cert; затем повторить этап"
+    renew="продлить: make cert-renew; почему не сработал таймер — journalctl -u llm-cert-renew"
+  fi
   [[ -f "$cert" ]] || die "нет файла ${cert}" "$fix"
   [[ -f "$key" ]] || die "нет файла ${key}" "$fix"
   chmod 600 "$key"
@@ -293,15 +321,15 @@ check_corp_certificate() {
   openssl x509 -in "$cert" -noout >/dev/null 2>&1 ||
     die "${cert} не является PEM-сертификатом" "$fix"
   openssl x509 -in "$cert" -noout -checkend 0 >/dev/null ||
-    die "сертификат ${cert} просрочен" "запросить перевыпуск у DevOps (docs/devops-request.md §1.2)"
+    die "сертификат ${cert} просрочен" "$renew"
   if ! openssl x509 -in "$cert" -noout -checkend "$((CERT_WARN_DAYS * 86400))" >/dev/null; then
-    log "ВНИМАНИЕ: сертификат истекает менее чем через ${CERT_WARN_DAYS} дней"
+    log "ВНИМАНИЕ: сертификат истекает менее чем через ${CERT_WARN_DAYS} дней; ${renew}"
   fi
   [[ "$(openssl x509 -in "$cert" -noout -checkhost "$hostname")" == *"does match"* ]] ||
     die "сертификат ${cert} выписан не на ${hostname}" "запросить сертификат с SAN = ${hostname}"
   [[ "$(openssl x509 -in "$cert" -noout -pubkey)" == "$(openssl pkey -in "$key" -pubout 2>/dev/null)" ]] ||
     die "ключ ${key} не соответствует сертификату ${cert}" "проверить, что файлы из одной пары"
-  log "сертификат корпоративного CA: срок, имя и ключ в порядке"
+  log "сертификат ${cert}: срок, имя и ключ в порядке"
 }
 
 prepare_tls() {
@@ -351,10 +379,48 @@ start_stack() {
   log "запуск: vLLM загружает модель несколько минут; логи — cd ${DEPLOY_DIR} && docker compose logs -f vllm"
   # start — первый запуск через юнит; up --wait — применить изменения при повторной
   # установке (у активного oneshot-юнита start ничего не делает) и дождаться healthy.
+  # Через stack_up.sh, как и юнит: при следах прерванного восстановления пишущие сервисы
+  # не запускаются (docs/portal-design.md §8).
   systemctl start llm-stack ||
     die "не удалось запустить стек" "sudo journalctl -u llm-stack; cd ${DEPLOY_DIR} && docker compose ps"
-  compose up -d --wait ||
-    die "не все сервисы стали healthy" "cd ${DEPLOY_DIR} && docker compose ps и logs <сервис>; docs/runbook.md §5"
+  bash "${SCRIPT_DIR}/stack_up.sh" --wait ||
+    die "стек запущен не полностью" "если выше сказано о незавершённом восстановлении — повторить make restore FROM=<каталог копии>; иначе cd ${DEPLOY_DIR} && docker compose ps и logs <сервис>; docs/runbook.md §5"
+  apply_bifrost_config
+}
+
+# config.json смонтирован в контейнер отдельным файлом: после git pull у него новый
+# inode, а up -d не пересоздаёт контейнер из-за изменившегося содержимого — Bifrost
+# работал бы со старым конфигом. Вызывается после успешного запуска всего стека.
+apply_bifrost_config() {
+  [[ "$gateway_enabled" -eq 1 ]] || return 0
+  log "пересоздание Bifrost: применяется текущий deploy/bifrost/config.json"
+  compose up -d --force-recreate --no-deps --wait bifrost ||
+    die "Bifrost не запустился с текущим config.json" "cd ${DEPLOY_DIR} && docker compose logs bifrost"
+}
+
+# Файл юнита → каталог systemd с фактическим путём к deploy/ (у таймера такой строки нет).
+install_unit() {
+  sed "s#^WorkingDirectory=.*#WorkingDirectory=${DEPLOY_DIR}#" "$1" >"${SYSTEMD_DIR}/$(basename "$1")"
+}
+
+# Таймер имеет смысл, только если сертификат выпущен lego (make cert) и продлевать его
+# можно без человека — через API DNS. Ставится здесь, а не в cert.sh: юниты systemd с
+# путём к клону устанавливает этот скрипт, а первый выпуск идёт до появления Caddy.
+install_cert_renewal() {
+  [[ "$gateway_enabled" -eq 1 && "$tls_mode" == "corp" ]] || return 0
+  [[ -f "${LEGO_CERTS_DIR}/${hostname}.crt" ]] || return 0
+  if [[ -z "$(env_file_value TIMEWEBCLOUD_AUTH_TOKEN)" ]]; then
+    log "ВНИМАНИЕ: TIMEWEBCLOUD_AUTH_TOKEN пуст — автопродление сертификата не включено. Продлевать вручную не позже чем через 60 дней: make cert-renew MANUAL=1"
+    return 0
+  fi
+  log "таймер ${RENEW_TIMER}: ежедневная проверка срока сертификата (make cert-renew)"
+  local unit
+  for unit in "${RENEW_UNITS[@]}"; do
+    install_unit "$unit"
+  done
+  systemctl daemon-reload
+  systemctl enable --now "$RENEW_TIMER" ||
+    die "не удалось включить ${RENEW_TIMER}" "sudo systemctl status ${RENEW_TIMER}; до исправления продлевать вручную: make cert-renew"
 }
 
 export_root_certificate() {
@@ -390,7 +456,7 @@ verify_model() {
     < <(printf 'header = "Authorization: Bearer %s"\n' "$(env_file_value VLLM_API_KEY)")
 }
 
-# Этап portal: кроме /v1/* сайт отдаёт портал; админ-API Bifrost и /metrics по-прежнему
+# Этап portal: кроме путей API сайт отдаёт портал; админ-API Bifrost и /metrics по-прежнему
 # закрыты (docs/portal-design.md §3). Аргументы — общие параметры curl.
 verify_portal() {
   local hint="docs/runbook.md §5; cd ${DEPLOY_DIR} && docker compose logs caddy portal-web portal-api"
@@ -403,23 +469,39 @@ verify_portal() {
   expect_http "/metrics через 443 закрыт" "404" "${root}/metrics" "$hint" "$@" </dev/null
 }
 
-# Этап gateway: наружу через 443 видны только /v1/* и только с ключом Bifrost.
+# Этап gateway: наружу через 443 видны только четыре пути API под /v1 и только с ключом
+# Bifrost; на остальных портах Caddy — тот же сайт.
 verify_gateway() {
   local hint="docs/runbook.md §5; cd ${DEPLOY_DIR} && docker compose logs caddy bifrost"
+  local port route
   local tls_args=(--cacert "$ROOT_CERT_FILE")
   # Корень корпоративного CA на ВМ может быть не установлен; сертификат уже проверен выше.
   [[ "$tls_mode" == "internal" ]] || tls_args=(--insecure)
   local common=("${tls_args[@]}" --resolve "${hostname}:443:127.0.0.1")
+  for port in "${CADDY_EXTRA_PORTS[@]}"; do
+    common+=(--resolve "${hostname}:${port}:127.0.0.1")
+  done
 
   # Именно inference-запрос: на него действует enforce_auth_on_inference Bifrost.
   expect_http "запрос к модели без ключа отклоняется" "401|403" \
     "https://${hostname}/v1/chat/completions" "$hint" "${common[@]}" \
     -X POST -H "Content-Type: application/json" -d "$MINIMAL_CHAT_BODY" </dev/null
+  for route in "${V1_CLOSED_ROUTES[@]}"; do
+    expect_http "${route} через 443 закрыт" "404" "https://${hostname}${route#* }" \
+      "Caddy должен проксировать под /v1 только четыре пути API (deploy/caddy/Caddyfile); ${hint}" \
+      "${common[@]}" -X "${route%% *}" </dev/null
+  done
   if [[ "$portal_enabled" -eq 1 ]]; then
     verify_portal "${common[@]}"
   else
     expect_http "/ через 443 закрыт" "404" "https://${hostname}/" "$hint" "${common[@]}" </dev/null
   fi
+  for port in "${CADDY_EXTRA_PORTS[@]}"; do
+    expect_http "порт ${port}: запрос к модели без ключа отклоняется" "401|403" \
+      "https://${hostname}:${port}/v1/chat/completions" \
+      "sudo ss -ltnp | grep ':${port} ' — порт должен принадлежать Caddy (docker-proxy); ${hint}" "${common[@]}" \
+      -X POST -H "Content-Type: application/json" -d "$MINIMAL_CHAT_BODY" </dev/null
+  done
 }
 
 verify_endpoint() {
@@ -453,6 +535,8 @@ print_gateway_summary() {
 
 ===== Этап 2 завершён: внешний доступ открыт =====
 API для клиентов:  https://${hostname}/v1   model="default"
+                   тот же сайт на портах ${CADDY_EXTRA_PORTS[*]}; после проброса порта из
+                   интернета — https://${hostname}:18443/v1 (docs/portal-design.md §3.2)
 Секреты:           ${ENV_FILE} (root, 600)
 
 ВАЖНО: сохраните копию BIFROST_ENCRYPTION_KEY из ${ENV_FILE} вне ВМ, в хранилище
@@ -474,7 +558,7 @@ EOF
   1. Ключ и смоук-тест через 443:
        make key NAME=smoke
        make smoke KEY=sk-bf-... CA=${ca_cert}
-  2. UI Bifrost и Grafana с рабочей станции: ssh -L 8080:127.0.0.1:8080 -L 3000:127.0.0.1:3000 <админ>@<вм>
+  2. UI Bifrost и Grafana с рабочей станции: ssh -L ${BIFROST_ADMIN_PORT}:127.0.0.1:${BIFROST_ADMIN_PORT} -L 3000:127.0.0.1:3000 <админ>@<вм>
 EOF
 }
 
@@ -486,6 +570,8 @@ print_portal_summary() {
 ===== Этап 3 завершён: портал развёрнут =====
 Портал:            https://${hostname}/
 API для клиентов:  https://${hostname}/v1   model="default"
+                   тот же сайт на портах ${CADDY_EXTRA_PORTS[*]}; после проброса порта из
+                   интернета — https://${hostname}:18443/ (docs/portal-design.md §3.2)
 Секреты:           ${ENV_FILE} (root, 600)
 
 ВАЖНО: сохраните копию PORTAL_SECRET_KEY из ${ENV_FILE} вне ВМ, в хранилище секретов
@@ -531,6 +617,7 @@ main() {
   build_portal_images
   preload_models
   start_stack
+  install_cert_renewal
   export_root_certificate
   verify_endpoint
   print_summary

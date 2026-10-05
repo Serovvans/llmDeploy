@@ -1,4 +1,5 @@
 import { IconSearchLoupeRegular16 } from '@skbkontur/icons/IconSearchLoupeRegular16';
+import { IconSecurityLockClosedRegular16 } from '@skbkontur/icons/IconSecurityLockClosedRegular16';
 import { Button, Hint, Input, Kebab, Loader, MenuItem, Paging, ScrollContainer, SingleToast } from '@skbkontur/react-ui';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -14,7 +15,7 @@ import { TitleHint } from '../components/TitleHint';
 import { useFocusReturn } from '../hooks/useFocusReturn';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useSession } from '../session/SessionContext';
-import { errorText, texts } from '../texts';
+import { errorText, lockedUntil, texts } from '../texts';
 import {
   CreateUserModal,
   EditUserModal,
@@ -97,6 +98,38 @@ function UsersList() {
   }, [search]);
 
   const reload = () => setReloads((value) => value + 1);
+
+  // Когда срок блокировки входа наступил, пометка и пункт меню исчезают сами, без запроса к серверу.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const ends = (lastPage?.items ?? []).flatMap((user) => {
+      const until = user.login_locked_until ? Date.parse(user.login_locked_until) : 0;
+      return until > now ? [until] : [];
+    });
+    if (ends.length === 0) {
+      return;
+    }
+    const timer = window.setTimeout(() => setNow(Date.now()), Math.max(0, Math.min(...ends) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [lastPage, now]);
+  const isLoginLocked = (user: AdminUser) =>
+    user.login_locked_until !== null && Date.parse(user.login_locked_until) > now;
+
+  const unlockLogin = async (user: AdminUser) => {
+    try {
+      const result = await api.unlockUserLogin(user.id);
+      setLastPage(
+        (current) => current && { ...current, items: current.items.map((item) => (item.id === user.id ? result.user : item)) },
+      );
+      // Блокировки уже не было (срок вышел или её снял другой администратор) — без сообщения.
+      if (result.unlocked) {
+        SingleToast.push(t.toast.loginUnlocked);
+      }
+    } catch (error) {
+      showUserActionError(error);
+      reload();
+    }
+  };
 
   /** Открывает окно и запоминает, куда вернуть фокус: кнопка добавления или меню действий строки. */
   const openDialog = (next: Dialog, openerId: string) => {
@@ -207,7 +240,21 @@ function UsersList() {
                       <td className="p-mono">{user.login}</td>
                       <td>{t.role[user.role]}</td>
                       <td>{user.second_factor_configured ? t.secondFactorConfigured : t.secondFactorMissing}</td>
-                      <td>{t.state[user.state]}</td>
+                      <td>
+                        {t.state[user.state]}
+                        {user.login_locked_until && isLoginLocked(user) && (
+                          <span className={styles.loginLocked}>
+                            <span className={styles.loginLockedIcon} aria-hidden="true">
+                              <IconSecurityLockClosedRegular16 />
+                            </span>
+                            {/* Точка — только для экранного чтения: ячейка читается двумя фразами. */}
+                            <span>
+                              <span className="p-visually-hidden">. </span>
+                              {t.loginLocked(lockedUntil(user.login_locked_until, new Date(now)))}
+                            </span>
+                          </span>
+                        )}
+                      </td>
                       <td className={styles.kebab} data-opener={user.id}>
                         {!user.is_me && (
                           <Hint text={t.actions}>
@@ -221,6 +268,11 @@ function UsersList() {
                                   onClick={() => openDialog({ kind: 'confirm', action: 'resetSecondFactor', user }, user.id)}
                                 >
                                   {t.menu.resetSecondFactor}
+                                </MenuItem>
+                              )}
+                              {isLoginLocked(user) && (
+                                <MenuItem comment={t.menu.unlockLoginComment} onClick={() => void unlockLogin(user)}>
+                                  {t.menu.unlockLogin}
                                 </MenuItem>
                               )}
                               {user.state === 'blocked' ? (

@@ -7,6 +7,7 @@ import type { Locator, Page } from '@playwright/test';
 import { uniqueSuffix } from '../support/accounts';
 import { textFile } from '../support/files';
 import { expect, test } from '../support/fixtures';
+import { searchUsers } from '../support/ui';
 
 /** Нажатие по фону в углу экрана, вне окна. */
 async function clickBackground(page: Page, modal: Locator): Promise<void> {
@@ -33,7 +34,7 @@ test('«Новый пользователь» и «Изменить учётну
   await page.keyboard.press('Escape');
   await expect(modal).toHaveCount(0);
 
-  await page.getByRole('textbox', { name: 'Найти по ФИО или логину' }).fill(employee.account.login);
+  await searchUsers(page, employee.account.login);
   await page.getByRole('button', { name: `Действия: ${employee.account.fullName}` }).click();
   await page.locator('[data-tid~="MenuItem__root"]').filter({ hasText: /^Изменить$/ }).click();
   await modal.getByRole('textbox', { name: 'Фамилия, имя, отчество' }).fill('Правка Не Пропадает');

@@ -9,6 +9,18 @@
 #   sudo bash scripts/backup.sh restore КАТАЛОГ_КОПИИ
 #       Заменяет данные сервиса содержимым копии. Спрашивает подтверждение.
 #
+#   sudo bash scripts/backup.sh pending
+#       Только проверка: есть ли следы прерванного восстановления (см. ниже). Печатает
+#       их по строке и завершается с кодом 3; следов нет — код 0; проверить не удалось —
+#       код 1. Данные не меняет. Если база портала не запущена, поднимает только её.
+#
+#   sudo bash scripts/backup.sh start [аргументы docker compose up, например --wait]
+#       Запуск стека с этой проверкой; обёртка — scripts/stack_up.sh (make up, юнит
+#       llm-stack). Следов нет — docker compose up -d с аргументами, код 0. Следы есть —
+#       сервисы, пишущие в данные (portal-worker, portal-api, qdrant, bifrost),
+#       останавливаются, остальное запускается, код 3. Проверить не удалось — пишущие
+#       сервисы не запускаются и не останавливаются, остальное запускается, код 1.
+#
 # Состав копии — данные сервисов включённых профилей:
 #   portal-db.dump     база портала: дамп pg_dump (согласованный снимок, а не копия
 #                      каталога работающего сервера);
@@ -32,7 +44,8 @@
 # Прерванное восстановление оставляет следы: базы portal_restore / portal_previous и
 # каталог .restore-new (с отметкой .restore-new.ready) в томах. Пока они есть, данные
 # могут быть смешанными — часть из копии, часть прежние: сервисы запускать нельзя,
-# create отказывает. Выход один — повторить restore: он доводит переключение до конца.
+# create отказывает, start не запускает пишущие сервисы (docs/portal-design.md §8).
+# Выход один — повторить restore: он доводит переключение до конца.
 #
 # В копию НЕ входят:
 #   deploy/.env — секреты в открытом виде. PORTAL_SECRET_KEY и BIFROST_ENCRYPTION_KEY
@@ -71,6 +84,8 @@ readonly WRITERS=(portal-worker portal-api qdrant bifrost)
 # любом наборе профилей с данными (gateway), поэтому копия и аварийное восстановление не
 # зависят от доступа к реестру. Тома монтируются напрямую, от root.
 readonly HELPER_SERVICE="caddy"
+# Код возврата pending и start при следах прерванного восстановления.
+readonly EXIT_PENDING=3
 
 # Вывод не должен обрывать скрипт: при закрытом терминале (обрыв SSH) echo завершается
 # ошибкой, а log вызывается и там, где сервисы возвращаются в работу.
@@ -168,9 +183,12 @@ stop_writers() {
   compose stop "${writers[@]}"
 }
 
+# up, а не start: после make down контейнеров нет, и start их не создал бы.
+# --no-recreate: работающие сервисы, от которых зависят пишущие (модель, база), не
+# пересоздаются, даже если их конфигурация с тех пор изменилась.
 start_writers() {
   log "запуск: ${writers[*]}"
-  compose start "${writers[@]}" ||
+  compose up -d --no-recreate "${writers[@]}" ||
     die "не удалось запустить ${writers[*]}" "make ps; make logs SERVICE=<сервис>"
 }
 
@@ -215,6 +233,101 @@ restore_traces() {
       die "не удалось прочитать том $(volume_name "$volume")" "docker volume ls"
     [[ -z "$found" ]] || prefix_lines "том $(volume_name "$volume"): " <<<"$found"
   done
+}
+
+# ------------------------------------------- запуск при прерванном восстановлении
+
+# Заполняет traces следами прерванного восстановления, ничего не меняя в данных.
+# Вызывается и до первого запуска сервисов, и сразу после перезагрузки ВМ.
+find_pending() {
+  traces=""
+  enabled_services="$(compose config --services)" ||
+    die "docker compose не читает ${COMPOSE_FILE_PATH}" "запустить от root на ВМ; проверить deploy/.env"
+  local service volume existing=()
+  for service in "${WRITERS[@]}"; do
+    if has_service "$service"; then
+      existing+=("$service")
+    fi
+  done
+  # Только модель: данных, которые восстанавливают, нет.
+  [[ "${#existing[@]}" -gt 0 ]] || return 0
+  load_project
+
+  # Тома, которого ещё нет, восстановление не касалось, а docker run создал бы его пустым.
+  existing=()
+  for volume in "${volumes[@]}"; do
+    if docker volume inspect "$(volume_name "$volume")" >/dev/null 2>&1; then
+      existing+=("$volume")
+    fi
+  done
+  volumes=("${existing[@]}")
+  if [[ "${#volumes[@]}" -gt 0 ]]; then
+    docker image inspect "$helper_image" >/dev/null 2>&1 ||
+      die "нет образа ${helper_image}: тома не проверить" "cd deploy && docker compose pull ${HELPER_SERVICE}"
+  fi
+  # Временные базы видны только через работающий PostgreSQL; его запуск данных не меняет.
+  if has_service "$DB_SERVICE" && ! db_run pg_isready -q -U "$DB_USER" -d postgres >/dev/null 2>&1; then
+    log "запуск ${DB_SERVICE} для проверки следов восстановления" >&2
+    compose up -d --wait "$DB_SERVICE" >&2 ||
+      die "сервис ${DB_SERVICE} не запустился: следы восстановления в базе не проверить" "make logs SERVICE=${DB_SERVICE}"
+  fi
+  traces="$(restore_traces)"
+}
+
+cmd_pending() {
+  find_pending
+  [[ -n "$traces" ]] || return 0
+  echo "$traces"
+  echo "ОШИБКА: восстановление не завершено: данные могут быть смешанными" >&2
+  echo "что делать: ${RETRY_HINT}" >&2
+  exit "$EXIT_PENDING"
+}
+
+# Аргументы передаются docker compose up, только когда следов нет. Проверка идёт
+# отдельным процессом: её отказ не должен помешать запустить модель и точку входа.
+cmd_start() {
+  local status=0 found service stopped=() others=()
+  found="$(bash "${BASH_SOURCE[0]}" pending)" || status=$?
+  if [[ "$status" -eq 0 ]]; then
+    compose up -d "$@"
+    return
+  fi
+
+  enabled_services="$(compose config --services)" ||
+    die "docker compose не читает ${COMPOSE_FILE_PATH}" "запустить от root на ВМ; проверить deploy/.env"
+  # Пишущие — в порядке WRITERS, как их останавливают create и restore.
+  for service in "${WRITERS[@]}"; do
+    if has_service "$service"; then
+      stopped+=("$service")
+    fi
+  done
+  for service in $enabled_services; do
+    if [[ " ${WRITERS[*]} ${HELPER_SERVICE} " != *" ${service} "* ]]; then
+      others+=("$service")
+    fi
+  done
+  if [[ "$status" -eq "$EXIT_PENDING" ]]; then
+    # Не только «не запускать»: после перезагрузки Docker сам поднимает контейнеры с
+    # restart: unless-stopped, если они работали в момент прерывания.
+    log "следы прерванного восстановления (${found//$'\n'/; }): остановка ${stopped[*]}" >&2
+    compose stop "${stopped[@]}" || die "не удалось остановить ${stopped[*]}" "make ps"
+  else
+    status=1
+    echo "ОШИБКА: следы прерванного восстановления проверить не удалось: ${stopped[*]} не запускаются" >&2
+    echo "что делать: устранить причину из сообщения выше и повторить make up" >&2
+  fi
+  log "запуск без пишущих сервисов" >&2
+  compose up -d "${others[@]}" || die "не удалось запустить ${others[*]}" "make ps; make logs SERVICE=<сервис>"
+  # Caddy — единственный непишущий сервис, зависящий от пишущего (Bifrost): обычный up
+  # запустил бы Bifrost вместе с ним.
+  if has_service "$HELPER_SERVICE"; then
+    compose up -d --no-deps "$HELPER_SERVICE" || die "не удалось запустить ${HELPER_SERVICE}" "make logs SERVICE=${HELPER_SERVICE}"
+  fi
+  if [[ "$status" -eq "$EXIT_PENDING" ]]; then
+    echo "ОШИБКА: восстановление не завершено (${found//$'\n'/; }): сервисы ${stopped[*]} остановлены и не запущены" >&2
+    echo "что делать: ${RETRY_HINT}; затем make up" >&2
+  fi
+  exit "$status"
 }
 
 # ---------------------------------------------------------------- создание копии
@@ -466,7 +579,7 @@ cmd_restore() {
       abort_restore "прежняя база ${DB_PREVIOUS} не удалена"
   fi
   # Данные уже новые: сигнал не должен оборвать запуск сервисов на середине. Игнорирование
-  # наследует и compose start.
+  # наследует и compose up.
   trap '' INT TERM HUP
   start_writers
 
@@ -483,6 +596,11 @@ main() {
       usage
       exit 0
       ;;
+    pending | start)
+      [[ "$1" == "start" || $# -eq 1 ]] || die "pending не принимает аргументов" "bash scripts/backup.sh --help"
+      command -v docker >/dev/null 2>&1 || die "не найден docker" "запустить на ВМ"
+      "cmd_$1" "${@:2}"
+      ;;
     create | restore)
       [[ $# -eq 2 ]] || die "$1 требует каталог" "bash scripts/backup.sh --help"
       command -v docker >/dev/null 2>&1 || die "не найден docker" "запустить на ВМ"
@@ -491,7 +609,7 @@ main() {
       trap '' PIPE
       "cmd_$1" "$2"
       ;;
-    *) die "ожидается create или restore" "bash scripts/backup.sh --help" ;;
+    *) die "ожидается create, restore, pending или start" "bash scripts/backup.sh --help" ;;
   esac
 }
 

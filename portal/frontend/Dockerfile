@@ -35,12 +35,12 @@ COPY <<'EOF' /etc/caddy/Caddyfile
 		file_server
 	}
 
-	# Остальное отдаётся с проверкой свежести: у index.html и theme-init.js хеша в
-	# имени нет, после обновления портала браузер должен получить новые.
+	# Остальное отдаётся с проверкой свежести: у index.html, theme-init.js и значка
+	# сайта хеша в имени нет, после обновления портала браузер должен получить новые.
 	header Cache-Control no-cache
 
 	@static {
-		path /theme-init.js /fonts/*
+		path /theme-init.js /fonts/* /favicon.svg /favicon.ico
 		file
 	}
 	handle @static {
