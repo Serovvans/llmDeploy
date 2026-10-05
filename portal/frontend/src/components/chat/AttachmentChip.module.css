@@ -1,0 +1,78 @@
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  min-height: 32px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: var(--p-bg);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pages {
+  flex: none;
+  color: var(--p-text-muted);
+  white-space: nowrap;
+}
+
+.open {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.thumbnail {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--p-line);
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.failed {
+  display: flex;
+  color: var(--p-error-text);
+}
+
+.remove {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: -2px -4px -2px 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--p-text-muted);
+  cursor: pointer;
+}
+
+.remove:hover {
+  background: var(--p-surface-3);
+}
+
+.open:focus-visible,
+.remove:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}

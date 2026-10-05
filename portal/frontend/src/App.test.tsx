@@ -35,9 +35,9 @@ describe('шаги входа', () => {
     mockApi({ 'GET /api/auth/session': () => ok(session('ready')) });
     renderApp('/');
 
-    expect(await screen.findByRole('heading', { level: 1, name: texts.sections.chat })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: texts.chat.newChat })).toBeInTheDocument();
     expect(path()).toBe('/chat');
-    expect(document.title).toBe('Чат — Портал сотрудников');
+    await waitFor(() => expect(document.title).toBe('Новый чат — Портал сотрудников'));
   });
 
   it('первый вход: вход → смена пароля → настройка второго фактора → резервные коды → чат', async () => {
@@ -83,7 +83,7 @@ describe('шаги входа', () => {
 
     await user.click(screen.getByLabelText(texts.backupCodes.saved));
     await user.click(screen.getByRole('button', { name: texts.backupCodes.proceed }));
-    expect(await screen.findByRole('heading', { level: 1, name: texts.sections.chat })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: texts.chat.newChat })).toBeInTheDocument();
     expect(path()).toBe('/chat');
   });
 
@@ -149,7 +149,7 @@ describe('шаги входа', () => {
       'GET /api/admin/users': () => fail(403, 'login_step_required', { details: { step: 'second_factor' } }),
     });
     renderApp('/chat');
-    await screen.findByRole('heading', { level: 1, name: texts.sections.chat });
+    await screen.findByRole('heading', { level: 1, name: texts.chat.newChat });
 
     server.on('GET /api/auth/session', () => ok(session('second_factor')));
     await userEvent.setup().click(screen.getByRole('link', { name: texts.nav.users }));
@@ -548,7 +548,7 @@ describe('конец сессии и служебные экраны', () => {
 
     server.on('GET /api/auth/session', () => ok(session('ready')));
     await userEvent.setup().click(screen.getByRole('button', { name: texts.service.unavailable.action }));
-    expect(await screen.findByRole('heading', { level: 1, name: texts.sections.chat })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: texts.chat.newChat })).toBeInTheDocument();
   });
 
   it('неизвестный адрес — «Страница не найдена» с переходом в чат', async () => {

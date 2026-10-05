@@ -89,6 +89,18 @@ def request_too_large(max_bytes: int) -> AppError:
     )
 
 
+def file_too_large(max_bytes: int) -> AppError:
+    """Файл больше лимита области."""
+    return AppError(
+        413, "file_too_large", "Файл слишком большой.", details={"max_bytes": max_bytes}
+    )
+
+
+def unsupported_file_type() -> AppError:
+    """Тип файла по содержимому не из разрешённых."""
+    return AppError(415, "unsupported_file_type", "Файлы такого типа не принимаются.")
+
+
 def validation_error(fields: Sequence[FieldError]) -> AppError:
     """Ошибка в полях запроса."""
     return AppError(422, "validation_error", "Проверьте заполнение полей.", fields=fields)

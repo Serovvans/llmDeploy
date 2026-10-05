@@ -7,6 +7,7 @@
 import json
 import logging
 import sys
+import traceback
 from datetime import UTC, datetime
 
 # color_message — дубль сообщения uvicorn с управляющими символами терминала.
@@ -41,3 +42,15 @@ def configure_logging() -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+
+
+def code_locations(error: BaseException) -> list[str]:
+    """Места в коде, через которые прошло исключение, без его текста и без значений.
+
+    В тексте исключения и в стандартной трассировке (она его включает) могут оказаться
+    данные запроса, поэтому в журнал идут только файл, строка и функция.
+    """
+    return [
+        f"{frame.filename}:{frame.lineno} {frame.name}"
+        for frame in traceback.extract_tb(error.__traceback__)
+    ]

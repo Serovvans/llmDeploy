@@ -41,6 +41,7 @@ p {
 
 .p-mono {
   font-family: var(--p-font-mono);
+  font-variant-ligatures: none;
 }
 
 .p-visually-hidden {

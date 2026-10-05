@@ -5,7 +5,7 @@ import styles from './EmptyState.module.css';
 interface EmptyStateProps {
   title: string;
   text: string;
-  action: { label: string; onClick: () => void };
+  action?: { label: string; onClick: () => void };
   /** Служебный экран — заголовок страницы (`h1`); пустое состояние внутри экрана — `h2`. */
   headingLevel?: 'h1' | 'h2';
 }
@@ -17,9 +17,11 @@ export function EmptyState({ title, text, action, headingLevel: Heading = 'h2' }
       <div className={styles.content}>
         <Heading className={styles.title}>{title}</Heading>
         <p className="p-muted">{text}</p>
-        <div className={styles.action}>
-          <Button onClick={action.onClick}>{action.label}</Button>
-        </div>
+        {action && (
+          <div className={styles.action}>
+            <Button onClick={action.onClick}>{action.label}</Button>
+          </div>
+        )}
       </div>
     </Center>
   );

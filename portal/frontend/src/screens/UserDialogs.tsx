@@ -1,8 +1,9 @@
-import { Button, Gapped, Input, Link, MiniModal, Modal, Radio, RadioGroup, SingleToast } from '@skbkontur/react-ui';
+import { Button, Gapped, Input, Link, Modal, Radio, RadioGroup, SingleToast } from '@skbkontur/react-ui';
 import { useState } from 'react';
 
 import { api, isApiError } from '../api/client';
 import type { AdminUser, Role, TemporaryPasswordResult } from '../api/types';
+import { ConfirmModal } from '../components/ConfirmModal';
 import { Field } from '../components/Field';
 import { useCopy } from '../hooks/useCopy';
 import { errorText, texts } from '../texts';
@@ -299,47 +300,12 @@ export function EditUserModal({ user, onClose }: EditUserModalProps) {
       {confirmingRole && (
         <ConfirmModal
           {...texts.users.confirm.changeRole(role)}
-          user={user}
+          who={texts.users.confirm.who(user.full_name, user.login)}
           onConfirm={() => void save()}
           onCancel={() => setConfirmingRole(false)}
         />
       )}
     </>
-  );
-}
-
-interface ConfirmModalProps {
-  /** Над кем действие: полное ФИО и логин — первая строка тела. */
-  user: AdminUser;
-  title: string;
-  body: string;
-  action: string;
-  pending?: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}
-
-/**
- * Подтверждение необратимого действия (концепция §4.5, §5.10): вопрос — в заголовке, в теле — кто и
- * последствия; опасная кнопка с глаголом, фокус — на «Отмена».
- */
-export function ConfirmModal({ user, title, body, action, pending = false, onConfirm, onCancel }: ConfirmModalProps) {
-  return (
-    <MiniModal onClose={onCancel}>
-      <MiniModal.Header>{title}</MiniModal.Header>
-      <MiniModal.Body>
-        <p className={styles.who}>{texts.users.confirm.who(user.full_name, user.login)}</p>
-        <p>{body}</p>
-      </MiniModal.Body>
-      <MiniModal.Footer>
-        <Button use="danger" loading={pending} onClick={onConfirm}>
-          {action}
-        </Button>
-        <Button autoFocus disabled={pending} onClick={onCancel}>
-          {texts.common.cancel}
-        </Button>
-      </MiniModal.Footer>
-    </MiniModal>
   );
 }
 

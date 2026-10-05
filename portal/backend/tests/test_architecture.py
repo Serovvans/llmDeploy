@@ -8,7 +8,7 @@ import pytest
 SOURCE = Path(__file__).parent.parent / "src" / "portal"
 FORBIDDEN = {
     "fastapi", "starlette", "sqlalchemy", "httpx", "asyncpg", "alembic", "uvicorn",
-    "argon2", "cryptography", "pyotp", "segno",
+    "argon2", "cryptography", "pyotp", "segno", "pypdfium2", "docx", "PIL",
 }  # fmt: skip
 INNER_MODULES = [
     "auth/domain.py",
@@ -17,6 +17,17 @@ INNER_MODULES = [
     "auth/throttle.py",
     "auth/service.py",
     "auth/admin.py",
+    "llm/ports.py",
+    "llm/estimator.py",
+    "files/ports.py",
+    "dialogs/domain.py",
+    "dialogs/errors.py",
+    "dialogs/ports.py",
+    "dialogs/context.py",
+    "dialogs/service.py",
+    "dialogs/generation.py",
+    "core/events.py",
+    "core/validation.py",
     "core/errors.py",
     "core/ports.py",
     "core/pagination.py",
@@ -27,7 +38,10 @@ INFRASTRUCTURE = {
     "portal.auth.repositories", "portal.auth.crypto", "portal.auth.tables", "portal.auth.totp",
     "portal.auth.routes", "portal.auth.admin_routes", "portal.auth.schemas",
     "portal.core.db", "portal.core.audit", "portal.core.app", "portal.core.access",
-    "portal.core.container", "portal.core.middleware",
+    "portal.core.container", "portal.core.middleware", "portal.core.sse",
+    "portal.llm.bifrost", "portal.files.reader", "portal.files.storage",
+    "portal.dialogs.repositories", "portal.dialogs.tables", "portal.dialogs.routes",
+    "portal.dialogs.schemas",
 }  # fmt: skip
 
 

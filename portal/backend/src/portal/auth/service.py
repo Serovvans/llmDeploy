@@ -115,6 +115,11 @@ class AuthService:
                 await uow.sessions.update(session, "last_seen_at")
             return SessionInfo(session.id, user.id, user.role, user.full_name, step)
 
+    async def session_exists(self, session_id: UUID) -> bool:
+        """Есть ли ещё сессия в базе (порт `SessionAuthenticator`)."""
+        async with self._uow_factory() as uow:
+            return await uow.sessions.exists(session_id)
+
     async def session_state(self, session_id: UUID) -> SessionState:
         """Объект `Session` для `GET /api/auth/session`."""
         async with self._uow_factory() as uow:

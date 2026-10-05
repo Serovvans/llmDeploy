@@ -1,0 +1,47 @@
+.composer {
+  flex: none;
+  width: 100%;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 8px 32px 16px;
+}
+
+.box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: var(--p-bg);
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.hint {
+  margin-top: 6px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.notice {
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}

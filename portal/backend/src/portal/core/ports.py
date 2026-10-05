@@ -70,3 +70,7 @@ class SessionAuthenticator(Protocol):
     async def authenticate(self, token: str | None) -> SessionInfo:
         """Вернуть действующую сессию или поднять `SessionMissingError`."""
         ...
+
+    async def session_exists(self, session_id: UUID) -> bool:
+        """Есть ли ещё сессия в базе: её удаление обрывает открытый поток (§2.6)."""
+        ...

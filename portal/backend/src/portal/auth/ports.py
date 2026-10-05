@@ -46,6 +46,10 @@ class SessionRepository(Protocol):
         """Сессия с её пользователем; `lock_user` — держать строку пользователя."""
         ...
 
+    async def exists(self, session_id: UUID) -> bool:
+        """Есть ли сессия в базе."""
+        ...
+
     async def by_token_hash(self, token_hash: bytes) -> tuple[Session, User] | None:
         """Сессия с её пользователем по хешу значения cookie."""
         ...

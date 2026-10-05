@@ -5,6 +5,7 @@
 """
 
 import base64
+import shutil
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +19,7 @@ from portal.cli import migrate
 from portal.core.app import create_app
 from portal.core.container import build_container
 from portal.core.settings import Settings, load_settings
-from tests.support import FakeClock, Portal
+from tests.support import FakeClock, Portal, ScriptedModel
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
 SECRET_KEY = base64.b64encode(bytes(range(32))).decode()
@@ -32,7 +33,12 @@ def anyio_backend() -> str:
 
 @pytest.fixture(scope="session")
 def environ() -> dict[str, str]:
-    return {"PORTAL_DB_PASSWORD": "", "PORTAL_SECRET_KEY": SECRET_KEY}
+    return {
+        "PORTAL_DB_PASSWORD": "",
+        "PORTAL_SECRET_KEY": SECRET_KEY,
+        "PORTAL_LLM_API_KEY": "sk-bf-test",
+        "MAX_MODEL_LEN": "65536",
+    }
 
 
 @pytest.fixture(scope="session")
@@ -48,7 +54,13 @@ def override_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
             "name": "postgres",
             "user": "postgres",
         },
-        "auth": {"password": {"argon2": {"time_cost": 1, "memory_cost_kib": 8, "parallelism": 1}}},
+        "auth": {
+            "password": {"argon2": {"time_cost": 1, "memory_cost_kib": 8, "parallelism": 1}},
+            "session": {"stream_recheck_seconds": 1},
+        },
+        "files": {"root": str(directory / "files")},
+        # Короткие ожидания: тесты потока не должны ждать секунды.
+        "dialogs": {"stop_grace_seconds": 1, "title_wait_seconds": 1, "keepalive_seconds": 0.2},
     }
     path = directory / "config.override.yaml"
     path.write_text(yaml.safe_dump(override), encoding="utf-8")
@@ -63,13 +75,31 @@ def settings(environ: dict[str, str], override_path: Path) -> Settings:
     return loaded
 
 
-@pytest.fixture
-async def portal(settings: Settings) -> AsyncIterator[Portal]:
+async def make_portal(settings: Settings, *, scripted_model: bool = True) -> Portal:
+    """Приложение на чистой базе с подменными часами.
+
+    Модель подменная; с `scripted_model=False` работает настоящий клиент Bifrost — его
+    адрес тест направляет на заглушку стенда.
+    """
     clock = FakeClock(START)
-    container = build_container(settings, clock)
+    model = ScriptedModel()
+    container = build_container(settings, clock, model if scripted_model else None)
+    shutil.rmtree(settings.files.root, ignore_errors=True)
     async with container.engine.begin() as connection:
         await connection.execute(
             sa.text("TRUNCATE users, auth_throttle, audit_log RESTART IDENTITY CASCADE")
         )
-    yield Portal(create_app(container), container, clock)
-    await container.engine.dispose()
+    return Portal(create_app(container), container, clock, model)
+
+
+async def close_portal(portal: Portal) -> None:
+    await portal.container.generation.shutdown()
+    await portal.container.http_client.aclose()
+    await portal.container.engine.dispose()
+
+
+@pytest.fixture
+async def portal(settings: Settings) -> AsyncIterator[Portal]:
+    built = await make_portal(settings)
+    yield built
+    await close_portal(built)

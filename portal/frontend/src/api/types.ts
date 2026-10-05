@@ -92,3 +92,54 @@ export interface ErrorBody {
   fields?: FieldError[];
   details?: Record<string, unknown>;
 }
+
+/** Список с подгрузкой по курсору (контракт §1.4). */
+export interface CursorPage<T> {
+  items: T[];
+  next_cursor: string | null;
+}
+
+export type DialogKind = 'chat' | 'sql' | 'cogis' | 'docparse';
+
+export interface Dialog {
+  id: string;
+  kind: DialogKind;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Attachment {
+  id: string;
+  file_name: string;
+  media_type: string;
+  page_count: number | null;
+  image_count: number;
+  created_at: string;
+}
+
+export type MessageStatus = 'complete' | 'streaming' | 'stopped' | 'length_limit' | 'error';
+
+/** Сообщение диалога (контракт §5.1). Поля источников и проверки SQL понадобятся на этапах 4–5. */
+export interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  status: MessageStatus;
+  error_code: string | null;
+  reasoning: string | null;
+  reasoning_seconds: number | null;
+  attachments: Attachment[];
+  dropped_messages: number;
+  created_at: string;
+}
+
+export type AnswerMode = 'fast' | 'thorough';
+
+/** Тело сообщения чата (контракт §5.3). */
+export interface ChatMessageBody {
+  content: string;
+  attachment_ids: string[];
+  mode: AnswerMode;
+  knowledge: 'none' | 'shared' | 'shared_and_personal';
+}

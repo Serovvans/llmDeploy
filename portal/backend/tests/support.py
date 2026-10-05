@@ -1,7 +1,9 @@
 """Общие помощники тестов: стенд приложения, подменные часы, шаги входа."""
 
 import asyncio
-from collections.abc import Callable, Coroutine
+import json
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -11,10 +13,12 @@ import httpx
 import pyotp
 import pytest
 import sqlalchemy as sa
+import uvicorn
 from fastapi import FastAPI
 
 from portal.core.container import Container
 from portal.core.ports import CurrentUser
+from portal.llm.ports import ChatRequest, ContentDelta, Finished, ReasoningDelta
 
 NEW_PASSWORD = "Надёжный-пароль-2026"
 CLIENT_IP = "203.0.113.5"
@@ -43,6 +47,86 @@ def run_during(
         return original(*args)
 
     monkeypatch.setattr(target, method, wrapper)
+
+
+type ModelStep = ReasoningDelta | ContentDelta | Finished | Exception | asyncio.Event
+
+DEFAULT_ANSWER: tuple[ModelStep, ...] = (
+    ReasoningDelta("Думаю."),
+    ContentDelta("Привет, "),
+    ContentDelta("мир."),
+    Finished("stop"),
+)
+
+
+class ScriptedModel:
+    """Подменная модель: отвечает по сценарию теста и запоминает запросы.
+
+    Шаг сценария — событие потока, исключение (поднимается) или `asyncio.Event`
+    (поток ждёт, пока тест его не выставит).
+    """
+
+    def __init__(self) -> None:
+        self.scripts: list[Sequence[ModelStep]] = []
+        self.requests: list[ChatRequest] = []
+        self.title_requests: list[ChatRequest] = []
+        self.title: str | Exception | asyncio.Event = "«Название от модели»"
+        self.closed = 0
+
+    async def stream(
+        self, request: ChatRequest
+    ) -> AsyncIterator[ReasoningDelta | ContentDelta | Finished]:
+        self.requests.append(request)
+        script = self.scripts.pop(0) if self.scripts else DEFAULT_ANSWER
+        try:
+            for step in script:
+                if isinstance(step, Exception):
+                    raise step
+                if isinstance(step, asyncio.Event):
+                    await step.wait()
+                else:
+                    yield step
+        finally:
+            self.closed += 1
+
+    async def complete(self, request: ChatRequest) -> str:
+        self.title_requests.append(request)
+        if isinstance(self.title, Exception):
+            raise self.title
+        if isinstance(self.title, asyncio.Event):
+            await self.title.wait()
+            return "Поздно"
+        return self.title
+
+
+def parse_events(body: str) -> list[tuple[str, dict[str, Any]]]:
+    """События потока по порядку: имя и данные; строки keep-alive пропускаются."""
+    events = []
+    for block in body.split("\n\n"):
+        lines = block.splitlines()
+        if len(lines) == 2 and lines[0].startswith("event: ") and lines[1].startswith("data: "):
+            events.append((lines[0][7:], json.loads(lines[1][6:])))
+    return events
+
+
+@asynccontextmanager
+async def live_server(app: Any) -> AsyncIterator[str]:
+    """Настоящий сервер на петлевом адресе: тесту нужен поток и закрытие соединения.
+
+    Встроенный транспорт httpx отдаёт ответ только целиком, поэтому остановку и паузы
+    им не проверить.
+    """
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, lifespan="off")
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        await task
 
 
 class FakeClock:
@@ -75,6 +159,7 @@ class Portal:
     app: FastAPI
     container: Container
     clock: FakeClock
+    model: "ScriptedModel"
 
     def client(self, ip: str = CLIENT_IP, forwarded_for: str | None = None) -> httpx.AsyncClient:
         """Клиент-«браузер»: свой набор cookie и заголовок защиты от CSRF."""
@@ -143,6 +228,12 @@ class Portal:
             UUID, (await self.rows("SELECT id FROM users WHERE login = :login", login=login))[0].id
         )
 
+    async def employee(self, login: str = "ivanov") -> httpx.AsyncClient:
+        """Клиент сотрудника, прошедшего вход; закрывать его не обязательно."""
+        client = self.client()
+        await self.onboard(client, login)
+        return client
+
     async def rows(self, query: str, **params: Any) -> list[Any]:
         """Выполнить запрос к тестовой базе напрямую."""
         async with self.container.engine.connect() as connection:
@@ -157,3 +248,35 @@ class Portal:
         """События журнала аудита по порядку."""
         rows = await self.rows("SELECT event, details FROM audit_log ORDER BY id")
         return [(row.event, row.details) for row in rows]
+
+
+CHAT_BODY = {"content": "Какой срок аренды?", "mode": "fast", "knowledge": "none"}
+
+
+async def new_dialog(client: httpx.AsyncClient) -> str:
+    """Создать чат и вернуть его идентификатор."""
+    response = await client.post("/api/dialogs", json={"kind": "chat"})
+    assert response.status_code == 201, response.text
+    created: str = response.json()["id"]
+    return created
+
+
+async def ask(
+    client: httpx.AsyncClient, dialog_id: str, content: str = "Какой срок аренды?", **extra: Any
+) -> list[tuple[str, dict[str, Any]]]:
+    """Отправить вопрос и дождаться конца потока; вернуть события по порядку."""
+    body = {**CHAT_BODY, "content": content, **extra}
+    response = await client.post(f"/api/dialogs/{dialog_id}/messages", json=body)
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+    return parse_events(response.text)
+
+
+async def upload(
+    client: httpx.AsyncClient, dialog_id: str, name: str, content: bytes
+) -> httpx.Response:
+    """Загрузить вложение в чат."""
+    return await client.post(
+        f"/api/dialogs/{dialog_id}/attachments",
+        files={"file": (name, content, "application/octet-stream")},
+    )

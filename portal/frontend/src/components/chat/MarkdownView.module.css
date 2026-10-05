@@ -1,0 +1,117 @@
+.markdown {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.markdown :is(p, ul, ol, h1, h2, h3, h4, h5, h6, blockquote) {
+  margin: 0;
+}
+
+.markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.markdown :is(ul, ol) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 24px;
+}
+
+.markdown blockquote {
+  padding-left: 12px;
+  border-left: 2px solid var(--p-line);
+  color: var(--p-text-muted);
+}
+
+.markdown a {
+  color: var(--p-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdown a:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.markdown :not(pre) > code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--p-surface-2);
+  font-family: var(--p-font-mono);
+  font-size: 14px;
+}
+
+.markdown hr {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--p-line);
+}
+
+/* Таблица в ответе: компактная, шапка закреплена, прокрутка внутри блока (концепция §4.2, §7.3). */
+.tableScroll {
+  max-height: 480px;
+  overflow: auto;
+}
+
+.table {
+  border-collapse: collapse;
+  background: var(--p-bg);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--p-line);
+  background: var(--p-bg);
+  color: var(--p-text-muted);
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--p-line);
+  vertical-align: top;
+}
+
+.table tbody tr:hover {
+  background: var(--p-surface-2);
+}
+
+/* Черта в конце дописываемого текста; при prefers-reduced-motion — неподвижная. */
+.streaming > :last-child::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  background: var(--p-text);
+  vertical-align: text-bottom;
+  animation: blink 1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming > :last-child::after {
+    animation: none;
+  }
+}

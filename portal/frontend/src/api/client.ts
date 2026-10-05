@@ -2,8 +2,15 @@
  * Клиент API портала — единственное место, где вызывается `fetch`.
  * Здесь добавляется заголовок защиты от CSRF и разбирается общий формат ошибки (контракт §1.3, §2.2).
  */
+import { readEvents, type StreamEvent } from './stream';
 import type {
   AdminUser,
+  Attachment,
+  ChatMessageBody,
+  CursorPage,
+  Dialog,
+  DialogKind,
+  Message,
   ErrorBody,
   FieldError,
   Page,
@@ -42,6 +49,14 @@ export class NetworkError extends Error {
   }
 }
 
+/** Связь оборвалась после статуса 200: вопрос сервером уже сохранён (контракт §5.5). */
+export class StreamBrokenError extends NetworkError {
+  constructor() {
+    super();
+    this.name = 'StreamBrokenError';
+  }
+}
+
 export function isApiError(error: unknown, code?: string): error is ApiError {
   return error instanceof ApiError && (code === undefined || error.code === code);
 }
@@ -63,7 +78,7 @@ export function onSessionSignal(listener: SessionSignalListener): () => void {
   };
 }
 
-type Method = 'GET' | 'POST' | 'PATCH';
+type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 async function parseError(response: Response): Promise<ApiError> {
   try {
@@ -74,18 +89,24 @@ async function parseError(response: Response): Promise<ApiError> {
   } catch {
     // Тело не в формате контракта (например, ответ прокси) — ниже общий отказ по статусу.
   }
-  return new ApiError(response.status, {
-    code: response.status === 503 ? 'service_unavailable' : 'internal_error',
-    message: '',
-  });
+  const codes: Record<number, string> = { 413: 'request_too_large', 503: 'service_unavailable' };
+  return new ApiError(response.status, { code: codes[response.status] ?? 'internal_error', message: '' });
 }
 
-async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
+interface SendOptions {
+  json?: unknown;
+  form?: FormData;
+  accept?: string;
+  signal?: AbortSignal;
+}
+
+/** Единственное место вызова `fetch`: заголовок CSRF, отказ в формате контракта, сигнал о потере сессии. */
+async function send(method: Method, path: string, options: SendOptions = {}): Promise<Response> {
+  const headers: Record<string, string> = { Accept: options.accept ?? 'application/json' };
   if (method !== 'GET') {
     headers['X-Portal-Csrf'] = '1';
   }
-  if (body !== undefined) {
+  if (options.json !== undefined) {
     headers['Content-Type'] = 'application/json';
   }
 
@@ -95,21 +116,81 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
       method,
       headers,
       credentials: 'same-origin',
-      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: options.signal,
+      body: options.form ?? (options.json === undefined ? undefined : JSON.stringify(options.json)),
     });
-  } catch {
+  } catch (error) {
+    if (options.signal?.aborted) {
+      throw error;
+    }
     throw new NetworkError();
   }
 
   if (response.ok) {
-    return (response.status === 204 ? undefined : await response.json()) as T;
+    return response;
   }
-
   const error = await parseError(response);
   if (error.code === 'unauthenticated' || error.code === 'login_step_required') {
     sessionSignalListener?.(error.code);
   }
   throw error;
+}
+
+async function request<T>(method: Method, path: string, json?: unknown): Promise<T> {
+  const response = await send(method, path, { json });
+  return (response.status === 204 ? undefined : await response.json()) as T;
+}
+
+/** Открытые потоки ответа: их закрывают «Остановить», выход и добровольная смена пароля (концепция §5.12). */
+const openStreams = new Set<AbortController>();
+
+/** Закрывает все открытые потоки; ответы сохраняются на сервере как остановленные. */
+export function closeOpenStreams(): void {
+  for (const controller of openStreams) {
+    controller.abort();
+  }
+}
+
+/** Поток закрыт клиентом: «Остановить», выход, смена пароля. */
+export function isAbort(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+/**
+ * Открывает поток событий (контракт §6). Отказ до открытия потока — `ApiError`, как у обычного запроса.
+ * Обрыв соединения после статуса 200 — `StreamBrokenError`; закрытие через `signal` — ошибка отмены (`isAbort`).
+ * Событие `error` с кодом `session_ended` дополнительно сообщает о потере сессии, как отказ `unauthenticated`.
+ */
+async function* stream(path: string, json: unknown, signal: AbortSignal): AsyncGenerator<StreamEvent> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener('abort', abort);
+  openStreams.add(controller);
+  try {
+    const response = await send('POST', path, { json, accept: 'text/event-stream', signal: controller.signal });
+    if (!response.body) {
+      throw new StreamBrokenError();
+    }
+    let finished = false;
+    try {
+      for await (const event of readEvents(response.body)) {
+        if (event.type === 'error' && event.code === 'session_ended') {
+          sessionSignalListener?.('unauthenticated');
+        }
+        finished = event.type === 'done' || event.type === 'error';
+        yield event;
+      }
+    } catch {
+      throw controller.signal.aborted ? new DOMException('Поток закрыт', 'AbortError') : new StreamBrokenError();
+    }
+    // Поток закрылся без завершающего события — тот же обрыв связи.
+    if (!finished) {
+      throw new StreamBrokenError();
+    }
+  } finally {
+    openStreams.delete(controller);
+    signal.removeEventListener('abort', abort);
+  }
 }
 
 export interface UserListQuery {
@@ -135,15 +216,23 @@ export const api = {
     request<Session>('POST', '/api/auth/password', { new_password: newPassword }),
 
   /** Добровольная смена пароля (шаг `ready`): сервер гасит все сессии и новой не выдаёт. */
-  changeOwnPassword: (currentPassword: string, newPassword: string) =>
-    request<undefined>('POST', '/api/auth/password', { new_password: newPassword, current_password: currentPassword }),
+  changeOwnPassword: (currentPassword: string, newPassword: string) => {
+    closeOpenStreams();
+    return request<undefined>('POST', '/api/auth/password', {
+      new_password: newPassword,
+      current_password: currentPassword,
+    });
+  },
 
   startSecondFactorSetup: () => request<SecondFactorSetup>('POST', '/api/auth/second-factor/setup'),
 
   confirmSecondFactor: (code: string) =>
     request<SecondFactorConfirmResult>('POST', '/api/auth/second-factor/confirm', { code }),
 
-  logout: () => request<undefined>('POST', '/api/auth/logout'),
+  logout: () => {
+    closeOpenStreams();
+    return request<undefined>('POST', '/api/auth/logout');
+  },
 
   getConfig: () => request<PortalConfig>('GET', '/api/config'),
 
@@ -173,4 +262,47 @@ export const api = {
   blockUser: (id: string) => request<AdminUser>('POST', `/api/admin/users/${id}/block`),
 
   unblockUser: (id: string) => request<AdminUser>('POST', `/api/admin/users/${id}/unblock`),
+
+  listDialogs: (kind: DialogKind, cursor: string | null) => {
+    const params = new URLSearchParams({ kind });
+    if (cursor) {
+      params.set('cursor', cursor);
+    }
+    return request<CursorPage<Dialog>>('GET', `/api/dialogs?${params.toString()}`);
+  },
+
+  createDialog: (kind: DialogKind) => request<Dialog>('POST', '/api/dialogs', { kind }),
+
+  getDialog: (id: string) => request<Dialog>('GET', `/api/dialogs/${id}`),
+
+  renameDialog: (id: string, title: string) => request<Dialog>('PATCH', `/api/dialogs/${id}`, { title }),
+
+  deleteDialog: (id: string) => request<undefined>('DELETE', `/api/dialogs/${id}`),
+
+  /** Сообщения от новых к старым (контракт §5.2). */
+  listMessages: (id: string, cursor: string | null) =>
+    request<CursorPage<Message>>(
+      'GET',
+      `/api/dialogs/${id}/messages${cursor ? `?${new URLSearchParams({ cursor }).toString()}` : ''}`,
+    ),
+
+  sendMessage: (id: string, body: ChatMessageBody, signal: AbortSignal) =>
+    stream(`/api/dialogs/${id}/messages`, body, signal),
+
+  regenerate: (id: string, signal: AbortSignal) => stream(`/api/dialogs/${id}/regenerate`, undefined, signal),
+
+  uploadAttachment: async (dialogId: string, file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const response = await send('POST', `/api/dialogs/${dialogId}/attachments`, { form });
+    return (await response.json()) as Attachment;
+  },
+
+  deleteAttachment: (dialogId: string, attachmentId: string) =>
+    request<undefined>('DELETE', `/api/dialogs/${dialogId}/attachments/${attachmentId}`),
 };
+
+/** Адрес файла вложения на портале: оригинал и миниатюра изображения (контракт §5.8). */
+export function attachmentFileUrl(dialogId: string, attachmentId: string): string {
+  return `/api/dialogs/${dialogId}/attachments/${attachmentId}/file`;
+}

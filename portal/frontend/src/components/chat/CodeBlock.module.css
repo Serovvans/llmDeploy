@@ -1,0 +1,111 @@
+.block {
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: var(--p-surface-2);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--p-line);
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.code {
+  margin: 0;
+  padding: 12px;
+  overflow-x: auto;
+  color: var(--p-text);
+  font-family: var(--p-font-mono);
+  font-size: 14px;
+  line-height: 22px;
+  /* Код показывается посимвольно: «=>» не превращается в стрелку. */
+  font-variant-ligatures: none;
+  white-space: pre;
+}
+
+.code:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}
+
+.code code {
+  font: inherit;
+}
+
+/* Цвета подсветки — единственные (вместе с QR-кодом) цвета вне темы: концепция §7.3. */
+.code :global(.hljs-keyword),
+.code :global(.hljs-literal),
+.code :global(.hljs-meta),
+.code :global(.hljs-tag),
+.code :global(.hljs-name),
+.code :global(.hljs-selector-tag) {
+  color: #0b5cad;
+}
+
+.code :global(.hljs-string),
+.code :global(.hljs-regexp),
+.code :global(.hljs-attr),
+.code :global(.hljs-attribute) {
+  color: #1d6f42;
+}
+
+.code :global(.hljs-number),
+.code :global(.hljs-symbol),
+.code :global(.hljs-variable) {
+  color: #9a4a00;
+}
+
+.code :global(.hljs-type),
+.code :global(.hljs-built_in),
+.code :global(.hljs-title),
+.code :global(.hljs-function),
+.code :global(.hljs-params) {
+  color: #6f3fb5;
+}
+
+.code :global(.hljs-comment),
+.code :global(.hljs-doctag) {
+  color: #5f5f5f;
+}
+
+:global(html[data-theme='dark']) .code :global(.hljs-keyword),
+:global(html[data-theme='dark']) .code :global(.hljs-literal),
+:global(html[data-theme='dark']) .code :global(.hljs-meta),
+:global(html[data-theme='dark']) .code :global(.hljs-tag),
+:global(html[data-theme='dark']) .code :global(.hljs-name),
+:global(html[data-theme='dark']) .code :global(.hljs-selector-tag) {
+  color: #7db7ff;
+}
+
+:global(html[data-theme='dark']) .code :global(.hljs-string),
+:global(html[data-theme='dark']) .code :global(.hljs-regexp),
+:global(html[data-theme='dark']) .code :global(.hljs-attr),
+:global(html[data-theme='dark']) .code :global(.hljs-attribute) {
+  color: #7fd4a0;
+}
+
+:global(html[data-theme='dark']) .code :global(.hljs-number),
+:global(html[data-theme='dark']) .code :global(.hljs-symbol),
+:global(html[data-theme='dark']) .code :global(.hljs-variable) {
+  color: #f0b070;
+}
+
+:global(html[data-theme='dark']) .code :global(.hljs-type),
+:global(html[data-theme='dark']) .code :global(.hljs-built_in),
+:global(html[data-theme='dark']) .code :global(.hljs-title),
+:global(html[data-theme='dark']) .code :global(.hljs-function),
+:global(html[data-theme='dark']) .code :global(.hljs-params) {
+  color: #c3a6ff;
+}
+
+:global(html[data-theme='dark']) .code :global(.hljs-comment),
+:global(html[data-theme='dark']) .code :global(.hljs-doctag) {
+  color: #adadad;
+}

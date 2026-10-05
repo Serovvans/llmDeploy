@@ -1,0 +1,46 @@
+.screen {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.loading {
+  height: 240px;
+}
+
+.failed,
+.longDialog {
+  width: 100%;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 8px 32px 0;
+}
+
+.editor {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.editorError {
+  color: var(--p-error-text);
+  font-size: 14px;
+}

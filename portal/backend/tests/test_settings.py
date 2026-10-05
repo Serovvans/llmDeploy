@@ -6,10 +6,16 @@ from pathlib import Path
 import pytest
 import yaml
 
+from portal.core.container import build_container
 from portal.core.settings import ConfigError, load_settings
 from tests.conftest import CONFIG_DIR, SECRET_KEY
 
-ENVIRON = {"PORTAL_DB_PASSWORD": "db-secret", "PORTAL_SECRET_KEY": SECRET_KEY}
+ENVIRON = {
+    "PORTAL_DB_PASSWORD": "db-secret",
+    "PORTAL_SECRET_KEY": SECRET_KEY,
+    "PORTAL_LLM_API_KEY": "sk-bf-secret",
+    "MAX_MODEL_LEN": "65536",
+}
 NO_OVERRIDE = Path("/nonexistent/config.override.yaml")
 
 
@@ -113,3 +119,63 @@ def test_secret_key_is_required_only_where_it_is_used() -> None:
 def test_empty_config_directory_stops_startup(tmp_path: Path) -> None:
     with pytest.raises(ConfigError):
         load_settings(ENVIRON, tmp_path, NO_OVERRIDE)
+
+
+def test_chat_start_values_match_the_contract() -> None:
+    settings = load_settings(ENVIRON, CONFIG_DIR, NO_OVERRIDE)
+    assert settings.server.multipart_overhead_bytes == 65536
+    llm = settings.llm
+    assert (llm.base_url, llm.chat_model) == ("http://bifrost:8080/v1", "default")
+    assert (llm.safety_margin_tokens, llm.first_token_timeout_seconds) == (4096, 120)
+    assert (llm.image_max_side_px, llm.context_overflow_marker) == (1568, "maximum context length")
+    dialogs = settings.dialogs
+    assert (dialogs.generation_timeout_seconds, dialogs.stop_grace_seconds) == (900, 5)
+    assert (dialogs.title_wait_seconds, dialogs.title_max_tokens) == (3, 256)
+    assert dialogs.keepalive_seconds <= 15
+    assert (settings.chat.max_output_tokens.fast, settings.chat.max_output_tokens.thorough) == (
+        4096, 16384,
+    )  # fmt: skip
+    assert str(settings.files.root) == "/data/files"
+    assert settings.require_llm_api_key() == "sk-bf-secret"
+    assert settings.require_max_model_len() == 65536
+    assert "sk-bf-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("PORTAL_LLM_API_KEY", None),
+        ("PORTAL_LLM_API_KEY", ""),
+        ("PORTAL_LLM_API_KEY", "   "),
+        ("MAX_MODEL_LEN", None),
+    ],
+)
+def test_serve_refuses_to_start_without_model_settings(variable: str, value: str | None) -> None:
+    """Без ключа портала и контекста модели не стартует только `serve` (§13.5)."""
+    environ = {name: text for name, text in ENVIRON.items() if name != variable}
+    if value is not None:
+        environ[variable] = value
+    settings = load_settings(environ, CONFIG_DIR, NO_OVERRIDE)  # остальным командам достаточно
+    with pytest.raises(ConfigError, match=variable):
+        build_container(settings)
+
+
+@pytest.mark.parametrize("value", ["много", "0", "-5", "65536.0"])
+def test_malformed_max_model_len_stops_startup(value: str) -> None:
+    with pytest.raises(ConfigError, match="MAX_MODEL_LEN"):
+        load_settings({**ENVIRON, "MAX_MODEL_LEN": value}, CONFIG_DIR, NO_OVERRIDE)
+
+
+def test_keepalive_longer_than_contract_allows_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError):
+        load_settings(
+            ENVIRON, CONFIG_DIR, _override(tmp_path, {"dialogs": {"keepalive_seconds": 16}})
+        )
+
+
+def test_page_raster_side_must_fit_the_pixel_limit(tmp_path: Path) -> None:
+    """Согласованность настроек: растр страницы PDF заведомо меньше предела точек."""
+    with pytest.raises(ConfigError, match="image_max_side_px"):
+        load_settings(
+            ENVIRON, CONFIG_DIR, _override(tmp_path, {"files": {"image_max_pixels": 1_000_000}})
+        )

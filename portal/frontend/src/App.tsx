@@ -2,7 +2,9 @@ import { Loader, SingleToast } from '@skbkontur/react-ui';
 import { useEffect } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 
+import { ChatProvider } from './chat/ChatProvider';
 import { AppShell } from './components/AppShell';
+import { ChatScreen } from './screens/ChatScreen';
 import { CodeScreen } from './screens/CodeScreen';
 import { LoginScreen } from './screens/LoginScreen';
 import { PasswordScreen } from './screens/PasswordScreen';
@@ -48,7 +50,7 @@ function ToLoginStep({ to }: { to: string }) {
 
 /** Рабочие экраны: доступны только при завершённом входе (шаг `ready`). */
 function Workspace() {
-  const { session } = useSession();
+  const { session, config } = useSession();
   const stepPath = loginStepPath(session);
 
   if (stepPath !== null || !session?.user) {
@@ -56,10 +58,11 @@ function Workspace() {
   }
   const user = session.user;
   return (
-    <AppShell user={user}>
-      <Routes>
+    <ChatProvider config={config}>
+      <AppShell user={user}>
+        <Routes>
         <Route path="/" element={<Navigate to={HOME} replace />} />
-        <Route path="/chat/:id?" element={<SectionStub section="chat" />} />
+        <Route path="/chat/:id?" element={<ChatScreen />} />
         <Route path="/knowledge" element={<SectionStub section="knowledge" />} />
         <Route path="/sql/:id?" element={<SectionStub section="sql" />} />
         <Route path="/cogis/:id?" element={<SectionStub section="cogis" />} />
@@ -67,8 +70,9 @@ function Workspace() {
         <Route path="/admin/users" element={<UsersScreen />} />
         <Route path="/profile" element={<ProfileScreen user={user} />} />
         <Route path="*" element={<NotFoundScreen />} />
-      </Routes>
-    </AppShell>
+        </Routes>
+      </AppShell>
+    </ChatProvider>
   );
 }
 

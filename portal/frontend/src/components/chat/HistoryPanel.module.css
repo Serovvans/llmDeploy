@@ -1,0 +1,94 @@
+.panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  border-right: 1px solid var(--p-line);
+}
+
+.new {
+  flex: none;
+  padding: 12px;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 120px;
+  padding: 0 8px 12px;
+}
+
+.group {
+  padding: 4px 8px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.item > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.link {
+  display: block;
+  padding: 8px 36px 8px 8px;
+  overflow: hidden;
+  border-radius: 8px;
+  color: var(--p-text);
+  font-size: 14px;
+  line-height: 20px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link:hover,
+.item:focus-within .link {
+  background: var(--p-surface-2);
+}
+
+.link.current {
+  background: var(--p-surface-3);
+}
+
+.link:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}
+
+/* Меню строки появляется при наведении и при фокусе (концепция §5.5, §9). */
+.kebab {
+  position: absolute;
+  right: 4px;
+  opacity: 0;
+}
+
+.item:hover .kebab,
+.item:focus-within .kebab {
+  opacity: 1;
+}
+
+.more {
+  padding: 0 8px;
+  font-size: 14px;
+}

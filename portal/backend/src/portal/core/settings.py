@@ -31,6 +31,7 @@ class ServerSettings(_Section):
     """Пределы приёма запросов (docs/portal-api.md §1.3)."""
 
     json_body_max_bytes: int = Field(ge=1)
+    multipart_overhead_bytes: int = Field(ge=0)
 
 
 class DatabaseSettings(_Section):
@@ -114,19 +115,59 @@ class AuthSettings(_Section):
     totp: TotpSettings
 
 
+class LlmSettings(_Section):
+    """Обращение к модели через Bifrost (docs/portal-api.md §12.1)."""
+
+    base_url: str = Field(min_length=1)
+    chat_model: str = Field(min_length=1)
+    safety_margin_tokens: int = Field(ge=0)
+    first_token_timeout_seconds: int = Field(ge=1)
+    image_max_side_px: int = Field(ge=1)
+    context_overflow_marker: str = Field(min_length=1)
+    chars_per_token: float = Field(gt=0)
+    tokens_per_image: int = Field(ge=1)
+
+
+class FilesSettings(_Section):
+    """Хранение и чтение загруженных файлов (docs/portal-api.md §1.5)."""
+
+    root: Path
+    text_layer_min_chars: int = Field(ge=1)
+    image_max_pixels: int = Field(ge=1)
+    docx_max_unpacked_bytes: int = Field(ge=1)
+    docx_max_xml_bytes: int = Field(ge=1)
+    pdf_render_scale: float = Field(gt=0)
+
+
 class DialogsSettings(_Section):
-    """Диалоги."""
+    """Диалоги и поток ответа."""
 
     message_max_chars: int = Field(ge=1)
+    generation_timeout_seconds: int = Field(ge=1)
+    stop_grace_seconds: int = Field(ge=0)
+    title_wait_seconds: int = Field(ge=0)
+    title_max_tokens: int = Field(ge=1)
+    keepalive_seconds: float = Field(gt=0, le=15)
+    empty_ttl_hours: int = Field(ge=1)
+    title_system_prompt: str = Field(min_length=1)
+
+
+class ChatOutputTokens(_Section):
+    """Предел длины ответа по режимам; в него входят и размышления."""
+
+    fast: int = Field(ge=1)
+    thorough: int = Field(ge=1)
 
 
 class ChatSettings(_Section):
-    """Вложения чата."""
+    """Чат: вложения, пределы ответа, системное сообщение."""
 
     attachment_max_bytes: int = Field(ge=1)
     attachment_max_pages: int = Field(ge=1)
     attachment_extensions: tuple[str, ...]
     max_attachments: int = Field(ge=1)
+    max_output_tokens: ChatOutputTokens
+    system_prompt: str = Field(min_length=1)
 
 
 class KbSettings(_Section):
@@ -207,6 +248,8 @@ class Settings(_Section):
     server: ServerSettings
     database: DatabaseSettings
     auth: AuthSettings
+    llm: LlmSettings
+    files: FilesSettings
     dialogs: DialogsSettings
     chat: ChatSettings
     kb: KbSettings
@@ -216,6 +259,29 @@ class Settings(_Section):
     common_passwords: frozenset[str] = Field(repr=False)
     db_password: SecretStr
     secret_key: SecretBytes | None
+    llm_api_key: SecretStr | None
+    max_model_len: int | None
+
+    def require_llm_api_key(self) -> str:
+        """Вернуть ключ `PORTAL_LLM_API_KEY` или отказать, если он не задан или пуст."""
+        if self.llm_api_key is None:
+            raise ConfigError("Не задана переменная окружения PORTAL_LLM_API_KEY")
+        return self.llm_api_key.get_secret_value()
+
+    def require_max_model_len(self) -> int:
+        """Вернуть контекст модели `MAX_MODEL_LEN`; запасного значения нет (§13.5)."""
+        if self.max_model_len is None:
+            raise ConfigError("Не задана переменная окружения MAX_MODEL_LEN")
+        return self.max_model_len
+
+    @model_validator(mode="after")
+    def _check_page_raster_fits(self) -> Self:
+        """Растр страницы PDF ограничен стороной, а не числом точек: пределы согласованы."""
+        if self.llm.image_max_side_px**2 > self.files.image_max_pixels:
+            raise ValueError(
+                "llm.image_max_side_px в квадрате не должен превышать files.image_max_pixels"
+            )
+        return self
 
     def require_secret_key(self) -> bytes:
         """Вернуть ключ `PORTAL_SECRET_KEY` или отказать, если он не задан."""
@@ -252,6 +318,14 @@ def _decode_secret_key(value: str) -> bytes:
     return key
 
 
+def _parse_max_model_len(value: str | None) -> int | None:
+    if value is None:
+        return None
+    if not value.isdecimal() or int(value) < 1:
+        raise ConfigError("MAX_MODEL_LEN: ожидается положительное целое число")
+    return int(value)
+
+
 def _read_common_passwords(path: Path) -> frozenset[str]:
     lines = path.read_text(encoding="utf-8").splitlines()
     return frozenset(line.lower() for line in lines if line)
@@ -276,6 +350,7 @@ def load_settings(
     if db_password is None:
         raise ConfigError("Не задана переменная окружения PORTAL_DB_PASSWORD")
     secret_key = environ.get("PORTAL_SECRET_KEY")
+    llm_api_key = environ.get("PORTAL_LLM_API_KEY", "").strip()
 
     try:
         passwords_file = str(data["auth"]["password"]["common_passwords_file"])
@@ -287,6 +362,8 @@ def load_settings(
             common_passwords=_read_common_passwords(config_dir / passwords_file),
             db_password=SecretStr(db_password),
             secret_key=SecretBytes(_decode_secret_key(secret_key)) if secret_key else None,
+            llm_api_key=SecretStr(llm_api_key) if llm_api_key else None,
+            max_model_len=_parse_max_model_len(environ.get("MAX_MODEL_LEN")),
         )
     except ValueError as error:
         raise ConfigError(f"Ошибка конфигурации: {error}") from error

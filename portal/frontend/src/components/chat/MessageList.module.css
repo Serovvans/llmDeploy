@@ -1,0 +1,112 @@
+.list {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 24px 32px;
+}
+
+.row {
+  display: flex;
+  gap: 16px;
+}
+
+/* Поле слева с пометкой, кто говорит. */
+.who {
+  flex: none;
+  width: 48px;
+  padding-top: 10px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: right;
+}
+
+.question {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--p-surface-2);
+}
+
+.questionText {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.answer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 8px;
+}
+
+.state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.note {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.earlier {
+  padding-left: 64px;
+  font-size: 14px;
+}
+
+.toLast {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.toLast > * {
+  /* Кнопка библиотеки полупрозрачная: без своей подложки сквозь неё виден текст ленты. */
+  border-radius: 8px;
+  background: var(--p-bg);
+  pointer-events: auto;
+}
+
+.image {
+  display: block;
+  max-width: min(960px, 80vw);
+  max-height: 70vh;
+}

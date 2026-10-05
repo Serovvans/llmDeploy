@@ -133,6 +133,13 @@ class SqlSessionRepository:
         """Сессия с её пользователем; `lock_user` — `FOR UPDATE` строки пользователя."""
         return await self._one(sessions.c.id == session_id, lock_user)
 
+    async def exists(self, session_id: UUID) -> bool:
+        """Есть ли сессия в базе."""
+        found = await self._connection.scalar(
+            sa.select(sessions.c.id).where(sessions.c.id == session_id)
+        )
+        return found is not None
+
     async def by_token_hash(self, token_hash: bytes) -> tuple[Session, User] | None:
         """Сессия с её пользователем по хешу значения cookie."""
         return await self._one(sessions.c.token_hash == token_hash)

@@ -53,8 +53,8 @@ export function useAutoSubmitOnce(): (value: string) => boolean {
 
 /**
  * Поле шестизначного кода: одно поле, а не шесть клеток (концепция §5.2).
- * Предел длины держит обработчик, а не атрибут `maxLength`: атрибут обрезал бы вставленное
- * «123 456» до «123 45» — приложения-аутентификаторы часто показывают код с пробелом.
+ * Атрибута `maxLength` нет: обработчик сам убирает пробелы и всё, что не цифра, и оставляет первые
+ * шесть цифр — иначе вставленное «123 456» обрезалось бы до «123 45».
  */
 export function CodeInput({ inputRef, onValueChange, ...props }: CodeInputProps) {
   return (
@@ -66,7 +66,7 @@ export function CodeInput({ inputRef, onValueChange, ...props }: CodeInputProps)
         inputMode="numeric"
         autoComplete="one-time-code"
         autoFocus
-        onValueChange={(value) => onValueChange(normalizeCode(value).slice(0, CODE_LENGTH))}
+        onValueChange={(value) => onValueChange(value.replace(/\D/g, '').slice(0, CODE_LENGTH))}
         {...props}
       />
     </div>

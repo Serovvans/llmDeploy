@@ -82,9 +82,10 @@ def session_on(*steps: LoginStep) -> Callable[[Request, Container], Awaitable[Se
 AnySession = Annotated[SessionInfo, Depends(session_on())]
 
 
-async def current_user(
-    info: Annotated[SessionInfo, Depends(session_on("ready"))], ip: ClientIp
-) -> CurrentUser:
+ReadySession = Annotated[SessionInfo, Depends(session_on("ready"))]
+
+
+async def current_user(info: ReadySession, ip: ClientIp) -> CurrentUser:
     """Зависимость уровня «сотрудник»: вход завершён, роль любая."""
     return CurrentUser(id=info.user_id, role=info.role, full_name=info.full_name, ip=ip)
 

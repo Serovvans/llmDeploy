@@ -3,6 +3,7 @@
 import dataclasses
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -124,6 +125,9 @@ async def test_unhandled_failures_use_common_format(
 ) -> None:
     class Failing:
         async def authenticate(self, token: str | None) -> Any:
+            raise error
+
+        async def session_exists(self, session_id: UUID) -> bool:
             raise error
 
     portal.app = create_app(dataclasses.replace(portal.container, authenticator=Failing()))

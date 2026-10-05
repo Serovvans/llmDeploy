@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { api, USERS_PAGE_SIZE, type UserListQuery } from '../api/client';
 import type { AdminUser, Page, TemporaryPasswordResult } from '../api/types';
+import { ConfirmModal } from '../components/ConfirmModal';
 import { DataTable, SortableHeader } from '../components/DataTable';
 import { EmptyState } from '../components/EmptyState';
 import { Notice } from '../components/Notice';
@@ -13,7 +14,6 @@ import { usePageTitle } from '../hooks/usePageTitle';
 import { useSession } from '../session/SessionContext';
 import { errorText, texts } from '../texts';
 import {
-  ConfirmModal,
   CreateUserModal,
   EditUserModal,
   showUserActionError,
@@ -260,7 +260,7 @@ function UsersList() {
       {dialog?.kind === 'confirm' && (
         <ConfirmModal
           {...t.confirm[dialog.action]}
-          user={dialog.user}
+          who={t.confirm.who(dialog.user.full_name, dialog.user.login)}
           pending={pending}
           onConfirm={() => void runConfirmed(dialog.action, dialog.user)}
           onCancel={() => setDialog(null)}

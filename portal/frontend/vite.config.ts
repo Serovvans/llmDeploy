@@ -16,7 +16,12 @@ export default defineConfig(({ mode }) => {
       rolldownOptions: {
         output: {
           // Библиотека компонентов — отдельным файлом: меняется реже кода портала и дольше живёт в кэше браузера.
-          codeSplitting: { groups: [{ name: 'kontur', test: /node_modules\/@skbkontur\// }] },
+          codeSplitting: {
+            groups: [
+              { name: 'kontur-icons', test: /node_modules\/@skbkontur\/icons\//, priority: 2 },
+              { name: 'kontur', test: /node_modules\/@skbkontur\//, priority: 1 },
+            ],
+          },
         },
       },
     },
