@@ -5,6 +5,7 @@
 
 import hashlib
 import io
+import os
 import shutil
 import subprocess
 import tarfile
@@ -96,15 +97,40 @@ class Sandbox:
         """На вызове с этой строкой заглушка шлёт SIGTERM скрипту и завершается успешно."""
         (self.stubs / "signal").write_text(fragment)
 
-    def run(self, *args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *args: str, stdin: str = "", closed_output: bool = False, no_reader: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        """Запускает скрипт; вывод можно сделать недоступным.
+
+        ``closed_output`` — stdout и stderr закрыты, как при обрыве терминала;
+        ``no_reader`` — это канал, читатель которого завершился (``make backup | tee``).
+        """
         bash = shutil.which("bash") or "/bin/bash"
         env = {
             "PATH": f"{self.stubs}:/usr/bin:/bin",
             "STUB_DIR": str(self.stubs),
             "COMPOSE_FILE": "compose.yml",
         }
+        command = [bash, str(SCRIPT), *args]
+        if closed_output:
+            command = [bash, "-c", 'exec "$0" "$@" >&- 2>&-', *command]
+        if no_reader:
+            read_end, write_end = os.pipe()
+            os.close(read_end)
+            try:
+                return subprocess.run(
+                    command,
+                    input=stdin,
+                    stdout=write_end,
+                    stderr=write_end,
+                    text=True,
+                    env=env,
+                    check=False,
+                )
+            finally:
+                os.close(write_end)
         return subprocess.run(
-            [bash, str(SCRIPT), *args],
+            command,
             input=stdin,
             capture_output=True,
             text=True,
@@ -226,6 +252,33 @@ def test_failed_create_restarts_services_and_leaves_partial_copy(sandbox: Sandbo
     (copy,) = sandbox.target.iterdir()
     assert copy.name.endswith(".partial")
     assert not (copy / "SHA256SUMS").exists()
+
+
+@pytest.mark.parametrize("no_reader", [False, True])
+def test_failed_create_restarts_services_when_terminal_is_gone(
+    sandbox: Sandbox, no_reader: bool
+) -> None:
+    """Сообщения некуда писать: это не должно оборвать возврат сервисов в работу."""
+    sandbox.fail_on("pg_dump")
+    result = sandbox.run(
+        "create", str(sandbox.target), closed_output=not no_reader, no_reader=no_reader
+    )
+    assert result.returncode == 1
+    actions = sandbox.actions()
+    assert actions[0] == f"stop {WRITERS}"
+    assert actions[-1] == f"start {WRITERS}"
+
+
+def test_signal_during_final_start_does_not_leave_copy_partial(sandbox: Sandbox) -> None:
+    """Архивы уже сняты: сигнал на запуске сервисов не обрывает скрипт молча."""
+    sandbox.signal_on(f"start {WRITERS}")
+    result = sandbox.run("create", str(sandbox.target))
+    assert result.returncode == 0, result.stderr
+    assert "Копия готова" in result.stdout
+    assert sandbox.calls()[-1] == f"start {WRITERS}"
+    (copy,) = sandbox.target.iterdir()
+    assert not copy.name.endswith(".partial")
+    assert (copy / "SHA256SUMS").exists()
 
 
 @pytest.mark.parametrize(
@@ -374,6 +427,18 @@ def test_dump_that_fails_to_load_leaves_everything_running(sandbox: Sandbox) -> 
     assert sandbox.calls()[-1].endswith("dropdb -U portal --if-exists --force portal_restore")
 
 
+def test_services_that_fail_to_stop_are_restarted_and_staging_is_discarded(
+    sandbox: Sandbox,
+) -> None:
+    sandbox.fail_on(f"stop {WRITERS}")
+    result = sandbox.restore(sandbox.make_copy())
+    assert_refused(result, "сервисы не остановлены", "НЕ изменены")
+    calls = sandbox.calls()
+    assert not [call for call in calls if "ALTER DATABASE" in call or "tar xzf" in call]
+    assert calls[-2].endswith("dropdb -U portal --if-exists --force portal_restore")
+    assert calls[-1] == f"start {WRITERS}"
+
+
 def test_archive_that_fails_to_unpack_leaves_old_data_and_restarts_services(
     sandbox: Sandbox,
 ) -> None:
@@ -487,6 +552,15 @@ def test_signal_while_switching_database_is_not_reported_as_unchanged(sandbox: S
     calls = sandbox.calls()
     assert not any(call.startswith("start") for call in calls)
     assert not any(DISCARD_VOLUME in call for call in calls)
+
+
+def test_signal_during_final_start_does_not_cut_restore_short(sandbox: Sandbox) -> None:
+    """Данные уже новые: сигнал на запуске сервисов не обрывает скрипт молча."""
+    sandbox.signal_on(f"start {WRITERS}")
+    result = sandbox.restore(sandbox.make_copy())
+    assert result.returncode == 0, result.stderr
+    assert "Восстановление завершено" in result.stdout
+    assert sandbox.calls()[-1] == f"start {WRITERS}"
 
 
 # --- следы прерванного восстановления ------------------------------------------

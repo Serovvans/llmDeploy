@@ -5,6 +5,7 @@ import { api, isApiError } from '../api/client';
 import type { SqlAction, SqlSchemaSummary } from '../api/types';
 import { useDialogs } from '../chat/ChatProvider';
 import { DialogScreen } from '../components/chat/DialogScreen';
+import { ConfigNotice } from '../components/ConfigNotice';
 import { useFocusReturn } from '../hooks/useFocusReturn';
 import { useSession } from '../session/SessionContext';
 import { SchemasPanel } from '../sql/SchemasPanel';
@@ -39,7 +40,7 @@ function store(key: string, value: string | null): void {
 
 /** SQL-помощник (концепция §5.7): действие, диалект и схема относятся к отправляемому вопросу. */
 export function SqlScreen() {
-  const { config } = useSession();
+  const { config, configFailed, reloadConfig } = useSession();
   const { regenerate } = useDialogs('sql');
   const [action, setAction] = useState<SqlAction>('write');
   const [dialectChoice, setDialectChoice] = useState(() => stored(DIALECT_KEY));
@@ -128,6 +129,16 @@ export function SqlScreen() {
         mono={action !== 'write'}
         note={t.note}
         onRegenerate={regenerateAnswer}
+        // Первый запрос настроек ещё идёт: отказа не было, отправка ждёт ответа.
+        sendPending={!config && !configFailed}
+        beforeSend={() => {
+          if (config) {
+            return null;
+          }
+          // Диалект обязателен (контракт §5.3): без настроек вопрос не уходит, их загрузка повторяется сразу.
+          reloadConfig();
+          return texts.common.configFailed;
+        }}
         onSendRefused={(error) => {
           if (isApiError(error, 'schema_not_found')) {
             void loadSchemas();
@@ -138,17 +149,20 @@ export function SqlScreen() {
           <div className={styles.toolbar}>
             <Switcher items={ACTIONS} value={action} onValueChange={(value) => setAction(value as SqlAction)} />
             <div className={styles.settings}>
-              <label className={styles.setting}>
-                <span>{t.dialect}</span>
-                <Select<string, string>
-                  items={dialects.map((item) => [item.id, item.title] as [string, string])}
-                  value={dialect}
-                  onValueChange={(value) => {
-                    setDialectChoice(value);
-                    store(DIALECT_KEY, value);
-                  }}
-                />
-              </label>
+              <ConfigNotice />
+              {(config || !configFailed) && (
+                <label className={styles.setting}>
+                  <span>{t.dialect}</span>
+                  <Select<string, string>
+                    items={dialects.map((item) => [item.id, item.title] as [string, string])}
+                    value={dialect}
+                    onValueChange={(value) => {
+                      setDialectChoice(value);
+                      store(DIALECT_KEY, value);
+                    }}
+                  />
+                </label>
+              )}
               <label className={styles.setting}>
                 <span>{t.schema}</span>
                 <Select<string, string>
@@ -172,10 +186,10 @@ export function SqlScreen() {
           </div>
         }
       />
-      {panelOpen && config && (
+      {panelOpen && (
         <SchemasPanel
           schemas={schemas ?? []}
-          limits={config.sql}
+          limits={config?.sql ?? null}
           onChanged={onSchemasChanged}
           onClose={() => setPanelOpen(false)}
         />

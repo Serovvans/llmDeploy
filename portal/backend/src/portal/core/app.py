@@ -99,6 +99,9 @@ def create_app(container: Container) -> FastAPI:
         await container.generation.shutdown()
         await container.docparse.shutdown()
         container.sql_checker.close()
+        container.hash_executor.shutdown()
+        # Идущее чтение не ждём: тяжёлая страница PDF задержала бы остановку.
+        container.document_executor.shutdown(wait=False, cancel_futures=True)
         await container.http_client.aclose()
         await container.qdrant.close()
         await container.engine.dispose()

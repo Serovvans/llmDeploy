@@ -2,6 +2,8 @@
 
 import asyncio
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -10,10 +12,11 @@ import pytest
 
 from portal.core.settings import Settings
 from portal.files.names import display_file_name as display_title
+from portal.files.reader import ContentDocumentReader
 from tests import samples
 from tests.conftest import close_portal, make_portal
 from tests.kb_support import KbBench, add_document, added, kb_settings
-from tests.support import Portal
+from tests.support import Portal, ask, new_dialog
 
 pytestmark = pytest.mark.anyio
 
@@ -262,6 +265,54 @@ async def test_concurrent_identical_uploads_create_one_document(portal: Portal) 
     assert sorted(response.status_code for response in responses) == [201, 409, 409, 409]
     assert len(await portal.rows("SELECT 1 FROM kb_documents")) == 1
     assert len(list((portal.container.settings.files.root / "kb").iterdir())) == 1
+
+
+async def test_documents_waiting_to_be_read_leave_the_default_thread_pool_free(
+    portal: Portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Все потоки чтения документов заняты загрузками в базу — экспорт и вход идут как обычно."""
+    client = await portal.employee()
+    temporary = await portal.create_user("petrov")
+    exported = await new_dialog(client)
+    await ask(client, exported)
+    loop = asyncio.get_running_loop()
+    arrived = asyncio.Semaphore(0)
+    release = threading.Event()
+
+    def wait_in_reader(*_: object) -> int:
+        loop.call_soon_threadsafe(arrived.release)
+        release.wait()
+        return 1
+
+    readers = portal.container.settings.files.reader_workers
+    # Общий пул известного малого размера: если бы чтение шло в нём, он был бы занят
+    # целиком. Прежний исполнитель цикла событий возвращается при выходе из блока.
+    with ThreadPoolExecutor(max_workers=2) as pool, monkeypatch.context() as patch:
+        patch.setattr(loop, "_default_executor", pool)
+        patch.setattr(ContentDocumentReader, "page_count", wait_in_reader)
+        # Разное число страниц — разные файлы: одинаковые отсеялись бы как повтор.
+        uploads = asyncio.gather(
+            *(
+                add_document(client, f"чертёж-{number}.pdf", samples.scan_pdf(number + 1))
+                for number in range(readers)
+            )
+        )
+        try:
+            # Предел времени нужен только провалу: на успешном пути ожиданий по времени нет.
+            async with portal.client() as other, asyncio.timeout(10):
+                for _ in range(readers):
+                    await arrived.acquire()
+                export = await client.get(f"/api/dialogs/{exported}/export")
+                login = await other.post(
+                    "/api/auth/login", json={"login": "petrov", "password": temporary}
+                )
+            assert not uploads.done()
+        finally:
+            release.set()
+            responses = await uploads
+    assert export.status_code == 200
+    assert login.status_code == 200
+    assert [response.status_code for response in responses] == [201] * readers
 
 
 # --- список ---

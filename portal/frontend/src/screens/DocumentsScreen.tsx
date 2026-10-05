@@ -2,7 +2,7 @@ import { IconCopyRegular16 } from '@skbkontur/icons/IconCopyRegular16';
 import { IconMediaUiAStopRegular16 } from '@skbkontur/icons/IconMediaUiAStopRegular16';
 import { IconXRegular16 } from '@skbkontur/icons/IconXRegular16';
 import { Button, FileUploader, Gapped, Hint, Kebab, Loader, MenuItem, Radio, RadioGroup, SingleToast, Spinner } from '@skbkontur/react-ui';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import type { Dialog, DocparseField, PortalConfig } from '../api/types';
@@ -13,6 +13,7 @@ import { Composer } from '../components/chat/Composer';
 import { HistoryPanel } from '../components/chat/HistoryPanel';
 import { MarkdownView } from '../components/chat/MarkdownView';
 import { MessageList } from '../components/chat/MessageList';
+import { ConfigNotice } from '../components/ConfigNotice';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { DataTable } from '../components/DataTable';
 import { EmptyState } from '../components/EmptyState';
@@ -35,9 +36,12 @@ const POLL_MS = 5000;
 /** Номера и даты — моноширинным шрифтом: их переносят посимвольно. */
 const NUMERIC = /^[\d\s.,:;/\\\-–—№()+]+$/;
 
-function DocparseFormView({ limits }: { limits: PortalConfig['docparse'] }) {
+/** `limits` равно `null`, когда настройки не загрузились: на месте шаблонов — заметка с «Повторить». */
+function DocparseFormView({ limits }: { limits: PortalConfig['docparse'] | null }) {
   const { form, setFile, setTemplate, start } = useDocparse();
+  const { reloadConfig } = useSession();
   const uploader = useRef<FileUploader>(null);
+  const fileErrorId = useId();
 
   return (
     <div className={styles.form}>
@@ -56,9 +60,10 @@ function DocparseFormView({ limits }: { limits: PortalConfig['docparse'] }) {
                   ref={uploader}
                   hideFiles
                   width="100%"
-                  accept={limits.document_extensions.join(',')}
+                  accept={limits?.document_extensions.join(',')}
                   uploaderText={t.pick}
                   error={form.fileError !== null}
+                  aria-describedby={form.fileError ? fileErrorId : undefined}
                   onAttach={(attached) => {
                     setFile(attached[0]?.originalFile ?? null);
                     uploader.current?.reset();
@@ -78,11 +83,11 @@ function DocparseFormView({ limits }: { limits: PortalConfig['docparse'] }) {
                   </p>
                 )}
                 {form.fileError && (
-                  <p className={styles.error} role="alert">
+                  <p id={fileErrorId} className={styles.error} role="alert">
                     {form.fileError}
                   </p>
                 )}
-                <p className={styles.hint}>{t.limits(megabytes(limits.document_max_bytes), limits.max_pages)}</p>
+                {limits && <p className={styles.hint}>{t.limits(megabytes(limits.document_max_bytes), limits.max_pages)}</p>}
               </>
             ),
           },
@@ -90,23 +95,37 @@ function DocparseFormView({ limits }: { limits: PortalConfig['docparse'] }) {
             title: t.stepTemplate,
             children: (
               <>
-                <RadioGroup<string> value={form.templateId ?? undefined} onValueChange={setTemplate}>
-                  <Gapped vertical gap={8}>
-                    {limits.templates.map((template) => (
-                      <Radio<string> key={template.id} value={template.id}>
-                        {template.title}
-                        {template.description && <span className={styles.description}>{` — ${template.description}`}</span>}
-                      </Radio>
-                    ))}
-                  </Gapped>
-                </RadioGroup>
+                <ConfigNotice />
+                {limits && (
+                  <div role="radiogroup" aria-label={t.stepTemplate}>
+                    <RadioGroup<string> value={form.templateId ?? undefined} onValueChange={setTemplate}>
+                      <Gapped vertical gap={8}>
+                        {limits.templates.map((template) => (
+                          <Radio<string> key={template.id} value={template.id}>
+                            {template.title}
+                            {template.description && <span className={styles.description}>{` — ${template.description}`}</span>}
+                          </Radio>
+                        ))}
+                      </Gapped>
+                    </RadioGroup>
+                  </div>
+                )}
                 {form.templateError && (
                   <p className={styles.error} role="alert">
                     {form.templateError}
                   </p>
                 )}
                 <div className={styles.submit}>
-                  <Button use="primary" onClick={start}>
+                  <Button
+                    use="primary"
+                    onClick={() => {
+                      // Шаблоны берутся из настроек: без них их загрузка повторяется сразу.
+                      if (!limits) {
+                        reloadConfig();
+                      }
+                      start();
+                    }}
+                  >
                     {t.submit}
                   </Button>
                   {form.stopped && <p className={styles.hint}>{t.stopped}</p>}
@@ -230,7 +249,7 @@ function DocparseResultView({ view, live }: { view: DocparseView; live: boolean 
 export function DocumentsScreen() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { config } = useSession();
+  const { config, configFailed } = useSession();
   const chat = useDialogs('docparse');
   const docparse = useDocparse();
   const { history, loadHistory, openDialog } = chat;
@@ -332,8 +351,8 @@ export function DocumentsScreen() {
     body =
       run && config ? (
         <DocparseProgress run={run} onStop={docparse.stop} />
-      ) : config ? (
-        <DocparseFormView limits={config.docparse} />
+      ) : config || configFailed ? (
+        <DocparseFormView limits={config?.docparse ?? null} />
       ) : (
         <Loader active caption={texts.common.loading} delayBeforeSpinnerShow={300}>
           <div className={styles.loading} />

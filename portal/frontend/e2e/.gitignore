@@ -1,0 +1,6 @@
+# артефакты прогонов Playwright и состояние между глобальной настройкой и тестами
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+.state/

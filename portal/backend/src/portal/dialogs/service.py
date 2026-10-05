@@ -6,6 +6,7 @@ import binascii
 import json
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -132,6 +133,7 @@ class DialogService:
         uow_factory: DialogUnitOfWorkFactory,
         storage: FileStorage,
         reader: DocumentReader,
+        document_executor: Executor,
         clock: Clock,
         settings: ChatSettings,
         empty_ttl_hours: int,
@@ -145,11 +147,13 @@ class DialogService:
         `text_max_chars` — сколько символов текста вложения хранить: больше заведомо не
         поместится в запрос к модели, сколько бы ни развернулось из файла. `is_forming`
         отвечает, формируется ли ответ прямо сейчас, `summary_forming` — пишется ли краткое
-        содержание разбора.
+        содержание разбора. `document_executor` — потоки чтения документов: ждущие
+        блокировку PDF стоят в их очереди и не занимают общий пул цикла событий.
         """
         self._uow_factory = uow_factory
         self._storage = storage
         self._reader = reader
+        self._document_executor = document_executor
         self._clock = clock
         self._settings = settings
         self._empty_ttl = timedelta(hours=empty_ttl_hours)
@@ -363,8 +367,12 @@ class DialogService:
         except FileTooLargeError as error:
             raise file_too_large(limit) from error
         try:
-            facts = await asyncio.to_thread(
-                self._inspect, self._storage.path(stored.key), file_name, stored.size_bytes
+            facts = await asyncio.get_running_loop().run_in_executor(
+                self._document_executor,
+                self._inspect,
+                self._storage.path(stored.key),
+                file_name,
+                stored.size_bytes,
             )
             attachment = Attachment(
                 id=uuid4(),

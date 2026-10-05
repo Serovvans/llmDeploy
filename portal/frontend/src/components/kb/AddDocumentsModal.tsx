@@ -7,6 +7,7 @@ import { api, NetworkError } from '../../api/client';
 import type { KbScope, PortalConfig } from '../../api/types';
 import { checkKbFile, kbUploadErrorText, megabytes } from '../../kb/documents';
 import { texts } from '../../texts';
+import { ConfigNotice } from '../ConfigNotice';
 import styles from './AddDocumentsModal.module.css';
 
 const t = texts.kb.upload;
@@ -21,7 +22,8 @@ interface PickedFile {
 }
 
 interface AddDocumentsModalProps {
-  limits: PortalConfig['kb'];
+  /** Пределы из настроек; `null` — настройки не загрузились, файлы проверяет только сервер. */
+  limits: PortalConfig['kb'] | null;
   /** База открытой вкладки — предвыбранный вариант «Куда добавить». */
   scope: KbScope;
   /** Отметка «Это документация CoGIS» стоит сразу (переход из помощника CoGIS). */
@@ -50,7 +52,7 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
       ...current,
       ...picked.map((file) => {
         counter.current += 1;
-        const error = checkKbFile(file, limits);
+        const error = limits && checkKbFile(file, limits);
         return {
           key: `file-${counter.current}`,
           file,
@@ -103,7 +105,7 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
   };
 
   return (
-    <Modal width={560} onClose={onClose} disableClose={submitting}>
+    <Modal width={560} ignoreBackgroundClick onClose={onClose} disableClose={submitting}>
       <Modal.Header>{t.title}</Modal.Header>
       <Modal.Body>
         <div className={styles.stack}>
@@ -113,7 +115,7 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
               multiple
               hideFiles
               width="100%"
-              accept={limits.document_extensions.join(',')}
+              accept={limits?.document_extensions.join(',')}
               uploaderText={t.pick}
               disabled={submitting}
               error={noFiles}
@@ -125,7 +127,13 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
                 {t.noFiles}
               </p>
             )}
-            <p className={styles.hint}>{t.limits(megabytes(limits.document_max_bytes), limits.document_max_pages)}</p>
+            {limits ? (
+              <p className={styles.hint}>{t.limits(megabytes(limits.document_max_bytes), limits.document_max_pages)}</p>
+            ) : (
+              <div className={styles.hint}>
+                <ConfigNotice />
+              </div>
+            )}
           </div>
           {files.length > 0 && (
             <ul className={styles.files}>

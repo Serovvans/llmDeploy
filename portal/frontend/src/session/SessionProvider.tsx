@@ -5,10 +5,14 @@ import type { PortalConfig, Session } from '../api/types';
 import { texts } from '../texts';
 import { SessionContext, type LoginNotice, type SessionState } from './SessionContext';
 
+const CONFIG_RETRY_MS = 5000;
+
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<SessionState['status']>('loading');
   const [session, setSession] = useState<Session | null>(null);
   const [config, setConfig] = useState<PortalConfig | null>(null);
+  const [configFailed, setConfigFailed] = useState(false);
+  const [configAttempt, setConfigAttempt] = useState(0);
   const [loginNotice, setLoginNotice] = useState<LoginNotice | null>(null);
   const [returnTo, setReturnTo] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -31,6 +35,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     }
     setSession(null);
     setConfig(null);
+    setConfigFailed(false);
     setLoginNotice(notice ?? null);
   }, []);
 
@@ -77,20 +82,30 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     let cancelled = false;
+    let timer: number | undefined;
     api.getConfig().then(
       (loaded) => {
         if (!cancelled) {
           setConfig(loaded);
+          setConfigFailed(false);
         }
       },
-      () => {
-        // Без конфигурации подсказки обходятся без чисел, а тексты отказов приходят от сервера.
+      (error: unknown) => {
+        // Отказ `unauthenticated` — конец сессии, его обрабатывает слушатель выше.
+        if (!cancelled && !isApiError(error, 'unauthenticated')) {
+          // Загрузка повторяется сама, пока не удастся (концепция §6).
+          setConfigFailed(true);
+          timer = window.setTimeout(() => setConfigAttempt((value) => value + 1), CONFIG_RETRY_MS);
+        }
       },
     );
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [hasSession]);
+  }, [hasSession, configAttempt]);
+
+  const reloadConfig = useCallback(() => setConfigAttempt((value) => value + 1), []);
 
   const logout = useCallback(async () => {
     // Собственный выход заметку «Сеанс завершён» не показывает (§5.12).
@@ -122,6 +137,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       status,
       session,
       config,
+      configFailed,
+      reloadConfig,
       loginNotice,
       returnTo,
       applySession,
@@ -131,7 +148,20 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       logout,
       reload,
     }),
-    [status, session, config, loginNotice, returnTo, applySession, endSession, rememberReturnTo, logout, reload],
+    [
+      status,
+      session,
+      config,
+      configFailed,
+      reloadConfig,
+      loginNotice,
+      returnTo,
+      applySession,
+      endSession,
+      rememberReturnTo,
+      logout,
+      reload,
+    ],
   );
 
   return <SessionContext.Provider value={state}>{children}</SessionContext.Provider>;

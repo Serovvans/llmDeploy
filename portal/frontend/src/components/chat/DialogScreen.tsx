@@ -1,5 +1,5 @@
 import { Hint, Input, Kebab, Loader, MenuItem, SingleToast } from '@skbkontur/react-ui';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import type { Dialog, QuestionParams, Source } from '../../api/types';
@@ -36,6 +36,7 @@ function TitleEditor({ initial, onSave, onDone }: TitleEditorProps) {
   const [value, setValue] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const finished = useRef(false);
+  const errorId = useId();
 
   const save = async (keepOpenOnError: boolean) => {
     if (finished.current) {
@@ -71,6 +72,7 @@ function TitleEditor({ initial, onSave, onDone }: TitleEditorProps) {
         autoFocus
         selectAllOnFocus
         aria-label={t.titleLabel}
+        aria-describedby={error ? errorId : undefined}
         error={error !== null}
         value={value}
         onValueChange={(next) => {
@@ -88,7 +90,7 @@ function TitleEditor({ initial, onSave, onDone }: TitleEditorProps) {
         onBlur={() => void save(false)}
       />
       {error && (
-        <span className={styles.editorError} role="alert">
+        <span id={errorId} className={styles.editorError} role="alert">
           {error}
         </span>
       )}
@@ -117,6 +119,10 @@ interface DialogScreenProps {
   /** Строка под ответом, когда поиск ничего не нашёл; по умолчанию — как в чате. */
   nothingFoundText?: string;
   onSendRefused?: OnRefused;
+  /** Причина, по которой вопрос сейчас отправить нельзя, — под панелью запроса; `null` — можно. */
+  beforeSend?: () => string | null;
+  /** Отправка ждёт настроек портала: кнопка «Отправить» — в состоянии `loading`. */
+  sendPending?: boolean;
   /** Своя повторная генерация (SQL: с заменой удалённой схемы); по умолчанию — обычная. */
   onRegenerate?: (id: string) => void;
 }
@@ -189,6 +195,15 @@ export function DialogScreen(props: DialogScreenProps) {
     const timer = window.setInterval(() => refreshDialog(id), POLL_MS);
     return () => window.clearInterval(timer);
   }, [id, formingElsewhere, refreshDialog]);
+
+  // Настройки загрузились: отказ из-за их отсутствия под панелью запроса больше не нужен.
+  const { setNotice } = chat;
+  const configNoticeStale = config !== null && chat.state.drafts[key]?.notice === texts.common.configFailed;
+  useEffect(() => {
+    if (configNoticeStale) {
+      setNotice(key, null);
+    }
+  }, [configNoticeStale, key, setNotice]);
 
   const newChat = () => navigate(basePath);
   const onCreated = (createdId: string) => navigate(`${basePath}/${createdId}`, { replace: true });
@@ -327,6 +342,7 @@ export function DialogScreen(props: DialogScreenProps) {
               placeholder={props.placeholder}
               mono={props.mono}
               note={props.note}
+              sendPending={props.sendPending}
               chat={
                 kind === 'chat'
                   ? {
@@ -342,7 +358,14 @@ export function DialogScreen(props: DialogScreenProps) {
                   : undefined
               }
               onTextChange={(text) => chat.setText(key, text)}
-              onSend={() => chat.send(key, props.params, onCreated, props.onSendRefused)}
+              onSend={() => {
+                const refusal = props.beforeSend?.() ?? null;
+                if (refusal) {
+                  chat.setNotice(key, refusal);
+                } else {
+                  chat.send(key, props.params, onCreated, props.onSendRefused);
+                }
+              }}
               onStop={() => id && chat.stop(id)}
               onNotice={(notice) => chat.setNotice(key, notice)}
             />

@@ -141,7 +141,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <Modal width={480} onClose={onClose}>
+    <Modal width={480} ignoreBackgroundClick onClose={onClose}>
       <Modal.Header>{t.changePassword}</Modal.Header>
       <Modal.Body>
         <form className={styles.form} onSubmit={submit} noValidate>

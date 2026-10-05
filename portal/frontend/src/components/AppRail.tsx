@@ -7,7 +7,7 @@ import { IconPeople2Regular24 } from '@skbkontur/icons/IconPeople2Regular24';
 import { IconTechServerRegular24 } from '@skbkontur/icons/IconTechServerRegular24';
 import { IconWeatherSunMoonRegular24 } from '@skbkontur/icons/IconWeatherSunMoonRegular24';
 import { DropdownMenu, MenuHeader, MenuItem, MenuSeparator, SingleToast, Spinner } from '@skbkontur/react-ui';
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 
 import type { SessionUser } from '../api/types';
 import { useDocparse } from '../docparse/DocparseProvider';
@@ -51,6 +51,7 @@ export function AppRail({ user }: { user: SessionUser }) {
   const { preference, setPreference } = useThemeChoice();
   const { logout } = useSession();
   const navigate = useNavigate();
+  const onProfile = useLocation().pathname === '/profile';
   // Пока идёт разбор документа, у пункта «Документы» вместо иконки — индикатор (концепция §5.9).
   const parsing = useDocparse().run !== null;
 
@@ -97,13 +98,15 @@ export function AppRail({ user }: { user: SessionUser }) {
               onClick={() => setPreference(value)}
             >
               {label}
+              {/* Выбор отмечен не только значком: экранное чтение слышит слово. */}
+              {value === preference && <span className="p-visually-hidden">, {texts.nav.themeChosen}</span>}
             </MenuItem>
           ))}
         </DropdownMenu>
         <DropdownMenu
           positions={MENU_POSITIONS}
           caption={
-            <button type="button" className={styles.item}>
+            <button type="button" className={itemClass({ isActive: onProfile })} aria-current={onProfile || undefined}>
               <span className={styles.initials} aria-hidden="true">
                 {initials(user.full_name)}
               </span>

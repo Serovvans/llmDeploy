@@ -13,7 +13,7 @@ import {
   Tabs,
 } from '@skbkontur/react-ui';
 import { useEffect, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { api, isApiError, KB_PAGE_SIZE, type KbListQuery } from '../api/client';
 import type { KbDocument, KbScope, Page } from '../api/types';
@@ -52,6 +52,13 @@ export function KnowledgeScreen() {
   const fromCogis = (useLocation().state as { addCogisDocumentation?: boolean } | null)?.addCogisDocumentation === true;
   const [adding, setAdding] = useState(fromCogis);
   const [addingCogis, setAddingCogis] = useState(fromCogis);
+  const navigate = useNavigate();
+  // Признак перехода разовый: после обновления страницы окно не открывается снова.
+  useEffect(() => {
+    if (fromCogis) {
+      navigate('.', { replace: true, state: null });
+    }
+  }, [fromCogis, navigate]);
   const [removing, setRemoving] = useState<KbDocument | null>(null);
   const [removePending, setRemovePending] = useState(false);
   const rememberOpener = useFocusReturn(adding || removing !== null);
@@ -157,13 +164,19 @@ export function KnowledgeScreen() {
       }
     }
     SingleToast.push(t.remove.done);
+    const lastOnPage = page?.data.items.length === 1 && query.page > 1;
     // Строка убирается сразу.
     setPage((current) =>
       current && { ...current, data: { ...current.data, items: current.data.items.filter((item) => item.id !== removing.id) } },
     );
     setRemovePending(false);
     setRemoving(null);
-    reload();
+    if (lastOnPage) {
+      // Удалена последняя строка страницы: переход на предыдущую, а не пустое состояние (концепция §6).
+      setQuery((current) => ({ ...current, page: current.page - 1 }));
+    } else {
+      reload();
+    }
   };
 
   const openAdd = () => {
@@ -180,7 +193,7 @@ export function KnowledgeScreen() {
     <>
       <PageHeader title={t.title}>
         <span data-opener="add">
-          <Button use="primary" disabled={!config} onClick={openAdd}>
+          <Button use="primary" onClick={openAdd}>
             {t.add}
           </Button>
         </span>
@@ -322,9 +335,9 @@ export function KnowledgeScreen() {
       </ScrollContainer>
 
       {viewer.element}
-      {adding && config && (
+      {adding && (
         <AddDocumentsModal
-          limits={config.kb}
+          limits={config?.kb ?? null}
           scope={addingCogis ? 'shared' : query.scope}
           cogis={addingCogis}
           onUploaded={reload}

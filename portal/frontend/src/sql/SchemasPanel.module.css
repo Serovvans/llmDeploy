@@ -15,12 +15,6 @@
   padding-bottom: 24px;
 }
 
-.error {
-  color: var(--p-error-text);
-  font-size: 14px;
-  line-height: 20px;
-}
-
 .items {
   margin: 0;
   padding: 0;

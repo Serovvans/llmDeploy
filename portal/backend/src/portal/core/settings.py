@@ -61,6 +61,7 @@ class Argon2Settings(_Section):
     time_cost: int = Field(ge=1)
     memory_cost_kib: int = Field(ge=8)
     parallelism: int = Field(ge=1)
+    workers: int = Field(ge=1)
 
 
 class PasswordSettings(_Section):
@@ -156,6 +157,7 @@ class FilesSettings(_Section):
     docx_max_unpacked_bytes: int = Field(ge=1)
     docx_max_xml_bytes: int = Field(ge=1)
     pdf_render_scale: float = Field(gt=0)
+    reader_workers: int = Field(ge=1)
 
 
 class DialogsSettings(_Section):

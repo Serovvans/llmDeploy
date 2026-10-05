@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Attachment, Dialog, Message, Source } from '../api/types';
-import { fail, liveSse, mockApi, ok, session, sse } from '../test/mockApi';
+import { CONFIG, fail, liveSse, mockApi, ok, session, sse } from '../test/mockApi';
 import { menuItems, renderApp } from '../test/renderApp';
 import { texts } from '../texts';
 
@@ -1126,5 +1126,81 @@ describe('чат: база знаний', () => {
     fireEvent.error(thumbnail);
     expect(screen.getByRole('main').querySelector('img')).toBeNull();
     expect(screen.getByText('скан.png')).toBeInTheDocument();
+  });
+});
+
+describe('чат: настройки портала не загрузились', () => {
+  const PNG: Attachment = { id: 'f-2', file_name: 'скан.png', media_type: 'image/png', page_count: 1, image_count: 1, created_at: '' };
+
+  it('вопрос и вставленная картинка уходят без проверки в браузере — пределы проверяет сервер', async () => {
+    const { server, user } = setupChat([]);
+    server.on('GET /api/config', () => fail(503, 'service_unavailable'));
+    server.on(`POST /api/dialogs/${ID}/attachments`, () => ok(PNG, 201));
+    server.on(`POST /api/dialogs/${ID}/messages`, () => sse([START, ['delta', { text: 'Ответ без настроек' }], ['done', { status: 'complete' }]]));
+    await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(1));
+
+    // «Прикрепить» не блокируется; вставка картинки загружает файл.
+    expect(screen.getByRole('button', { name: t.composer.attach })).toBeEnabled();
+    fireEvent.paste(field(), { clipboardData: { files: [new File(['png'], 'image.png', { type: 'image/png' })] } });
+    await waitFor(() => expect(screen.getByRole('main').querySelector('img')).not.toBeNull());
+
+    await user.type(field(), 'Вопрос без настроек');
+    await user.click(screen.getByRole('button', { name: t.composer.send }));
+    expect(await screen.findByText('Ответ без настроек')).toBeInTheDocument();
+    expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]?.body).toMatchObject({
+      content: 'Вопрос без настроек',
+      attachment_ids: ['f-2'],
+    });
+  });
+
+  it('отказ сервера при загрузке файла без настроек — текст сервера под панелью запроса, вложение убрано', async () => {
+    const { server } = setupChat([]);
+    server.on('GET /api/config', () => fail(503, 'service_unavailable'));
+    server.on(`POST /api/dialogs/${ID}/attachments`, () => fail(422, 'unsupported_file_type'));
+    await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(1));
+
+    fireEvent.paste(field(), { clipboardData: { files: [new File(['png'], 'image.png', { type: 'image/png' })] } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Сообщение сервера: unsupported_file_type.');
+    expect(screen.queryByText('image.png')).not.toBeInTheDocument();
+  });
+
+  it('загрузка настроек повторяется сама каждые 5 секунд, пока не удастся', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { server } = setupChat([]);
+      server.on('GET /api/config', () => fail(503, 'service_unavailable'));
+      await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(5100);
+      await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(2));
+
+      server.on('GET /api/config', () => ok(CONFIG));
+      await vi.advanceTimersByTimeAsync(5100);
+      await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(3));
+      // Настройки получены: повторы прекращаются.
+      await vi.advanceTimersByTimeAsync(11000);
+      expect(server.callsTo('GET /api/config')).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('чат: заголовки в ответе', () => {
+  it('уровни сдвинуты на два: «#» — h3, «####» и глубже — h6; h1 на экране один', async () => {
+    const content = ['# Первый', '## Второй', '### Третий', '#### Четвёртый', '###### Шестой'].join('\n\n');
+    setupChat([QUESTION, message({ content })]);
+
+    expect(await screen.findByRole('heading', { level: 3, name: 'Первый' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 4, name: 'Второй' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 5, name: 'Третий' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 6, name: 'Четвёртый' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 6, name: 'Шестой' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.queryByRole('heading', { level: 2, name: 'Второй' })).not.toBeInTheDocument();
+  });
+
+  it('таблица в ответе: блок с прокруткой достижим с клавиатуры', async () => {
+    setupChat([QUESTION, message({ content: '| Участок | Площадь |\n|---|---|\n| 77:01 | 12 га |' })]);
+    expect((await screen.findByRole('table')).parentElement).toHaveAttribute('tabindex', '0');
   });
 });

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Dialog, DocparseResult, Message } from '../api/types';
-import { fail, liveSse, mockApi, ok, session, sse } from '../test/mockApi';
+import { CONFIG, fail, liveSse, mockApi, ok, session, sse } from '../test/mockApi';
 import { menuItems, renderApp } from '../test/renderApp';
 import { texts } from '../texts';
 
@@ -421,6 +421,121 @@ describe('SQL-помощник', () => {
   });
 });
 
+describe('SQL-помощник: правки дизайн-ревью', () => {
+  const t = texts.sql;
+  const s = t.schemas;
+  const SCHEMAS = [{ id: 's-1', name: 'Кадастр', updated_at: '2026-10-01T09:00:00Z' }];
+
+  it('настройки не загрузились: вместо диалекта — заметка, вопрос не уходит; после «Повторить» — уходит', async () => {
+    const { server, user } = setup('sql', '/sql', [], {
+      'GET /api/config': () => fail(503, 'service_unavailable'),
+      'POST /api/dialogs': () => ok(dialog('sql', { title: null }), 201),
+      [`POST /api/dialogs/${ID}/messages`]: () => sse([START, ['delta', { text: 'Готово' }], ['done', { status: 'complete' }]]),
+    });
+
+    expect(await screen.findByText(texts.common.configFailed)).toBeInTheDocument();
+    expect(screen.queryByText(t.dialect)).not.toBeInTheDocument();
+
+    await user.type(field(t.placeholders.write), 'Участки больше гектара');
+    await user.click(screen.getByRole('button', { name: texts.chat.composer.send }));
+    // Тот же текст — под панелью запроса; нажатие сразу повторяет загрузку настроек.
+    expect(screen.getAllByText(texts.common.configFailed)).toHaveLength(2);
+    expect(server.callsTo('POST /api/dialogs')).toHaveLength(0);
+    await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(2));
+
+    server.on('GET /api/config', () => ok(CONFIG));
+    await user.click(screen.getByRole('button', { name: texts.common.retry }));
+    expect(await screen.findByText(t.dialect)).toBeInTheDocument();
+    expect(field(t.placeholders.write)).toHaveValue('Участки больше гектара');
+    // Настройки загрузились: текст об отказе под панелью запроса исчез вместе с заметкой.
+    await waitFor(() => expect(screen.queryByText(texts.common.configFailed)).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: texts.chat.composer.send }));
+    expect(await screen.findByText('Готово')).toBeInTheDocument();
+    expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]?.body).toMatchObject({ dialect: 'postgres' });
+  });
+
+  it('первый запрос настроек ещё идёт: «Отправить» ждёт, текста об ошибке и повторного запроса нет', async () => {
+    let answer: (response: ReturnType<typeof ok>) => void = () => undefined;
+    const { server, user } = setup('sql', '/sql', [], {
+      'GET /api/config': () => new Promise((resolve) => (answer = resolve)),
+      'POST /api/dialogs': () => ok(dialog('sql', { title: null }), 201),
+      [`POST /api/dialogs/${ID}/messages`]: () => sse([START, ['delta', { text: 'Готово' }], ['done', { status: 'complete' }]]),
+    });
+
+    await user.type(await screen.findByPlaceholderText(t.placeholders.write), 'Участки больше гектара');
+    await user.keyboard('{Enter}');
+    expect(screen.queryByText(texts.common.configFailed)).not.toBeInTheDocument();
+    // Кнопка в состоянии `loading`: подпись скрыта индикатором, нажать нельзя.
+    expect(screen.getByText(texts.chat.composer.send).closest('button')).toBeDisabled();
+    expect(server.callsTo('GET /api/config')).toHaveLength(1);
+    expect(server.callsTo('POST /api/dialogs')).toHaveLength(0);
+    expect(field(t.placeholders.write)).toHaveValue('Участки больше гектара');
+
+    answer(ok(CONFIG));
+    expect(await screen.findByText(t.dialect)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: texts.chat.composer.send }));
+    expect(await screen.findByText('Готово')).toBeInTheDocument();
+  });
+
+  it('«Мои схемы» без настроек: панель открывается, схема сохраняется без проверки длины в браузере', async () => {
+    const { server, user } = setup('sql', '/sql', [], { 'GET /api/config': () => fail(503, 'service_unavailable') });
+    server.on('POST /api/sql/schemas', () => fail(409, 'schema_limit_reached'));
+
+    await user.click(await screen.findByRole('button', { name: t.mySchemas }));
+    await user.click(await screen.findByRole('button', { name: s.add }));
+    await user.type(screen.getByLabelText(s.name), 'ЕГРН');
+    fireEvent.change(screen.getByLabelText(s.content), { target: { value: 'x'.repeat(50001) } });
+    await user.click(screen.getByRole('button', { name: s.save }));
+    expect(await screen.findByText('Сообщение сервера: schema_limit_reached.')).toBeInTheDocument();
+    expect(server.callsTo('POST /api/sql/schemas')).toHaveLength(1);
+  });
+
+  it('«Мои схемы»: нажатие мимо панели её не закрывает и набранное не теряет', async () => {
+    const { user } = setup('sql', '/sql', [], { 'GET /api/sql/schemas': () => ok({ items: SCHEMAS }) });
+    await user.click(await screen.findByRole('button', { name: t.mySchemas }));
+    await user.click(await screen.findByRole('button', { name: s.add }));
+    await user.type(screen.getByLabelText(s.name), 'ЕГРН');
+
+    await user.click(screen.getByRole('heading', { level: 1, name: t.title }));
+    expect(screen.getByLabelText(s.name)).toHaveValue('ЕГРН');
+  });
+
+  it('«Мои схемы»: фокус возвращается после формы и после окна удаления; ошибка — фокус в поле', async () => {
+    let schemas = SCHEMAS;
+    const { server, user } = setup('sql', '/sql', [], { 'GET /api/sql/schemas': () => ok({ items: schemas }) });
+    await user.click(await screen.findByRole('button', { name: t.mySchemas }));
+
+    // Форма: ошибка только у описания — фокус в нём; «Отмена» возвращает фокус на «Добавить схему».
+    await user.click(await screen.findByRole('button', { name: s.add }));
+    await user.type(screen.getByLabelText(s.name), 'ЕГРН');
+    await user.click(screen.getByRole('button', { name: s.save }));
+    expect(screen.getByLabelText(s.content)).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: texts.common.cancel }));
+    await waitFor(() => expect(screen.getByRole('button', { name: s.add })).toHaveFocus());
+
+    // Окно удаления: «Отмена» возвращает фокус на меню строки.
+    const openRemove = async () => {
+      await user.click(await screen.findByRole('button', { name: 'Действия: Кадастр' }));
+      await user.click(menuItems().find((item) => item.textContent === s.remove) as HTMLElement);
+      await screen.findByText('Удалить схему „Кадастр“?');
+    };
+    await openRemove();
+    await user.click(screen.getByRole('button', { name: texts.common.cancel }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Действия: Кадастр' })).toHaveFocus());
+
+    // Схема удалена, строки больше нет: фокус — на «Добавить схему».
+    server.on('DELETE /api/sql/schemas/s-1', () => {
+      schemas = [];
+      return ok();
+    });
+    await openRemove();
+    await user.click(screen.getByRole('button', { name: s.remove }));
+    expect(await screen.findByText(s.empty)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: s.add })).toHaveFocus();
+  });
+});
+
 describe('помощник CoGIS', () => {
   const t = texts.cogis;
 
@@ -767,6 +882,39 @@ describe('разбор документов', () => {
     await user.click(screen.getByRole('button', { name: t.submit }));
     expect(await screen.findByRole('alert')).toHaveTextContent(text);
     expect(screen.getByRole('button', { name: t.submit })).toBeInTheDocument();
+  });
+
+  it('событие error с кодом вне словаря — текст сервера и «Разобрать заново»; недоступная модель — «Разбор оборвался»', async () => {
+    const { server, user } = setupDocs('/documents');
+    server.on('POST /api/docparse', () => sse([['error', { code: 'new_code', message: 'Текст сервера о новой причине.' }]]));
+    await pickFile();
+    await user.click(await screen.findByLabelText(/Выписка ЕГРН/));
+    await user.click(screen.getByRole('button', { name: t.submit }));
+    expect(await screen.findByText('Текст сервера о новой причине.')).toBeInTheDocument();
+
+    server.on('POST /api/docparse', () => sse([['error', { code: 'model_unavailable', message: 'Модель недоступна.' }]]));
+    await user.click(screen.getByRole('button', { name: t.retry }));
+    expect(await screen.findByText(t.errors.broken)).toBeInTheDocument();
+  });
+
+  it('настройки не загрузились: вместо шаблонов — заметка с «Повторить»; после загрузки выбранный файл на месте', async () => {
+    const { server, user } = setupDocs('/documents', { 'GET /api/config': () => fail(503, 'service_unavailable') });
+
+    expect(await screen.findByText(texts.common.configFailed)).toBeInTheDocument();
+    expect(screen.queryAllByRole('radio')).toHaveLength(0);
+    await pickFile('любой.xyz');
+    expect(await screen.findByText('любой.xyz')).toBeInTheDocument();
+
+    // «Разобрать» без шаблонов не молчит: заметка на месте, загрузка настроек повторяется сразу.
+    await user.click(screen.getByRole('button', { name: t.submit }));
+    await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(2));
+    expect(screen.queryByText(t.chooseTemplate)).not.toBeInTheDocument();
+
+    server.on('GET /api/config', () => ok(CONFIG));
+    await user.click(screen.getByRole('button', { name: texts.common.retry }));
+    expect(await screen.findByRole('radiogroup', { name: t.stepTemplate })).toBeInTheDocument();
+    expect(screen.queryByText(texts.common.configFailed)).not.toBeInTheDocument();
+    expect(screen.getByText('любой.xyz')).toBeInTheDocument();
   });
 
   it('обрыв сети до таблицы — заметка; после таблицы — «Краткое содержание остановлено» и уведомление', async () => {

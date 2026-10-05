@@ -2,7 +2,9 @@
 
 import asyncio
 import io
+import threading
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
@@ -10,6 +12,7 @@ from PIL import Image
 
 from portal.core.settings import Settings
 from portal.files.names import display_file_name
+from portal.files.reader import ContentDocumentReader
 from portal.llm.ports import ImagePart, TextPart
 from tests import samples
 from tests.conftest import close_portal, make_portal
@@ -510,3 +513,55 @@ async def test_pdf_page_with_garbage_text_layer_goes_to_the_model_as_an_image(
     parts = portal.model.requests[0].messages[1].parts
     assert len([part for part in parts if isinstance(part, ImagePart)]) == 2
     assert "\u0e01" not in parts[0].text  # type: ignore[union-attr]
+
+
+async def test_documents_waiting_to_be_read_leave_the_default_thread_pool_free(
+    portal: Portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Все потоки чтения документов заняты ждущими — экспорт, удаление и вход идут как обычно."""
+    client = await portal.employee()
+    temporary = await portal.create_user("petrov")
+    exported = await new_dialog(client)
+    await ask(client, exported)
+    removed = await new_dialog(client)
+    assert (await upload(client, removed, "скан.png", samples.png())).status_code == 201
+    uploads_dialog = await new_dialog(client)
+    loop = asyncio.get_running_loop()
+    arrived = asyncio.Semaphore(0)
+    release = threading.Event()
+
+    def wait_in_reader(*_: object) -> int:
+        loop.call_soon_threadsafe(arrived.release)
+        release.wait()
+        return 1
+
+    readers = portal.container.settings.files.reader_workers
+    # Общий пул известного малого размера: если бы чтение шло в нём, он был бы занят
+    # целиком. Прежний исполнитель цикла событий возвращается при выходе из блока.
+    with ThreadPoolExecutor(max_workers=2) as pool, monkeypatch.context() as patch:
+        patch.setattr(loop, "_default_executor", pool)
+        patch.setattr(ContentDocumentReader, "page_count", wait_in_reader)
+        uploads = asyncio.gather(
+            *(
+                upload(client, uploads_dialog, f"чертёж-{number}.pdf", samples.scan_pdf(1))
+                for number in range(readers)
+            )
+        )
+        try:
+            # Предел времени нужен только провалу: на успешном пути ожиданий по времени нет.
+            async with portal.client() as other, asyncio.timeout(10):
+                for _ in range(readers):
+                    await arrived.acquire()
+                export = await client.get(f"/api/dialogs/{exported}/export")
+                deletion = await client.delete(f"/api/dialogs/{removed}")
+                login = await other.post(
+                    "/api/auth/login", json={"login": "petrov", "password": temporary}
+                )
+            assert not uploads.done()
+        finally:
+            release.set()
+            responses = await uploads
+    assert export.status_code == 200
+    assert deletion.status_code == 204
+    assert login.status_code == 200
+    assert [response.status_code for response in responses] == [201] * readers

@@ -58,7 +58,7 @@ function duplicateText(existing: DuplicateDocument): string {
 }
 
 /** Текст ошибки загрузки одного файла. */
-export function kbUploadErrorText(error: unknown, limits: KbLimits): string {
+export function kbUploadErrorText(error: unknown, limits: KbLimits | null): string {
   if (error instanceof NetworkError) {
     return t.upload.network;
   }
@@ -66,8 +66,9 @@ export function kbUploadErrorText(error: unknown, limits: KbLimits): string {
     return duplicateText(error.details.document as DuplicateDocument);
   }
   if (isApiError(error, 'file_too_large')) {
-    const max = error.details.max_bytes;
-    return t.upload.tooLarge(megabytes(typeof max === 'number' ? max : limits.document_max_bytes));
+    const max = typeof error.details.max_bytes === 'number' ? error.details.max_bytes : limits?.document_max_bytes;
+    // Предел неизвестен (настройки не загрузились) — текст сервера.
+    return max === undefined ? errorText(error) : t.upload.tooLarge(megabytes(max));
   }
   if (isApiError(error, 'unsupported_file_type')) {
     return t.upload.unsupported;
@@ -76,8 +77,8 @@ export function kbUploadErrorText(error: unknown, limits: KbLimits): string {
     return t.upload.unreadable;
   }
   if (isApiError(error, 'too_many_pages')) {
-    const max = error.details.max_pages;
-    return t.upload.tooManyPages(typeof max === 'number' ? max : limits.document_max_pages);
+    const max = typeof error.details.max_pages === 'number' ? error.details.max_pages : limits?.document_max_pages;
+    return max === undefined ? errorText(error) : t.upload.tooManyPages(max);
   }
   return errorText(error);
 }

@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 
@@ -251,5 +251,58 @@ describe('пользователи', () => {
     server.on('GET /api/admin/users', () => page());
     await userEvent.setup().click(screen.getByRole('button', { name: texts.common.retry }));
     expect(await screen.findByText('Иванов Иван Иванович')).toBeInTheDocument();
+  });
+});
+
+describe('пользователи: окна-формы', () => {
+  function clickBackground() {
+    const background = document.querySelector('[data-tid="modal-container"]') as HTMLElement;
+    fireEvent.mouseDown(background);
+    fireEvent.mouseUp(background);
+    fireEvent.click(background);
+  }
+
+  it('«Новый пользователь»: нажатие на фон окно не закрывает; фокус — в первое поле с ошибкой', async () => {
+    const { server, user } = setup();
+    await user.click(await screen.findByRole('button', { name: t.add }));
+    const dialog = within(await screen.findByRole('dialog'));
+    await user.type(dialog.getByLabelText(t.form.fullNameLabel), 'Петрова Анна');
+
+    clickBackground();
+    expect(dialog.getByLabelText(t.form.fullNameLabel)).toHaveValue('Петрова Анна');
+
+    // Ошибка только у логина: фокус уходит с кнопки в поле логина.
+    await user.click(dialog.getByRole('button', { name: t.form.create }));
+    expect(dialog.getByLabelText(t.form.loginLabel)).toHaveFocus();
+
+    await user.type(dialog.getByLabelText(t.form.loginLabel), 'petrova');
+    server.on('POST /api/admin/users', () => fail(409, 'login_taken'));
+    await user.click(dialog.getByRole('button', { name: t.form.create }));
+    await dialog.findByText(t.form.loginTaken);
+    await waitFor(() => expect(dialog.getByLabelText(t.form.loginLabel)).toHaveFocus());
+
+    await user.clear(dialog.getByLabelText(t.form.fullNameLabel));
+    await user.click(dialog.getByRole('button', { name: t.form.create }));
+    expect(dialog.getByLabelText(t.form.fullNameLabel)).toHaveFocus();
+  });
+
+  it('«Изменить учётную запись»: нажатие на фон окно не закрывает; фокус — в поле с ошибкой', async () => {
+    const { user } = setup();
+    await openMenu(user, 'Иванов Иван Иванович', t.menu.edit);
+    const dialog = within(await screen.findByRole('dialog'));
+    await user.clear(dialog.getByLabelText(t.form.fullNameLabel));
+
+    clickBackground();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    await user.click(dialog.getByRole('button', { name: t.form.save }));
+    expect(dialog.getByText(t.form.enterFullName)).toBeInTheDocument();
+    expect(dialog.getByLabelText(t.form.fullNameLabel)).toHaveFocus();
+  });
+
+  it('в поле поиска — значок «лупа»', async () => {
+    setup();
+    const search = await screen.findByLabelText(t.search);
+    expect(search.closest('label')?.querySelector('svg')).not.toBeNull();
   });
 });

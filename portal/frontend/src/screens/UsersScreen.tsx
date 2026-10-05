@@ -1,3 +1,4 @@
+import { IconSearchLoupeRegular16 } from '@skbkontur/icons/IconSearchLoupeRegular16';
 import { Button, Hint, Input, Kebab, Loader, MenuItem, Paging, ScrollContainer, SingleToast } from '@skbkontur/react-ui';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -160,6 +161,7 @@ function UsersList() {
         <div className={styles.content}>
           <Input
             width={320}
+            leftIcon={<IconSearchLoupeRegular16 />}
             placeholder={t.search}
             aria-label={t.search}
             value={search}

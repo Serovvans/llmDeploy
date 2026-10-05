@@ -3,6 +3,7 @@
 import asyncio
 import hmac
 import secrets
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
@@ -76,15 +77,21 @@ class AuthService:
         self,
         uow_factory: AuthUnitOfWorkFactory,
         hasher: PasswordHasher,
+        hash_executor: Executor,
         cipher: SecretCipher,
         totp: TotpProvider,
         clock: Clock,
         settings: AuthSettings,
         common_passwords: frozenset[str],
     ) -> None:
-        """Получить зависимости явно; заглушечный хеш считается один раз."""
+        """Получить зависимости явно; заглушечный хеш считается один раз.
+
+        `hash_executor` — свои потоки под Argon2: общий пул цикла событий бывает целиком
+        занят разбором файлов, и вход не должен ждать его в очереди.
+        """
         self._uow_factory = uow_factory
         self._hasher = hasher
+        self._hash_executor = hash_executor
         self._cipher = cipher
         self._totp = totp
         self._clock = clock
@@ -245,7 +252,9 @@ class AuthService:
                 await self._check_current_password(uow, user, current_password, ip, now)
             await self._check_new_password(user, new_password)
             checked_hash = user.password_hash
-            new_hash = await asyncio.to_thread(self._hasher.hash, new_password)
+            new_hash = await asyncio.get_running_loop().run_in_executor(
+                self._hash_executor, self._hasher.hash, new_password
+            )
 
             # Проверки и хеширование долгие. Сброс пароля, блокировка и смена роли гасят
             # сессии; если под блокировкой строки сессия на месте и на том же шаге, ничего
@@ -440,7 +449,9 @@ class AuthService:
         """Проверить пароль; строка длиннее предела не хешируется и считается неверной."""
         if len(password) > self._settings.password.max_length:
             return False
-        return await asyncio.to_thread(self._hasher.verify, password_hash, password)
+        return await asyncio.get_running_loop().run_in_executor(
+            self._hash_executor, self._hasher.verify, password_hash, password
+        )
 
     async def _check_current_password(
         self,
@@ -483,7 +494,7 @@ class AuthService:
             error = field_error(
                 "new_password", "password_too_common", "Этот пароль слишком распространён."
             )
-        elif await asyncio.to_thread(self._hasher.verify, user.password_hash, new_password):
+        elif await self._password_matches(user.password_hash, new_password):
             error = field_error(
                 "new_password", "password_same_as_old", "Новый пароль совпадает с прежним."
             )

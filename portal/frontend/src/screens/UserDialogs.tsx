@@ -1,5 +1,5 @@
 import { Button, Gapped, Input, Link, Modal, Radio, RadioGroup, SingleToast } from '@skbkontur/react-ui';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { api, isApiError } from '../api/client';
 import type { AdminUser, Role, TemporaryPasswordResult } from '../api/types';
@@ -120,6 +120,17 @@ export function CreateUserModal({ onClose }: CreateUserModalProps) {
   const [errors, setErrors] = useState<FormErrors>({ fullName: null, login: null });
   const [submitting, setSubmitting] = useState(false);
   const [created, setCreated] = useState<TemporaryPasswordResult | null>(null);
+  const fullNameRef = useRef<Input>(null);
+  const loginRef = useRef<Input>(null);
+
+  // Фокус — в первое поле с ошибкой.
+  useEffect(() => {
+    if (errors.fullName) {
+      fullNameRef.current?.focus();
+    } else if (errors.login) {
+      loginRef.current?.focus();
+    }
+  }, [errors]);
 
   const submit = async (event: React.SyntheticEvent) => {
     event.preventDefault();
@@ -157,19 +168,28 @@ export function CreateUserModal({ onClose }: CreateUserModalProps) {
   }
 
   return (
-    <Modal width={MODAL_WIDTH} onClose={() => onClose(false)}>
+    <Modal width={MODAL_WIDTH} ignoreBackgroundClick onClose={() => onClose(false)}>
       <Modal.Header>{form.createTitle}</Modal.Header>
       <Modal.Body>
         <form className={styles.stack} onSubmit={submit} noValidate>
           <Field label={form.fullNameLabel} error={errors.fullName}>
             {(control) => (
-              <Input {...control} width="100%" autoFocus value={fullName} onValueChange={setFullName} disabled={submitting} />
+              <Input
+                {...control}
+                ref={fullNameRef}
+                width="100%"
+                autoFocus
+                value={fullName}
+                onValueChange={setFullName}
+                disabled={submitting}
+              />
             )}
           </Field>
           <Field label={form.loginLabel} error={errors.login} hint={form.loginHint}>
             {(control) => (
               <Input
                 {...control}
+                ref={loginRef}
                 width="100%"
                 autoComplete="off"
                 autoCapitalize="none"
@@ -207,7 +227,16 @@ interface EditUserModalProps {
 export function EditUserModal({ user, onClose }: EditUserModalProps) {
   const [fullName, setFullName] = useState(user.full_name);
   const [role, setRole] = useState<Role>(user.role);
-  const [fullNameError, setFullNameError] = useState<string | null>(null);
+  // Объект, а не строка: повтор той же ошибки снова ставит фокус в поле.
+  const [fullNameFailure, setFullNameError] = useState<{ text: string } | null>(null);
+  const fullNameError = fullNameFailure?.text ?? null;
+  const fullNameRef = useRef<Input>(null);
+
+  useEffect(() => {
+    if (fullNameFailure) {
+      fullNameRef.current?.focus();
+    }
+  }, [fullNameFailure]);
   const [submitting, setSubmitting] = useState(false);
   const [confirmingRole, setConfirmingRole] = useState(false);
 
@@ -228,7 +257,7 @@ export function EditUserModal({ user, onClose }: EditUserModalProps) {
     } catch (error) {
       const fieldErrors = formErrorsFrom(error);
       if (fieldErrors?.fullName) {
-        setFullNameError(fieldErrors.fullName);
+        setFullNameError({ text: fieldErrors.fullName });
       } else {
         showUserActionError(error);
         onClose(true);
@@ -248,7 +277,7 @@ export function EditUserModal({ user, onClose }: EditUserModalProps) {
       return;
     }
     const error = checkFullName(fullName);
-    setFullNameError(error);
+    setFullNameError(error ? { text: error } : null);
     if (error) {
       return;
     }
@@ -261,7 +290,7 @@ export function EditUserModal({ user, onClose }: EditUserModalProps) {
 
   return (
     <>
-      <Modal width={MODAL_WIDTH} onClose={() => onClose(false)}>
+      <Modal width={MODAL_WIDTH} ignoreBackgroundClick onClose={() => onClose(false)}>
         <Modal.Header>{form.editTitle}</Modal.Header>
         <Modal.Body>
           <form className={styles.stack} onSubmit={submit} noValidate>
@@ -274,6 +303,7 @@ export function EditUserModal({ user, onClose }: EditUserModalProps) {
               {(control) => (
                 <Input
                   {...control}
+                  ref={fullNameRef}
                   width="100%"
                   autoFocus
                   value={fullName}

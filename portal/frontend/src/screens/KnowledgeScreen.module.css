@@ -29,7 +29,9 @@
 }
 
 .open {
-  padding: 0;
+  /* Область нажатия — 32 px (концепция §9); отрицательные поля сохраняют высоту строки. */
+  margin: -6px 0;
+  padding: 6px 0;
   border: 0;
   border-radius: 4px;
   background: none;

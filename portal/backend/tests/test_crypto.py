@@ -17,7 +17,9 @@ KEY = bytes(range(32))
 
 
 def test_password_hash_is_argon2id_and_verifies() -> None:
-    hasher = Argon2PasswordHasher(Argon2Settings(time_cost=1, memory_cost_kib=8, parallelism=1))
+    hasher = Argon2PasswordHasher(
+        Argon2Settings(time_cost=1, memory_cost_kib=8, parallelism=1, workers=1)
+    )
     encoded = hasher.hash("пароль-для-проверки")
     assert encoded.startswith("$argon2id$")
     assert hasher.verify(encoded, "пароль-для-проверки")

@@ -97,7 +97,7 @@ describe('темы в приложении', () => {
     await user.click(screen.getByRole('button', { name: texts.nav.theme }));
     await screen.findByText(texts.nav.themeSystem);
     const items = menuItems();
-    expect(items.map((item) => item.textContent)).toEqual(['Как в системе', 'Светлая', 'Тёмная']);
+    expect(items.map((item) => item.textContent)).toEqual(['Как в системе', 'Светлая', 'Тёмная, выбрана']);
     expect(items.map((item) => item.querySelector('svg') !== null)).toEqual([false, false, true]);
     await user.click(within(items[0] as HTMLElement).getByText(texts.nav.themeSystem));
 

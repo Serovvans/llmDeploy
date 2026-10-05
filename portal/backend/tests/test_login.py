@@ -1,6 +1,8 @@
 """Вход, шаги входа и второй фактор (docs/portal-api.md §2.3–2.4, критерий приёмки 1)."""
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -389,3 +391,37 @@ async def test_parallel_setup_requests_get_one_secret_and_one_code_set(portal: P
         )
     assert sorted(response.status_code for response in confirms) == [200, 403]
     assert len(await portal.rows("SELECT 1 FROM backup_codes")) == 10
+
+
+async def test_login_does_not_wait_for_the_busy_default_thread_pool(
+    portal: Portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Общий пул потоков целиком занят ждущими задачами — вход идёт в своих потоках."""
+    temporary = await portal.create_user("ivanov")
+    loop = asyncio.get_running_loop()
+    release = threading.Event()
+
+    def wait_for_release(started: asyncio.Event) -> None:
+        loop.call_soon_threadsafe(started.set)
+        release.wait()
+
+    # Пул известного размера: тест знает, сколько задач занимает его целиком. Прежний
+    # исполнитель цикла событий возвращается на место при выходе из блока.
+    with ThreadPoolExecutor(max_workers=2) as pool, monkeypatch.context() as patch:
+        patch.setattr(loop, "_default_executor", pool)
+        started = [asyncio.Event() for _ in range(2)]
+        busy = asyncio.gather(*(asyncio.to_thread(wait_for_release, event) for event in started))
+        try:
+            for event in started:
+                await event.wait()
+            # Предел времени нужен только провалу: без своих потоков вход не завершился бы.
+            async with portal.client() as client, asyncio.timeout(10):
+                response = await client.post(
+                    "/api/auth/login", json={"login": "ivanov", "password": temporary}
+                )
+            assert not busy.done()
+        finally:
+            release.set()
+            await busy
+    assert response.status_code == 200
+    assert response.json()["step"] == "password_change"

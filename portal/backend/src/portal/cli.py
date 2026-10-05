@@ -198,6 +198,7 @@ async def _run_admin_command(settings: Settings, args: argparse.Namespace) -> st
             return await _reset_second_factor(container, args.login)
         return await _audit(container, args.since, args.event, args.limit)
     finally:
+        container.hash_executor.shutdown()
         await container.engine.dispose()
 
 

@@ -6,6 +6,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -108,13 +109,18 @@ class KbService:
         uow_factory: KbUnitOfWorkFactory,
         storage: FileStorage,
         reader: DocumentReader,
+        document_executor: Executor,
         clock: Clock,
         settings: KbSettings,
     ) -> None:
-        """Получить зависимости явно."""
+        """Получить зависимости явно.
+
+        `document_executor` — потоки чтения документов, отдельные от общего пула.
+        """
         self._uow_factory = uow_factory
         self._storage = storage
         self._reader = reader
+        self._document_executor = document_executor
         self._clock = clock
         self._settings = settings
 
@@ -170,7 +176,9 @@ class KbService:
         saved = False
         try:
             path = self._storage.path(stored.key)
-            media_type, page_count = await asyncio.to_thread(self._inspect, path, file_name)
+            media_type, page_count = await asyncio.get_running_loop().run_in_executor(
+                self._document_executor, self._inspect, path, file_name
+            )
             now = self._clock.now()
             document = KbDocument(
                 id=uuid4(),

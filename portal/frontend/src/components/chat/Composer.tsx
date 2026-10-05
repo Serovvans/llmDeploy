@@ -50,6 +50,8 @@ interface ComposerProps {
   waitText?: string;
   /** Постоянная строка под панелью — что портал не делает. */
   note?: string;
+  /** Отправка пока невозможна (настройки ещё загружаются): кнопка «Отправить» — в состоянии `loading`. */
+  sendPending?: boolean;
   chat?: ChatControls;
   onTextChange: (text: string) => void;
   onSend: () => void;
@@ -76,7 +78,7 @@ export function Composer(props: ComposerProps) {
     textarea.current?.focus();
     if (busy) {
       props.onNotice(props.waitText ?? t.waitAnswer);
-    } else {
+    } else if (!props.sendPending) {
       props.onSend();
     }
   };
@@ -151,7 +153,6 @@ export function Composer(props: ComposerProps) {
               <Hint text={chat.attach?.hint ?? ''} maxWidth={320}>
                 <Button
                   icon={<IconAttachPaperclipRegular16 />}
-                  disabled={!chat.attach}
                   onClick={() => fileInput.current?.click()}
                 >
                   {t.attach}
@@ -180,7 +181,7 @@ export function Composer(props: ComposerProps) {
               {t.stop}
             </Button>
           ) : (
-            <Button use="primary" onClick={send}>
+            <Button use="primary" loading={props.sendPending} onClick={send}>
               {t.send}
             </Button>
           )}

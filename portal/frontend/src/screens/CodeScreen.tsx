@@ -123,16 +123,18 @@ export function CodeScreen() {
                 disabled={submitting}
               />
             ) : (
-              <Input
-                {...control}
-                ref={inputRef}
-                size="large"
-                width="100%"
-                autoComplete="off"
-                value={value}
-                onValueChange={setValue}
-                disabled={submitting}
-              />
+              <div className={styles.mono}>
+                <Input
+                  {...control}
+                  ref={inputRef}
+                  size="large"
+                  width="100%"
+                  autoComplete="off"
+                  value={value}
+                  onValueChange={setValue}
+                  disabled={submitting}
+                />
+              </div>
             )
           }
         </Field>

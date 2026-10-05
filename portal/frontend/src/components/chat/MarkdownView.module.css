@@ -7,15 +7,27 @@
   overflow-wrap: anywhere;
 }
 
-.markdown :is(p, ul, ol, h1, h2, h3, h4, h5, h6, blockquote) {
+.markdown :is(p, ul, ol, h3, h4, h5, h6, blockquote) {
   margin: 0;
 }
 
-.markdown :is(h1, h2, h3, h4, h5, h6) {
+/* Ступени заголовков ответа (концепция §4.2): `#` → h3, `##` → h4, `###` и глубже → h5, h6. */
+.markdown :is(h3, h4, h5, h6) {
   margin-top: 8px;
-  font-size: 18px;
+  color: var(--p-text);
+  font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
+}
+
+.markdown h3 {
+  font-size: 18px;
   line-height: 28px;
+}
+
+.markdown h4 {
+  font-size: 16px;
+  line-height: 24px;
 }
 
 .markdown :is(ul, ol) {
@@ -61,6 +73,11 @@
 .tableScroll {
   max-height: 480px;
   overflow: auto;
+}
+
+.tableScroll:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
 }
 
 .table {

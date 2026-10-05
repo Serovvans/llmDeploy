@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { KbDocument } from '../api/types';
-import { fail, mockApi, ok, session } from '../test/mockApi';
+import { CONFIG, fail, mockApi, ok, session } from '../test/mockApi';
 import { menuItems, renderApp } from '../test/renderApp';
 import { texts } from '../texts';
 
@@ -372,5 +372,80 @@ describe('база знаний: добавление', () => {
     await user.click(dialog.getByRole('button', { name: t.upload.submit }));
     const alert = await dialog.findByRole('alert');
     expect(alert.textContent).toBe(text);
+  });
+});
+
+describe('база знаний: правки дизайн-ревью', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'DataTransfer',
+      class {
+        items = { add: () => undefined };
+        files = null;
+      },
+    );
+  });
+
+  it('удалена последняя строка страницы 2 — переход на страницу 1, а не «пока пусто»', async () => {
+    const last = doc({ id: 'k-51', title: 'Последний.pdf', can_delete: true });
+    const server = mockApi({
+      'GET /api/auth/session': () => ok(session('ready')),
+      'GET /api/kb/documents': (_body, url) =>
+        url.searchParams.get('page') === '2'
+          ? ok({ items: [last], page: 2, page_size: 50, total: 51 })
+          : ok({ items: [doc({})], page: 1, page_size: 50, total: 51 }),
+      'DELETE /api/kb/documents/k-51': () => ok(),
+    });
+    renderApp('/knowledge');
+    const user = userEvent.setup();
+
+    await screen.findByText('Договор аренды 14-А.pdf');
+    await user.click(screen.getByText('2', { selector: '[data-tid="Paging__pageLink"]' }));
+    await user.click(within(await row('Последний.pdf')).getByRole('button', { name: /Действия/ }));
+    await user.click(await screen.findByText(t.menu.remove));
+    server.on('GET /api/kb/documents', () => ok({ items: [doc({})], page: 1, page_size: 50, total: 50 }));
+    await user.click(await screen.findByRole('button', { name: t.remove.action }));
+
+    expect(await screen.findByText('Договор аренды 14-А.pdf')).toBeInTheDocument();
+    expect(listQueries().at(-1)?.get('page')).toBe('1');
+    expect(screen.queryByText(t.empty.shared.title)).not.toBeInTheDocument();
+  });
+
+  it('окно «Добавить документы» не закрывается нажатием на фон', async () => {
+    const { user } = setup();
+    await user.click((await screen.findAllByRole('button', { name: t.add }))[0] as HTMLElement);
+    await screen.findByRole('dialog');
+
+    const background = document.querySelector('[data-tid="modal-container"]') as HTMLElement;
+    fireEvent.mouseDown(background);
+    fireEvent.mouseUp(background);
+    fireEvent.click(background);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('настройки не загрузились: кнопка не блокируется, в окне — заметка с «Повторить», файл уходит без проверки', async () => {
+    const { server, user } = setup();
+    server.on('GET /api/config', () => fail(503, 'service_unavailable'));
+    server.on('POST /api/kb/documents', () => ok(doc({ status: 'queued' }), 201));
+    await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(1));
+
+    await user.click((await screen.findAllByRole('button', { name: t.add }))[0] as HTMLElement);
+    const dialog = within(await screen.findByRole('dialog'));
+    expect(await dialog.findByText(texts.common.configFailed)).toBeInTheDocument();
+
+    fireEvent.change(document.querySelector('[role="dialog"] input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(['x'], 'любой.xyz')] },
+    });
+    expect(dialog.getByText('любой.xyz')).toBeInTheDocument();
+
+    // «Повторить» запрашивает настройки сразу; заметка исчезает, выбранный файл остаётся.
+    server.on('GET /api/config', () => ok(CONFIG));
+    await user.click(dialog.getByRole('button', { name: texts.common.retry }));
+    expect(await dialog.findByText(/PDF, DOCX, TXT, MD, JPG, PNG — до 50 МБ/)).toBeInTheDocument();
+    expect(dialog.queryByText(texts.common.configFailed)).not.toBeInTheDocument();
+    expect(dialog.getByText('любой.xyz')).toBeInTheDocument();
+
+    await user.click(dialog.getByRole('button', { name: t.upload.submit }));
+    await waitFor(() => expect(server.callsTo('POST /api/kb/documents')).toHaveLength(1));
   });
 });

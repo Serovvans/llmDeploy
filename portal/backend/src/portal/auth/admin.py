@@ -2,6 +2,7 @@
 
 import asyncio
 import secrets
+from concurrent.futures import Executor
 from uuid import UUID, uuid4
 
 from portal.auth import errors
@@ -44,12 +45,14 @@ class AdminService:
         self,
         uow_factory: AuthUnitOfWorkFactory,
         hasher: PasswordHasher,
+        hash_executor: Executor,
         clock: Clock,
         settings: PasswordSettings,
     ) -> None:
-        """Получить зависимости явно."""
+        """Получить зависимости явно; `hash_executor` — потоки под расчёт Argon2."""
         self._uow_factory = uow_factory
         self._hasher = hasher
+        self._hash_executor = hash_executor
         self._clock = clock
         self._settings = settings
 
@@ -77,7 +80,7 @@ class AdminService:
             login=login,
             full_name=full_name,
             role=role,
-            password_hash=await asyncio.to_thread(self._hasher.hash, password),
+            password_hash=await self._hash(password),
             must_change_password=True,
             is_blocked=False,
             totp_secret=None,
@@ -118,7 +121,7 @@ class AdminService:
     async def reset_password(self, actor: CurrentUser, user_id: UUID) -> tuple[User, str]:
         """Выдать новый временный пароль и погасить сессии пользователя."""
         password = generate_temporary_password(self._settings.min_length)
-        password_hash = await asyncio.to_thread(self._hasher.hash, password)
+        password_hash = await self._hash(password)
         async with self._uow_factory() as uow:
             user = await self._other_user(uow, actor, user_id)
             user.password_hash = password_hash
@@ -160,6 +163,11 @@ class AdminService:
                     await uow.sessions.delete_for_user(user.id)
                 await self._audit(uow, "user_blocked" if blocked else "user_unblocked", actor, user)
             return user
+
+    async def _hash(self, password: str) -> str:
+        return await asyncio.get_running_loop().run_in_executor(
+            self._hash_executor, self._hasher.hash, password
+        )
 
     @staticmethod
     async def _user(uow: AuthUnitOfWork, user_id: UUID) -> User:

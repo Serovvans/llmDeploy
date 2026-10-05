@@ -12,6 +12,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import Executor
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any
@@ -163,6 +164,7 @@ class GenerationService:
         estimator: TokenEstimator,
         storage: FileStorage,
         reader: DocumentReader,
+        document_executor: Executor,
         sessions: SessionAuthenticator,
         knowledge: KnowledgeBase,
         tools: Mapping[DialogKind, DialogTool],
@@ -174,7 +176,8 @@ class GenerationService:
         """Получить зависимости явно.
 
         `tools` — правила видов `sql`, `cogis`, `docparse`; `summary_forming` отвечает,
-        пишется ли сейчас краткое содержание разбора; `max_model_len` — контекст модели.
+        пишется ли сейчас краткое содержание разбора; `max_model_len` — контекст модели;
+        `document_executor` — потоки чтения документов, отдельные от общего пула.
         """
         self._knowledge = knowledge
         self._knowledge_reserve = settings.kb.context_max_tokens
@@ -185,6 +188,7 @@ class GenerationService:
         self._estimator = estimator
         self._storage = storage
         self._reader = reader
+        self._document_executor = document_executor
         self._sessions = sessions
         self._clock = clock
         self._chat = settings.chat
@@ -664,10 +668,13 @@ class GenerationService:
 
     async def _model_messages(self, system: str, turns: Sequence[Turn]) -> list[ModelMessage]:
         messages = [ModelMessage("system", [TextPart(system)])]
+        loop = asyncio.get_running_loop()
         for turn in turns:
             parts: list[TextPart | ImagePart] = [TextPart(turn.text)] if turn.text else []
             for image in turn.images:
-                parts.append(await asyncio.to_thread(self._load_image, image))
+                parts.append(
+                    await loop.run_in_executor(self._document_executor, self._load_image, image)
+                )
             messages.append(ModelMessage(turn.role, parts))
         return messages
 

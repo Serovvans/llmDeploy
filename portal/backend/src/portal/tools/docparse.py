@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
+from concurrent.futures import Executor
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,18 +183,23 @@ class DocparseService:
         estimator: TokenEstimator,
         storage: FileStorage,
         reader: DocumentReader,
+        document_executor: Executor,
         sessions: SessionAuthenticator,
         clock: Clock,
         settings: Settings,
         max_model_len: int,
     ) -> None:
-        """Получить зависимости явно; `max_model_len` — контекст модели из окружения."""
+        """Получить зависимости явно; `max_model_len` — контекст модели из окружения.
+
+        `document_executor` — потоки чтения документов, отдельные от общего пула.
+        """
         self._uow_factory = uow_factory
         self._model = model
         self._recognizer = recognizer
         self._estimator = estimator
         self._storage = storage
         self._reader = reader
+        self._document_executor = document_executor
         self._sessions = sessions
         self._clock = clock
         self._settings = settings.docparse
@@ -239,8 +245,8 @@ class DocparseService:
             raise file_too_large(limit) from error
         active: UUID | None = None
         try:
-            media_type, page_count, pages = await asyncio.to_thread(
-                self._inspect, self._storage.path(stored.key), file_name
+            media_type, page_count, pages = await asyncio.get_running_loop().run_in_executor(
+                self._document_executor, self._inspect, self._storage.path(stored.key), file_name
             )
             now = self._clock.now()
             dialog = Dialog(uuid4(), user.id, "docparse", None, now, now)
@@ -416,8 +422,15 @@ class DocparseService:
             )
             scans = [number for number in range(first, last + 1) if pages[number - 1] is None]
             if scans:
+                loop = asyncio.get_running_loop()
                 images = [
-                    await asyncio.to_thread(self._reader.page_image, path, run.media_type, number)
+                    await loop.run_in_executor(
+                        self._document_executor,
+                        self._reader.page_image,
+                        path,
+                        run.media_type,
+                        number,
+                    )
                     for number in scans
                 ]
                 try:

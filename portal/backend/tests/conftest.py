@@ -99,6 +99,8 @@ async def close_portal(portal: Portal) -> None:
     await portal.container.generation.shutdown()
     await portal.container.docparse.shutdown()
     portal.container.sql_checker.close()
+    portal.container.hash_executor.shutdown()
+    portal.container.document_executor.shutdown()
     await portal.container.http_client.aclose()
     await portal.container.qdrant.close()
     await portal.container.engine.dispose()

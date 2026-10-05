@@ -35,6 +35,7 @@ def _reader(
         "image_max_pixels": 10_000_000,
         "docx_max_unpacked_bytes": 1_000_000,
         "docx_max_xml_bytes": 1_000_000,
+        "reader_workers": 1,
     }
     settings = FilesSettings(root=tmp_path, pdf_render_scale=2.0, **{**values, **overrides})
     return ContentDocumentReader(settings, max_side, text_max_chars)

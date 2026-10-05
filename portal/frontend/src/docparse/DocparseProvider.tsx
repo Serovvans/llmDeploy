@@ -99,7 +99,11 @@ function fileRefusal(error: unknown, limits: PortalConfig['docparse']): string |
 }
 
 /** Заметка над формой по событию `error`, пришедшему до таблицы (концепция §5.9). */
-function runFailure(code: string, details?: { page: number; pages_total: number }): { text: string; retry: boolean } {
+function runFailure(
+  code: string,
+  message: string,
+  details?: { page: number; pages_total: number },
+): { text: string; retry: boolean } {
   switch (code) {
     case 'recognition_failed':
       // Страницы прочитаны, текста нет: повтор с тем же файлом даст тот же итог.
@@ -110,8 +114,12 @@ function runFailure(code: string, details?: { page: number; pages_total: number 
       return { text: t.errors.timeout, retry: true };
     case 'model_overloaded':
       return { text: t.errors.overloaded, retry: true };
-    default:
+    case 'model_unavailable':
+    case 'internal_error':
       return { text: details ? t.errors.brokenAt(details.page, details.pages_total) : t.errors.broken, retry: true };
+    default:
+      // Кода нет в словаре: текст сервера.
+      return { text: message || t.errors.broken, retry: true };
   }
 }
 
@@ -205,14 +213,16 @@ export function DocparseProvider({ config, children }: { config: PortalConfig | 
 
   const start = useCallback(() => {
     const { file, templateId } = formRef.current;
-    if (!config || controller.current) {
+    if (controller.current) {
       return;
     }
-    const fileError = file ? checkFile(file, config.docparse) : t.chooseFile;
-    const templateError = templateId ? null : t.chooseTemplate;
+    // Без настроек (они не загрузились) файл проверяет только сервер, а шаблонов нет: на их месте — заметка.
+    const limits = config?.docparse ?? null;
+    const fileError = file ? limits && checkFile(file, limits) : t.chooseFile;
+    const templateError = templateId || !limits ? null : t.chooseTemplate;
     setForm((current) => ({ ...current, fileError, templateError, notice: null, stopped: false }));
-    const template = config.docparse.templates.find((item) => item.id === templateId);
-    if (!file || !template || fileError) {
+    const template = limits?.templates.find((item) => item.id === templateId);
+    if (!file || !limits || !template || fileError) {
       return;
     }
 
@@ -285,7 +295,7 @@ export function DocparseProvider({ config, children }: { config: PortalConfig | 
               }));
               reread = true;
             } else if (event.code !== 'session_ended') {
-              failBeforeTable(runFailure(event.code, event.details));
+              failBeforeTable(runFailure(event.code, event.message, event.details));
             }
           }
         }
@@ -304,7 +314,7 @@ export function DocparseProvider({ config, children }: { config: PortalConfig | 
         } else if (error instanceof NetworkError) {
           failBeforeTable({ text: t.errors.network, retry: true });
         } else if (!isApiError(error, 'unauthenticated')) {
-          const refused = fileRefusal(error, config.docparse);
+          const refused = fileRefusal(error, limits);
           failBeforeTable(refused ? null : { text: errorText(error), retry: true }, refused);
         }
       } finally {

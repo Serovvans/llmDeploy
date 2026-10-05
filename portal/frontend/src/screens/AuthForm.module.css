@@ -17,3 +17,9 @@
   font-size: 14px;
   line-height: 20px;
 }
+
+/* Резервный код переписывают посимвольно — моноширинным шрифтом (концепция §2). */
+.mono input {
+  font-family: var(--p-font-mono);
+  font-variant-ligatures: none;
+}

@@ -1,6 +1,7 @@
 """Сборка зависимостей: единственное место, где порты связываются с реализациями."""
 
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import httpx
@@ -52,12 +53,17 @@ class AdminContainer:
     engine: AsyncEngine
     clock: Clock
     admin: AdminService
+    # Потоки под Argon2, отдельные от общего пула цикла событий; закрывает владелец контейнера.
+    hash_executor: ThreadPoolExecutor
 
 
 @dataclass(frozen=True)
 class Container(AdminContainer):
     """Зависимости процесса `portal-api`."""
 
+    # Потоки чтения документов, отдельные от общего пула цикла событий: очередь к PDFium
+    # не занимает потоки, нужные разрешению имён, записи файлов и экспорту.
+    document_executor: ThreadPoolExecutor
     auth: AuthService
     authenticator: SessionAuthenticator
     http_client: httpx.AsyncClient
@@ -121,13 +127,18 @@ def build_admin_container(settings: Settings, clock: Clock | None = None) -> Adm
     """Собрать зависимости администрирования."""
     clock = clock or SystemClock()
     engine = create_engine(settings)
+    argon2 = settings.auth.password.argon2
+    hash_executor = ThreadPoolExecutor(max_workers=argon2.workers, thread_name_prefix="argon2")
     admin = AdminService(
         SqlAuthUnitOfWorkFactory(engine, clock),
-        Argon2PasswordHasher(settings.auth.password.argon2),
+        Argon2PasswordHasher(argon2),
+        hash_executor,
         clock,
         settings.auth.password,
     )
-    return AdminContainer(settings=settings, engine=engine, clock=clock, admin=admin)
+    return AdminContainer(
+        settings=settings, engine=engine, clock=clock, admin=admin, hash_executor=hash_executor
+    )
 
 
 def build_container(
@@ -151,6 +162,7 @@ def build_container(
     auth = AuthService(
         SqlAuthUnitOfWorkFactory(base.engine, clock),
         Argon2PasswordHasher(settings.auth.password.argon2),
+        base.hash_executor,
         HkdfSecretCipher(secret_key),
         PyotpTotpProvider(settings.auth.totp.issuer),
         clock,
@@ -162,6 +174,9 @@ def build_container(
     # Текст вложения длиннее всего контекста модели в запрос заведомо не поместится.
     text_max_chars = int(max_model_len * settings.llm.chars_per_token)
     reader = ContentDocumentReader(settings.files, settings.llm.image_max_side_px, text_max_chars)
+    document_executor = ThreadPoolExecutor(
+        max_workers=settings.files.reader_workers, thread_name_prefix="documents"
+    )
     dialog_uow = SqlDialogUnitOfWorkFactory(base.engine)
     kb_uow = SqlKbUnitOfWorkFactory(base.engine, clock)
     estimator = RatioTokenEstimator(settings.llm.chars_per_token, settings.llm.tokens_per_image)
@@ -182,6 +197,7 @@ def build_container(
         estimator,
         storage,
         reader,
+        document_executor,
         auth,
         clock,
         settings,
@@ -198,6 +214,7 @@ def build_container(
         estimator,
         storage,
         reader,
+        document_executor,
         auth,
         knowledge,
         tools,
@@ -211,6 +228,8 @@ def build_container(
         engine=base.engine,
         clock=clock,
         admin=base.admin,
+        hash_executor=base.hash_executor,
+        document_executor=document_executor,
         auth=auth,
         authenticator=auth,
         http_client=http_client,
@@ -218,6 +237,7 @@ def build_container(
             dialog_uow,
             storage,
             reader,
+            document_executor,
             clock,
             settings.chat,
             settings.dialogs.empty_ttl_hours,
@@ -231,7 +251,7 @@ def build_container(
         docparse=docparse,
         generation=generation,
         qdrant=qdrant,
-        kb=KbService(kb_uow, storage, reader, clock, settings.kb),
+        kb=KbService(kb_uow, storage, reader, document_executor, clock, settings.kb),
         knowledge=knowledge,
     )
 

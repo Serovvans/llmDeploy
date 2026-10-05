@@ -98,6 +98,13 @@ function SqlOrphans({ lines }: { lines: string }) {
 }
 
 const COMPONENTS: Components = {
+  // Заголовки сдвинуты на два уровня: `<h1>` на экране один — название в строке заголовка (концепция §4.2, §9).
+  h1: ({ children }) => <h3>{children}</h3>,
+  h2: ({ children }) => <h4>{children}</h4>,
+  h3: ({ children }) => <h5>{children}</h5>,
+  h4: ({ children }) => <h6>{children}</h6>,
+  h5: ({ children }) => <h6>{children}</h6>,
+  h6: ({ children }) => <h6>{children}</h6>,
   // Ссылки из ответа — в новой вкладке, без передачи сведений о портале.
   a: ({ href, children }) => (
     <a href={href} target="_blank" rel="noopener noreferrer">
@@ -121,8 +128,9 @@ const COMPONENTS: Components = {
       />
     );
   },
+  // Блок с прокруткой достижим с клавиатуры, как блок кода.
   table: ({ children }) => (
-    <div className={styles.tableScroll}>
+    <div className={styles.tableScroll} tabIndex={0}>
       <table className={styles.table}>{children}</table>
     </div>
   ),

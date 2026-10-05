@@ -81,6 +81,11 @@ export function AttachmentChip({ name, attachment, fileUrl, failed, onRetry, onR
             </span>
           )}
           {label}
+          {!attachment && (
+            <span className="p-visually-hidden">
+              , {failed ? texts.chat.files.failedState : texts.chat.files.uploadingState}
+            </span>
+          )}
         </>
       )}
       {failed && onRetry && (

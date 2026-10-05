@@ -1,0 +1,17 @@
+{
+  "name": "portal-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Сквозные тесты портала на стенде portal/dev (Playwright)",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "browsers": "playwright install chromium firefox webkit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3"
+  }
+}

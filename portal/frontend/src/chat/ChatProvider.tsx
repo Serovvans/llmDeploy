@@ -269,11 +269,12 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
             ...draft,
             attachments: draft.attachments.map((item) => (item.key === fileKey ? { ...item, status: 'failed' } : item)),
           }));
-        } else if (config && !isApiError(error, 'unauthenticated')) {
+        } else if (!isApiError(error, 'unauthenticated')) {
           patch((draft) => ({
             ...draft,
             attachments: draft.attachments.filter((item) => item.key !== fileKey),
-            notice: uploadErrorText(error, file.name, config.chat),
+            // Без конфигурации (она не загрузилась) текст отказа — общий.
+            notice: config ? uploadErrorText(error, file.name, config.chat) : errorText(error),
           }));
         }
       }
@@ -283,17 +284,15 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
 
   const addFiles = useCallback(
     (key: string, files: File[], onCreated: OnCreated) => {
-      if (!config) {
-        return;
-      }
       const current = stateRef.current.drafts[key] ?? EMPTY_DRAFT;
       let notice: string | null = null;
       const accepted: { key: string; file: File }[] = [];
       for (const file of files) {
-        const refusal = checkFile(file, config.chat);
+        // Без конфигурации (она не загрузилась) пределы проверяет только сервер.
+        const refusal = config && checkFile(file, config.chat);
         if (refusal) {
           notice = refusal;
-        } else if (current.attachments.length + accepted.length >= config.chat.max_attachments) {
+        } else if (config && current.attachments.length + accepted.length >= config.chat.max_attachments) {
           notice = texts.chat.files.tooManyFiles(config.chat.max_attachments);
         } else {
           fileCounter.current += 1;
@@ -439,15 +438,13 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
 
   const send = useCallback(
     (kind: DialogKind, key: string, params: QuestionParams, onCreated: OnCreated, onRefused?: OnRefused) => {
-      if (!config) {
-        return;
-      }
       const draft = stateRef.current.drafts[key] ?? EMPTY_DRAFT;
       // Вложения, режим ответа и база знаний — только у чата (контракт §5.3).
       const isChat = 'mode' in params;
       const composer = texts.chat.composer;
       const ready = draft.attachments.flatMap((item) => (item.attachment ? [item.attachment] : []));
       const images = ready.reduce((sum, attachment) => sum + attachment.image_count, 0);
+      // Без конфигурации (она не загрузилась) пределы длины и числа изображений проверяет только сервер.
       let refusal: string | null = null;
       if (stateRef.current.dialogs[key]?.messages.at(-1)?.status === 'streaming') {
         refusal = composer.waitAnswer;
@@ -455,9 +452,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
         refusal = composer.uploading;
       } else if (!draft.text.trim() && ready.length === 0) {
         refusal = composer.enterQuestion;
-      } else if (draft.text.length > config.dialogs.message_max_chars) {
+      } else if (config && draft.text.length > config.dialogs.message_max_chars) {
         refusal = composer.messageTooLong(config.dialogs.message_max_chars);
-      } else if (images > config.chat.max_images) {
+      } else if (config && images > config.chat.max_images) {
         refusal = texts.chat.files.tooManyImages(config.chat.max_images);
       }
       if (refusal) {

@@ -72,8 +72,10 @@ readonly WRITERS=(portal-worker portal-api qdrant bifrost)
 # зависят от доступа к реестру. Тома монтируются напрямую, от root.
 readonly HELPER_SERVICE="caddy"
 
+# Вывод не должен обрывать скрипт: при закрытом терминале (обрыв SSH) echo завершается
+# ошибкой, а log вызывается и там, где сервисы возвращаются в работу.
 log() {
-  echo "==> $1"
+  echo "==> $1" || true
 }
 
 die() {
@@ -260,6 +262,8 @@ cmd_create() {
     archive_volume "$volume" "$partial"
   done
   trap - EXIT
+  # Архивы сняты: сигнал не должен оборвать запуск сервисов и оставить копию незавершённой.
+  trap '' INT TERM HUP
   start_writers
   (cd "$partial" && sha256 "${copy_files[@]}" >"$CHECKSUMS")
   mv "$partial" "$dest"
@@ -435,7 +439,7 @@ cmd_restore() {
   fi
   # Отметка — до остановки: прерванная остановка тоже требует запуска сервисов.
   writers_stopped=1
-  stop_writers
+  stop_writers || abort_restore "сервисы не остановлены"
   for volume in "${volumes[@]}"; do
     stage_volume "$volume" "$source" || abort_restore "архив ${volume}.tgz не распаковался в том"
   done
@@ -461,7 +465,9 @@ cmd_restore() {
     db_run dropdb -U "$DB_USER" --if-exists --force "$DB_PREVIOUS" ||
       abort_restore "прежняя база ${DB_PREVIOUS} не удалена"
   fi
-  trap - INT TERM HUP
+  # Данные уже новые: сигнал не должен оборвать запуск сервисов на середине. Игнорирование
+  # наследует и compose start.
+  trap '' INT TERM HUP
   start_writers
 
   cat <<EOF
@@ -480,6 +486,9 @@ main() {
     create | restore)
       [[ $# -eq 2 ]] || die "$1 требует каталог" "bash scripts/backup.sh --help"
       command -v docker >/dev/null 2>&1 || die "не найден docker" "запустить на ВМ"
+      # Читатель вывода мог завершиться (make backup | tee): без этого SIGPIPE на первом же
+      # сообщении убил бы скрипт, не дав вернуть сервисы в работу.
+      trap '' PIPE
       "cmd_$1" "$2"
       ;;
     *) die "ожидается create или restore" "bash scripts/backup.sh --help" ;;
