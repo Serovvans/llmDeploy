@@ -48,6 +48,8 @@ def _message(role: Literal["user", "assistant"], content: str) -> Message:
         "размышления",
         1,
         {},
+        None,
+        None,
         0,
         NOW,
     )

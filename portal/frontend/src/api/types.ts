@@ -120,7 +120,20 @@ export interface Attachment {
 
 export type MessageStatus = 'complete' | 'streaming' | 'stopped' | 'length_limit' | 'error';
 
-/** Сообщение диалога (контракт §5.1). Поля источников и проверки SQL понадобятся на этапах 4–5. */
+export type KbScope = 'shared' | 'personal';
+
+/** Источник ответа (контракт §5.1): `n` — номер сноски `[n]` в тексте. */
+export interface Source {
+  n: number;
+  document_id: string;
+  document_title: string;
+  scope: KbScope;
+  page: number | null;
+  fragment_id: string;
+  quote: string;
+}
+
+/** Сообщение диалога (контракт §5.1). Поля проверки SQL понадобятся на этапе 5. */
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -130,16 +143,57 @@ export interface Message {
   reasoning: string | null;
   reasoning_seconds: number | null;
   attachments: Attachment[];
+  /** `null` — поиск в базе знаний не выполнялся; `[]` — выполнялся, сносок в ответе нет. */
+  sources: Source[] | null;
+  sources_found: number | null;
   dropped_messages: number;
   created_at: string;
 }
 
 export type AnswerMode = 'fast' | 'thorough';
 
+export type Knowledge = 'none' | 'shared' | 'shared_and_personal';
+
 /** Тело сообщения чата (контракт §5.3). */
 export interface ChatMessageBody {
   content: string;
   attachment_ids: string[];
   mode: AnswerMode;
-  knowledge: 'none' | 'shared' | 'shared_and_personal';
+  knowledge: Knowledge;
+}
+
+export type KbStatus = 'queued' | 'processing' | 'ready' | 'error';
+
+/** Документ базы знаний (контракт §8.1). */
+export interface KbDocument {
+  id: string;
+  title: string;
+  scope: KbScope;
+  is_cogis: boolean;
+  author: { full_name: string; is_me: boolean };
+  created_at: string;
+  page_count: number | null;
+  status: KbStatus;
+  error_code: string | null;
+  progress: { pages_done: number; pages_total: number; recognizing: boolean } | null;
+  can_delete: boolean;
+}
+
+/** Текст страницы с цитатой отрезками (контракт §8.3). */
+export interface DocumentText {
+  page: number | null;
+  page_count: number | null;
+  recognized: boolean;
+  segments: { text: string; highlight: boolean }[];
+}
+
+/** Существующий документ в отказе `duplicate_document` (контракт §8.1). */
+export interface DuplicateDocument {
+  id: string;
+  title: string;
+  author_full_name: string;
+  created_at: string;
+  status: KbStatus;
+  error_code: string | null;
+  can_delete: boolean;
 }

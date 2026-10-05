@@ -8,7 +8,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -28,8 +28,10 @@ from portal.dialogs.context import (
     question_turn,
 )
 from portal.dialogs.domain import AnswerMode, Knowledge, Message, MessageStatus
+from portal.dialogs.footnotes import cited_numbers
 from portal.dialogs.ports import DialogUnitOfWork, DialogUnitOfWorkFactory
 from portal.files.ports import DocumentReader, FileStorage
+from portal.kb.ports import KnowledgeBase, KnowledgeUnavailableError, Retrieval, Source
 from portal.llm.ports import (
     MAX_IMAGES_PER_REQUEST,
     ChatModel,
@@ -88,6 +90,17 @@ class _Outcome:
     reasoning: str = ""
     reasoning_seconds: int | None = None
     dropped_messages: int = 0
+    found: Sequence[Source] | None = None  # None — поиск в базе знаний не выполнялся
+
+
+@dataclass
+class _Watch:
+    """За чем следят, пока формируется ответ: соединение клиента, срок, сессия, диалог."""
+
+    gone: asyncio.Task[bool]
+    started: float
+    deadline: float
+    next_check: float
 
 
 @dataclass
@@ -130,11 +143,14 @@ class GenerationService:
         storage: FileStorage,
         reader: DocumentReader,
         sessions: SessionAuthenticator,
+        knowledge: KnowledgeBase,
         clock: Clock,
         settings: Settings,
         max_model_len: int,
     ) -> None:
         """Получить зависимости явно; `max_model_len` — контекст модели из окружения."""
+        self._knowledge = knowledge
+        self._knowledge_reserve = settings.kb.context_max_tokens
         self._uow_factory = uow_factory
         self._model = model
         self._estimator = estimator
@@ -182,14 +198,11 @@ class GenerationService:
             if sum(item.image_count for item in attachments) > MAX_IMAGES_PER_REQUEST:
                 raise errors.too_many_images()
             turn = question_turn(body.content, attachments)
-            self._check_fits(turn, body.mode)
+            params = {"mode": body.mode, "knowledge": body.knowledge}
+            self._check_fits(turn, body.content, params)
 
             question = self._message(
-                dialog_id,
-                last.position + 1 if last else 0,
-                "user",
-                "complete",
-                {"mode": body.mode, "knowledge": body.knowledge},
+                dialog_id, last.position + 1 if last else 0, "user", "complete", params
             )
             question.content = body.content
             await uow.dialogs.add_message(question)
@@ -222,7 +235,7 @@ class GenerationService:
                 await uow.dialogs.delete_message(user.id, last.id)
             files = await uow.dialogs.message_attachments(user.id, [question.id])
             turn = question_turn(question.content, files.get(question.id, []))
-            self._check_fits(turn, question.params["mode"])
+            self._check_fits(turn, question.content, question.params)
             return _Job(user.id, session_id, dialog_id, question, turn, uuid4(), False)
 
         return await self._start(user.id, dialog_id, save)
@@ -240,8 +253,16 @@ class GenerationService:
         output = getattr(self._chat.max_output_tokens, mode)
         return self._max_model_len - int(output) - self._llm.safety_margin_tokens
 
-    def _check_fits(self, turn: Turn, mode: AnswerMode) -> None:
-        if not fits_alone(self._chat.system_prompt, turn, self._budget(mode), self._estimator):
+    def _check_fits(self, turn: Turn, content: str, params: Mapping[str, Any]) -> None:
+        """Вопрос обязан помещаться сам; под найденное в базе знаний оставлен резерв.
+
+        Резерв `kb.context_max_tokens` вычитается, когда поиск будет выполняться: тогда
+        правила и найденные места заведомо не вытеснят сам вопрос (§5.4).
+        """
+        budget = self._budget(params["mode"])
+        if _searches(content, params):
+            budget -= self._knowledge_reserve
+        if not fits_alone(self._chat.system_prompt, turn, budget, self._estimator):
             raise errors.message_too_long()
 
     def _message(
@@ -263,6 +284,8 @@ class GenerationService:
             reasoning=None,
             reasoning_seconds=None,
             params=params,
+            sources=None,
+            sources_found=None,
             dropped_messages=0,
             created_at=self._clock.now(),
         )
@@ -300,16 +323,7 @@ class GenerationService:
                         return None
                     # Процесс один: «формируется» без живой задачи — это ответ, который
                     # не удалось сохранить. Он прерван, диалог не должен оставаться запертым.
-                    await uow.dialogs.finish_answer(
-                        owner_id,
-                        last.id,
-                        content=last.content,
-                        status="error",
-                        error_code="interrupted",
-                        reasoning=last.reasoning,
-                        reasoning_seconds=last.reasoning_seconds,
-                        dropped_messages=last.dropped_messages,
-                    )
+                    await uow.dialogs.interrupt_answer(owner_id, last.id)
                     last.status = "error"
                 job = await save(uow, last)
                 job.needs_title = dialog.title is None
@@ -393,6 +407,11 @@ class GenerationService:
     async def _save(self, job: _Job) -> bool:
         """Сохранить ответ; при сбое базы — несколько попыток. `False` — не удалось."""
         outcome = job.outcome
+        cited = None
+        if outcome.found is not None:
+            # Хранятся только источники, на которые в тексте есть сноска вне кода (§5.5).
+            numbers = cited_numbers(outcome.content, [source.n for source in outcome.found])
+            cited = [_source_data(source) for source in outcome.found if source.n in numbers]
         for attempt in range(_SAVE_ATTEMPTS):
             if attempt:
                 await asyncio.sleep(_SAVE_RETRY_SECONDS * attempt)
@@ -406,6 +425,8 @@ class GenerationService:
                         error_code=outcome.error_code if outcome.status == "error" else None,
                         reasoning=outcome.reasoning or None,
                         reasoning_seconds=outcome.reasoning_seconds,
+                        sources=cited,
+                        sources_found=None if outcome.found is None else len(outcome.found),
                         dropped_messages=outcome.dropped_messages,
                     )
                 return True
@@ -415,14 +436,32 @@ class GenerationService:
 
     async def _produce(self, job: _Job) -> None:
         """Собрать запрос и получить ответ; итог записывается в `job.outcome`."""
+        started = time.monotonic()
+        watch = _Watch(
+            gone=asyncio.create_task(job.channel.consumer_gone.wait()),
+            started=started,
+            deadline=started + self._dialogs.generation_timeout_seconds,
+            next_check=started + self._recheck_seconds,
+        )
+        try:
+            await self._answer(job, watch)
+        finally:
+            watch.gone.cancel()
+
+    async def _answer(self, job: _Job, watch: _Watch) -> None:
         outcome = job.outcome
         mode: AnswerMode = job.question.params["mode"]
-        if job.question.params["knowledge"] != "none":
-            # Поиск по базе знаний появится на этапе 4 (§13.3); до тех пор чат честно
-            # отвечает, что она недоступна, а не молчит и не отвечает без неё.
-            job.channel.emit("search_started", {})
-            outcome.status, outcome.error_code = "error", "knowledge_unavailable"
-            return
+        system = self._chat.system_prompt
+        question = job.question_turn
+        if _searches(job.question.content, job.question.params):
+            retrieval = await self._search(job, watch)
+            if retrieval is None:
+                return
+            # Правила — в конец системного сообщения; найденное — первым блоком вопроса,
+            # перед вложениями и текстом пользователя. В историю оно не попадает (§5.4).
+            system = f"{system}\n\n{retrieval.rules}"
+            if retrieval.context:
+                question = Turn("user", f"{retrieval.context}\n\n{question.text}", question.images)
 
         async with self._uow_factory() as uow:
             earlier = await uow.dialogs.history(job.owner_id, job.dialog_id, job.question.position)
@@ -430,21 +469,20 @@ class GenerationService:
                 job.owner_id, [message.id for message in earlier if message.role == "user"]
             )
         history = history_turns(earlier, files)
-        system = self._chat.system_prompt
         budget = self._budget(mode)
-        dropped = fit_history(system, history, job.question_turn, budget, self._estimator)
+        dropped = fit_history(system, history, question, budget, self._estimator)
         if dropped:
             job.channel.emit("context_truncated", {"dropped_messages": dropped})
 
         for attempt in range(2):
             outcome.dropped_messages = dropped
             request = ChatRequest(
-                await self._model_messages(system, [*history[dropped:], job.question_turn]),
+                await self._model_messages(system, [*history[dropped:], question]),
                 _EFFORT[mode],
                 int(getattr(self._chat.max_output_tokens, mode)),
             )
             try:
-                await self._consume(job, request)
+                await self._consume(job, request, watch)
                 return
             except ContextOverflowError:
                 # Оценка числа токенов ошиблась: один повтор с вдвое меньшей историей.
@@ -452,10 +490,39 @@ class GenerationService:
                 if attempt or not remaining:
                     break
                 more = max(dropped * 2, dropped + (remaining + 1) // 2)
-                dropped = fit_history(
-                    system, history, job.question_turn, budget, self._estimator, more
-                )
+                dropped = fit_history(system, history, question, budget, self._estimator, more)
         outcome.status, outcome.error_code = "error", "message_too_long"
+
+    async def _search(self, job: _Job, watch: _Watch) -> Retrieval | None:
+        """Найти места в базе знаний; `None` — ответа не будет, итог записан.
+
+        Поиск идёт по тексту вопроса как есть, с фильтром доступа по пользователю и
+        выбранной области. Остановка, конец сессии и срок прерывают и его.
+        """
+        outcome = job.outcome
+        job.channel.emit("search_started", {})
+        search = asyncio.ensure_future(
+            self._knowledge.retrieve(
+                job.question.content, job.owner_id, job.question.params["knowledge"]
+            )
+        )
+        try:
+            if not await self._wait(job, search, watch):
+                return None
+            retrieval = search.result()
+        except KnowledgeUnavailableError:
+            # Ответ без базы знаний сервер не подменяет.
+            outcome.status, outcome.error_code = "error", "knowledge_unavailable"
+            return None
+        finally:
+            if not search.done():
+                search.cancel()
+                await asyncio.gather(search, return_exceptions=True)
+        outcome.found = tuple(retrieval.sources)
+        job.channel.emit(
+            "sources", {"sources": [_source_data(source) for source in retrieval.sources]}
+        )
+        return retrieval
 
     async def _model_messages(self, system: str, turns: Sequence[Turn]) -> list[ModelMessage]:
         messages = [ModelMessage("system", [TextPart(system)])]
@@ -473,56 +540,56 @@ class GenerationService:
             return ImagePart(path.read_bytes(), image.media_type)
         return ImagePart(self._reader.page_image(path, image.media_type, image.page), "image/png")
 
-    async def _consume(self, job: _Job, request: ChatRequest) -> None:
-        """Читать поток модели, пока не случится одно из: конец, остановка, сбой, срок.
+    async def _wait(self, job: _Job, pending: asyncio.Future[Any], watch: _Watch) -> bool:
+        """Дождаться `pending`; `False` — ответ прерван, итог записан в `job.outcome`.
 
-        Между событиями модели проверяется, что клиент не закрыл соединение, сессия ещё
-        существует и не вышел предел времени ответа.
+        Пока идёт ожидание, проверяется, что клиент не закрыл соединение, не вышел предел
+        времени ответа, а сессия и сам ответ ещё существуют.
         """
+        outcome = job.outcome
+        while True:
+            wait = max(0.0, min(watch.next_check, watch.deadline) - time.monotonic())
+            await asyncio.wait(
+                {pending, watch.gone}, timeout=wait, return_when=asyncio.FIRST_COMPLETED
+            )
+            now = time.monotonic()
+            if watch.gone.done():
+                outcome.status, outcome.error_code = "stopped", None
+                return False
+            if now >= watch.deadline:
+                outcome.status, outcome.error_code = "error", "generation_timeout"
+                return False
+            if now >= watch.next_check:
+                watch.next_check = now + self._recheck_seconds
+                if not await self._sessions.session_exists(job.session_id):
+                    outcome.status, outcome.error_code = "error", "session_ended"
+                    return False
+                if not await self._answer_exists(job):
+                    outcome.status, outcome.error_code = "error", "dialog_deleted"
+                    return False
+            if pending.done():
+                return True
+
+    async def _consume(self, job: _Job, request: ChatRequest, watch: _Watch) -> None:
+        """Читать поток модели, пока не случится одно из: конец, остановка, сбой, срок."""
         channel, outcome = job.channel, job.outcome
-        started = time.monotonic()
-        deadline = started + self._dialogs.generation_timeout_seconds
-        next_check = started + self._recheck_seconds
         stream = self._model.stream(request)
-        gone = asyncio.create_task(channel.consumer_gone.wait())
-        pending: asyncio.Task[Any] | None = None
+        pending: asyncio.Future[Any] | None = None
         try:
             while True:
-                if pending is None:
-                    pending = asyncio.ensure_future(anext(stream))
-                wait = max(0.0, min(next_check, deadline) - time.monotonic())
-                await asyncio.wait({pending, gone}, timeout=wait, return_when="FIRST_COMPLETED")
-                now = time.monotonic()
-                if gone.done():
-                    outcome.status, outcome.error_code = "stopped", None
+                pending = asyncio.ensure_future(anext(stream))
+                if not await self._wait(job, pending, watch):
                     return
-                if now >= deadline:
-                    outcome.status, outcome.error_code = "error", "generation_timeout"
-                    return
-                if now >= next_check:
-                    next_check = now + self._recheck_seconds
-                    if not await self._sessions.session_exists(job.session_id):
-                        outcome.status, outcome.error_code = "error", "session_ended"
-                        return
-                    if not await self._answer_exists(job):
-                        outcome.status, outcome.error_code = "error", "dialog_deleted"
-                        return
-                if not pending.done():
-                    continue
                 try:
                     event = pending.result()
                 except StopAsyncIteration:
-                    event = None
+                    # Поток кончился без `Finished`: ответ полным не считается никогда.
+                    outcome.status, outcome.error_code = "error", "model_unavailable"
+                    return
                 except ModelOverloadedError:
                     outcome.status, outcome.error_code = "error", "model_overloaded"
                     return
                 except ModelUnavailableError:
-                    outcome.status, outcome.error_code = "error", "model_unavailable"
-                    return
-                finally:
-                    pending = None
-                if event is None:
-                    # Поток кончился без `Finished`: ответ полным не считается никогда.
                     outcome.status, outcome.error_code = "error", "model_unavailable"
                     return
                 if isinstance(event, Finished):
@@ -534,12 +601,11 @@ class GenerationService:
                     channel.emit("reasoning_delta", {"text": event.text})
                 elif isinstance(event, ContentDelta):
                     if outcome.reasoning and outcome.reasoning_seconds is None:
-                        outcome.reasoning_seconds = round(now - started)
+                        outcome.reasoning_seconds = round(time.monotonic() - watch.started)
                     outcome.content += event.text
                     channel.emit("delta", {"text": event.text})
         finally:
-            gone.cancel()
-            if pending is not None:
+            if pending is not None and not pending.done():
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
             # Закрытие генератора отменяет запрос к модели.
@@ -577,6 +643,24 @@ class GenerationService:
                 job.channel.emit("title", {"title": title})
         except (ModelUnavailableError, ModelOverloadedError, ContextOverflowError) as error:
             logger.info("title skipped", extra={"error_type": type(error).__name__})
+
+
+def _searches(content: str, params: Mapping[str, Any]) -> bool:
+    """Будет ли поиск в базе знаний: она включена и у вопроса есть текст (§5.4)."""
+    return params["knowledge"] != "none" and bool(content.strip())
+
+
+def _source_data(source: Source) -> dict[str, Any]:
+    """Источник в виде объекта `Source` контракта (§5.1)."""
+    return {
+        "n": source.n,
+        "document_id": str(source.document_id),
+        "document_title": source.document_title,
+        "scope": source.scope,
+        "page": source.page,
+        "fragment_id": str(source.fragment_id),
+        "quote": source.quote,
+    }
 
 
 async def _close(stream: AsyncIterator[Any]) -> None:

@@ -90,6 +90,40 @@ services:
       retries: 3
       start_period: 30s
 
+  portal-worker:
+    # Тот же образ, что у portal-api, с другой командой (docs/portal-design.md §3).
+    build: ../backend
+    restart: unless-stopped
+    command: ["portal", "worker"]
+    # По SIGTERM воркер возвращает взятые задания в очередь; разбор PDF в потоке
+    # прервать нельзя, и стандартных 10 с на это не хватает.
+    stop_grace_period: 30s
+    depends_on:
+      # Миграции применяет portal-api: воркер стартует, когда схема уже готова.
+      portal-api:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      # PORTAL_SECRET_KEY сюда не передаётся: ключ второго фактора нужен только portal-api.
+      PORTAL_DB_PASSWORD: ${PORTAL_DB_PASSWORD:?}
+      PORTAL_LLM_API_KEY: ${PORTAL_LLM_API_KEY:?}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?}
+      MAX_MODEL_LEN: "65536"
+    volumes:
+      - portal-files:/data/files
+      - ./config.override.yaml:/etc/portal/config.override.yaml:ro
+    networks:
+      # edge — только ради Bifrost: распознавание сканов и эмбеддинги.
+      - edge
+      - portal
+    healthcheck:
+      test: ["CMD", "portal", "worker-health"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   portal-db:
     image: postgres:16.15-bookworm
     restart: unless-stopped

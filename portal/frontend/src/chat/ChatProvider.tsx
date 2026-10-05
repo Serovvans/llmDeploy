@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useReducer,
 
 import { api, isAbort, isApiError, NetworkError, StreamBrokenError } from '../api/client';
 import type { StreamEvent } from '../api/stream';
-import type { AnswerMode, Dialog, Message, PortalConfig } from '../api/types';
+import type { AnswerMode, Dialog, Knowledge, Message, PortalConfig } from '../api/types';
 import { errorText, texts } from '../texts';
 import { checkFile, sendErrorText, uploadErrorText } from './files';
 import { chatReducer, EMPTY_DRAFT, INITIAL_STATE, NEW_CHAT, type ChatState, type Draft } from './state';
@@ -19,6 +19,18 @@ function readMode(): AnswerMode {
   }
 }
 
+const KNOWLEDGE_STORAGE_KEY = 'portal.chat.knowledge';
+
+function readKnowledge(): Knowledge {
+  try {
+    const stored = window.localStorage.getItem(KNOWLEDGE_STORAGE_KEY);
+    return stored === 'shared' || stored === 'shared_and_personal' ? stored : 'none';
+  } catch {
+    // Хранилище недоступно — база знаний по умолчанию не используется.
+    return 'none';
+  }
+}
+
 /** Вызывается, когда чат создан на сервере: экран переходит на его адрес. */
 type OnCreated = (id: string) => void;
 
@@ -26,6 +38,8 @@ interface ChatApi {
   state: ChatState;
   mode: AnswerMode;
   setMode: (mode: AnswerMode) => void;
+  knowledge: Knowledge;
+  setKnowledge: (knowledge: Knowledge) => void;
   loadHistory: (more: boolean) => void;
   openDialog: (id: string) => void;
   refreshDialog: (id: string) => void;
@@ -59,6 +73,7 @@ export function useChat(): ChatApi {
 export function ChatProvider({ config, children }: { config: PortalConfig | null; children: React.ReactNode }) {
   const [state, dispatch] = useReducer(chatReducer, INITIAL_STATE);
   const [mode, setModeState] = useState(readMode);
+  const [knowledge, setKnowledgeState] = useState(readKnowledge);
   const stateRef = useRef(state);
   const streams = useRef(new Map<string, AbortController>());
   const fileCounter = useRef(0);
@@ -78,6 +93,15 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
     setModeState(next);
     try {
       window.localStorage.setItem(MODE_STORAGE_KEY, next);
+    } catch {
+      // Хранилище недоступно — выбор действует до закрытия вкладки.
+    }
+  }, []);
+
+  const setKnowledge = useCallback((next: Knowledge) => {
+    setKnowledgeState(next);
+    try {
+      window.localStorage.setItem(KNOWLEDGE_STORAGE_KEY, next);
     } catch {
       // Хранилище недоступно — выбор действует до закрытия вкладки.
     }
@@ -398,7 +422,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
           dispatch({ type: 'generationStarted', id, question: { content, attachments: ready }, now });
           dispatch({ type: 'dialogTouched', id, now: new Date(now).toISOString() });
           updateDraft(id, () => EMPTY_DRAFT);
-          const body = { content, attachment_ids: ready.map((a) => a.id), mode, knowledge: 'none' as const };
+          const body = { content, attachment_ids: ready.map((a) => a.id), mode, knowledge };
           void runStream(
             id,
             (signal) => api.sendMessage(id, body, signal),
@@ -423,7 +447,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
         (error: unknown) => setNotice(key, errorText(error)),
       );
     },
-    [config, ensureDialog, mode, runStream, setNotice, updateDraft],
+    [config, ensureDialog, knowledge, mode, runStream, setNotice, updateDraft],
   );
 
   const regenerate = useCallback(
@@ -457,6 +481,8 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       state,
       mode,
       setMode,
+      knowledge,
+      setKnowledge,
       loadHistory,
       openDialog,
       refreshDialog,
@@ -476,6 +502,8 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       state,
       mode,
       setMode,
+      knowledge,
+      setKnowledge,
       loadHistory,
       openDialog,
       refreshDialog,

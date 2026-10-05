@@ -91,12 +91,20 @@ class AttachmentOut(BaseModel):
         )
 
 
-class MessageOut(BaseModel):
-    """Объект `Message`.
+class SourceOut(BaseModel):
+    """Объект `Source`: источник, на который в ответе есть сноска `[n]`."""
 
-    Поля базы знаний и проверки SQL пока всегда `null`: поиск появится на этапе 4,
-    диалоги `sql` — на этапе 5.
-    """
+    n: int
+    document_id: UUID
+    document_title: str
+    scope: Literal["shared", "personal"]
+    page: int | None
+    fragment_id: UUID
+    quote: str
+
+
+class MessageOut(BaseModel):
+    """Объект `Message`; поля проверки SQL пока всегда `null` — диалоги `sql` на этапе 5."""
 
     id: UUID
     role: MessageRole
@@ -106,8 +114,8 @@ class MessageOut(BaseModel):
     reasoning: str | None
     reasoning_seconds: int | None
     attachments: list[AttachmentOut]
-    sources: list[Any] | None = None
-    sources_found: int | None = None
+    sources: list[SourceOut] | None
+    sources_found: int | None
     sql_check: dict[str, Any] | None = None
     sql_dangers: list[str] | None = None
     dropped_messages: int
@@ -126,6 +134,10 @@ class MessageOut(BaseModel):
             reasoning=message.reasoning,
             reasoning_seconds=message.reasoning_seconds,
             attachments=[AttachmentOut.of(item) for item in view.attachments],
+            sources=None
+            if message.sources is None
+            else [SourceOut.model_validate(source) for source in message.sources],
+            sources_found=message.sources_found,
             dropped_messages=message.dropped_messages,
             created_at=message.created_at,
         )

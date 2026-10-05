@@ -1,0 +1,134 @@
+# Контрольный набор: вопросы. document и pages — где лежит ответ (любая из страниц
+# списка считается попаданием). kind: exact — вопрос содержит номер, реквизит или
+# фамилию, которые должны найтись по точному совпадению; semantic — вопрос задан
+# другими словами, чем написан документ.
+
+questions:
+  # --- точное совпадение: кадастровые номера, номера документов, фамилии ---
+  - text: Какой вид разрешённого использования у участка 50:21:0030210:417?
+    document: lease-14a
+    pages: [1]
+    kind: exact
+  - text: Какова кадастровая стоимость объекта с кадастровым номером 77:01:0004012:345?
+    document: egrn-extract
+    pages: [1]
+    kind: exact
+  - text: Что утверждено постановлением 123/2024-ПП?
+    document: decree-123
+    pages: [1]
+    kind: exact
+  - text: На какой срок заключён договор 14-А?
+    document: lease-14a
+    pages: [2]
+    kind: exact
+  - text: Какие работы выполнял кадастровый инженер Гришин?
+    document: survey-act
+    pages: [1]
+    kind: exact
+  - text: Какое возражение представила Власова?
+    document: survey-act
+    pages: [2]
+    kind: exact
+  - text: На какой срок установлен сервитут по соглашению 7-С?
+    document: easement-7s
+    pages: [1]
+    kind: exact
+  - text: По какому договору об ипотеке 2021/И-88 установлено обременение?
+    document: egrn-extract
+    pages: [2]
+    kind: exact
+  - text: Что означает ошибка CS0246?
+    document: plugin-guide
+    pages: [3]
+    kind: exact
+  - text: За что отвечает Орлов Павел Андреевич?
+    document: backup-regulation
+    pages: [1]
+    kind: exact
+
+  # Обязательные случаи (docs/portal-api.md §10.5): ожидаемый документ — первый среди
+  # однотипных выписок и договоров.
+  - text: Какой участок принадлежит Соколовой Марине Викторовне?
+    document: egrn-extract
+    pages: [2]
+    kind: exact
+  - text: Чем владеет Соколов Андрей Петрович?
+    document: egrn-344
+    pages: [1]
+    kind: exact
+  - text: Что зарегистрировано за Семеновой Ольгой Игоревной?
+    document: egrn-346
+    pages: [1]
+    kind: exact
+  # Целый номер встречается в выписке один раз, а его части — в каждой соседней по три.
+  - text: Кто правообладатель участка 77:01:0004012:345?
+    document: egrn-extract
+    pages: [1, 2]
+    kind: exact
+  - text: Какой адрес у участка 77:01:0004012:346?
+    document: egrn-346
+    pages: [1]
+    kind: exact
+  # Латинская «A» вместо кириллической и пробелы вокруг дефиса.
+  - text: Кто арендатор по договору 14 - A?
+    document: lease-14a
+    pages: [1]
+    kind: exact
+  - text: Что сдаётся в аренду по договору 14-Б?
+    document: lease-14b
+    pages: [1]
+    kind: exact
+
+  # --- по смыслу: вопрос другими словами ---
+  - text: Сколько нужно платить за землю под подстанцию каждый год?
+    document: lease-14a
+    pages: [2]
+    kind: semantic
+  - text: Какой штраф грозит арендатору, если он опоздал с оплатой?
+    document: lease-14a
+    pages: [2]
+    kind: semantic
+  - text: В каких случаях у арендатора могут отобрать участок раньше времени?
+    document: lease-14a
+    pages: [3]
+    kind: semantic
+  - text: Когда решение об утверждении схемы участка перестаёт действовать?
+    document: decree-123
+    pages: [2]
+    kind: semantic
+  - text: Заложен ли участок на Большой Ордынке банку?
+    document: egrn-extract
+    pages: [2]
+    kind: semantic
+  - text: Сколько владелец участка получает за то, что по его земле проходит линия?
+    document: easement-7s
+    pages: [2]
+    kind: semantic
+  - text: Можно ли сажать деревья под проводами линии электропередачи на своём участке?
+    document: easement-7s
+    pages: [2]
+    kind: semantic
+  - text: Почему площадь полигона получается в градусах и как получить метры?
+    document: postgis-guide
+    pages: [1]
+    kind: semantic
+  - text: Как ускорить поиск объектов в радиусе ста метров?
+    document: postgis-guide
+    pages: [2]
+    kind: semantic
+  - text: Что делать с самопересекающимися контурами перед объединением слоёв?
+    document: postgis-guide
+    pages: [3]
+    kind: semantic
+  - text: Плагин собрался, но сервер его не видит — где искать причину?
+    document: plugin-guide
+    pages: [3]
+    kind: semantic
+  - text: Как в плагине выполнить долгую операцию, не задерживая ответ клиенту?
+    document: plugin-guide
+    pages: [2]
+    kind: semantic
+  - text: Как часто проверяют, что из резервной копии действительно можно восстановиться?
+    document: backup-regulation
+    pages: [2]
+    kind: semantic

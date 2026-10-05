@@ -4,7 +4,6 @@ import asyncio
 import base64
 import binascii
 import json
-import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,7 +13,9 @@ from uuid import UUID, uuid4
 from portal.core.errors import (
     field_error,
     file_too_large,
+    file_unreadable,
     not_found,
+    too_many_pages,
     unsupported_file_type,
     validation_error,
 )
@@ -23,6 +24,7 @@ from portal.core.settings import ChatSettings
 from portal.dialogs import errors
 from portal.dialogs.domain import TITLE_MAX_LENGTH, Attachment, Dialog, DialogKind, Message
 from portal.dialogs.ports import DialogUnitOfWorkFactory
+from portal.files.names import display_file_name
 from portal.files.ports import (
     DocumentReader,
     FileStorage,
@@ -30,11 +32,9 @@ from portal.files.ports import (
     MediaType,
     UnreadableDocumentError,
 )
-from portal.files.text import decode_text
+from portal.files.text import store_as_utf8
 from portal.llm.ports import MAX_IMAGES_PER_REQUEST
 
-_FILE_NAME_MAX_LENGTH = 255
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _TEXT_TYPES = ("text/plain", "text/markdown")
 
 
@@ -75,12 +75,6 @@ def _decode_cursor(cursor: str) -> list[object]:
     if not isinstance(values, list):
         raise validation_error([field_error("cursor", "invalid_format")])
     return values
-
-
-def display_file_name(raw: str) -> str:
-    """Имя для показа: последняя часть пути, без управляющих символов, до 255 символов."""
-    name = _CONTROL_CHARACTERS.sub("", raw.replace("\\", "/").rsplit("/", 1)[-1]).strip()
-    return name[:_FILE_NAME_MAX_LENGTH] or "файл"
 
 
 class DialogService:
@@ -232,16 +226,7 @@ class DialogService:
                 # не выйдет, поэтому ответ объявляется прерванным уже при чтении (§5.5).
                 if message.status == "streaming" and not self._is_forming(message.id):
                     message.status, message.error_code = "error", "interrupted"
-                    await uow.dialogs.finish_answer(
-                        owner_id,
-                        message.id,
-                        content=message.content,
-                        status="error",
-                        error_code="interrupted",
-                        reasoning=message.reasoning,
-                        reasoning_seconds=message.reasoning_seconds,
-                        dropped_messages=message.dropped_messages,
-                    )
+                    await uow.dialogs.interrupt_answer(owner_id, message.id)
             files = await uow.dialogs.message_attachments(
                 owner_id, [message.id for message in found if message.role == "user"]
             )
@@ -313,16 +298,14 @@ class DialogService:
             if media_type == "application/pdf" and page_count is not None:
                 max_pages = self._settings.attachment_max_pages
                 if page_count > max_pages:
-                    raise errors.too_many_pages(max_pages)
+                    raise too_many_pages(max_pages)
                 return self._inspect_pdf(path, page_count, size_bytes)
             text = self._reader.page_text(path, media_type, 1)
         except UnreadableDocumentError as error:
-            raise errors.file_unreadable() from error
+            raise file_unreadable() from error
         if media_type in _TEXT_TYPES:
             # Текстовые файлы хранятся в UTF-8, в какой бы кодировке ни пришли (§1.5).
-            encoded = (decode_text(path.read_bytes()) or "").encode()
-            path.write_bytes(encoded)
-            size_bytes = len(encoded)
+            size_bytes = store_as_utf8(path)
         if text is not None:
             text = text[: self._text_max_chars]
         image_pages = [1] if text is None else []

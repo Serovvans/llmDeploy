@@ -1,8 +1,12 @@
 /** Разбор потока событий портала (контракт §6.1): `event:` и одна строка `data:` с JSON, пустая строка — конец события. */
 
+import type { Source } from './types';
+
 /** События потока ответа (контракт §6.2). Событие неизвестного типа разбор пропускает. */
 export type StreamEvent =
   | { type: 'start'; user_message_id: string; assistant_message_id: string }
+  | { type: 'search_started' }
+  | { type: 'sources'; sources: Source[] }
   | { type: 'context_truncated'; dropped_messages: number }
   | { type: 'reasoning_delta'; text: string }
   | { type: 'delta'; text: string }
@@ -12,6 +16,8 @@ export type StreamEvent =
 
 const KNOWN_EVENTS = new Set<string>([
   'start',
+  'search_started',
+  'sources',
   'context_truncated',
   'reasoning_delta',
   'delta',

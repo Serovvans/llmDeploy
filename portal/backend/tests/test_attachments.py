@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from portal.core.settings import Settings
-from portal.dialogs.service import display_file_name
+from portal.files.names import display_file_name
 from portal.llm.ports import ImagePart, TextPart
 from tests import samples
 from tests.conftest import close_portal, make_portal
@@ -473,3 +473,40 @@ async def test_answer_is_marked_as_forming_before_leftover_files_are_removed(
     rows = await portal.rows("SELECT role, status FROM messages ORDER BY position")
     assert [tuple(row) for row in rows] == [("user", "complete"), ("assistant", "complete")]
     assert len(portal.model.requests) == 1 and len(_stored_files(portal)) == 1
+
+
+async def test_pdf_with_a_broken_page_is_refused_as_unreadable(
+    portal: Portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pypdfium2 as pdfium
+
+    def broken(self: object) -> None:
+        raise pdfium.PdfiumError("Failed to load text page.")
+
+    monkeypatch.setattr(pdfium.PdfPage, "get_textpage", broken)
+    client = await portal.employee()
+    dialog_id = await new_dialog(client)
+    response = await upload(client, dialog_id, "битая страница.pdf", samples.text_pdf(["x"]))
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "file_unreadable"
+    assert _stored_files(portal) == []
+
+
+async def test_pdf_page_with_garbage_text_layer_goes_to_the_model_as_an_image(
+    portal: Portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pypdfium2 as pdfium
+
+    garbage = "\u0e01\u0e2a\u0e14\u0e1f" * 20
+    monkeypatch.setattr(pdfium.PdfTextPage, "count_chars", lambda self: len(garbage))
+    monkeypatch.setattr(pdfium.PdfTextPage, "get_text_range", lambda self, *args: garbage)
+    client = await portal.employee()
+    dialog_id = await new_dialog(client)
+    uploaded = await upload(client, dialog_id, "чертёж.pdf", samples.text_pdf(["x", "y"]))
+    assert uploaded.json()["image_count"] == 2
+    row = (await portal.rows("SELECT text_content, image_pages FROM attachments"))[0]
+    assert row.text_content is None and row.image_pages == [1, 2]
+    await ask(client, dialog_id, "Что на чертеже?", attachment_ids=[uploaded.json()["id"]])
+    parts = portal.model.requests[0].messages[1].parts
+    assert len([part for part in parts if isinstance(part, ImagePart)]) == 2
+    assert "\u0e01" not in parts[0].text  # type: ignore[union-attr]

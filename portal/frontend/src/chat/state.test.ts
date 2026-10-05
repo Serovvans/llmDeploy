@@ -24,6 +24,8 @@ function message(patch: Partial<Message>): Message {
     reasoning: null,
     reasoning_seconds: null,
     attachments: [],
+    sources: null,
+    sources_found: null,
     dropped_messages: 0,
     created_at: '2026-10-05T09:00:00Z',
     ...patch,
@@ -99,6 +101,48 @@ describe('состояние чата', () => {
     ]);
     expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ dropped_messages: 4, status: 'length_limit' });
     expect(state.history.items[0]?.title).toBe('Аренда участка');
+  });
+
+  it('поиск в базе знаний: фаза, число найденного сразу, под ответом — только упомянутые вне кода', () => {
+    const source = (n: number) => ({
+      n,
+      document_id: `doc-${n}`,
+      document_title: `Документ ${n}`,
+      scope: 'shared' as const,
+      page: n,
+      fragment_id: `f-${n}`,
+      quote: `Цитата ${n}`,
+    });
+    let state = run([QUESTION, ...events(1000, [{ type: 'search_started' }, 10])]);
+    expect(state.dialogs[ID]?.generation?.phase).toBe('searching');
+
+    state = run(events(1000, [{ type: 'sources', sources: [source(1), source(2), source(3)] }, 20]), state);
+    // К «Отправляю…» строка состояния не возвращается.
+    expect(state.dialogs[ID]?.generation?.phase).toBe('preparing');
+    expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ sources_found: 3, sources: null });
+
+    state = run(
+      events(
+        1000,
+        [{ type: 'delta', text: 'Срок — 49 лет [1]. В коде `a[2]` не сноска. Ещё [3] и [7].' }, 30],
+        [{ type: 'done', status: 'complete' }, 40],
+      ),
+      state,
+    );
+    expect(state.dialogs[ID]?.messages.at(-1)?.sources?.map((item) => item.n)).toEqual([1, 3]);
+  });
+
+  it('остановленный ответ: источники — по сноскам в полученной части; без поиска источников нет', () => {
+    const found = [{ n: 1, document_id: 'd', document_title: 'Д', scope: 'shared' as const, page: null, fragment_id: 'f', quote: 'ц' }];
+    const stopped = run([
+      QUESTION,
+      ...events(1000, [{ type: 'sources', sources: found }, 10], [{ type: 'delta', text: 'Пока без ссылок' }, 20]),
+      { type: 'generationStopped', id: ID },
+    ]);
+    expect(stopped.dialogs[ID]?.messages.at(-1)).toMatchObject({ status: 'stopped', sources: [], sources_found: 1 });
+
+    const plain = run([QUESTION, ...events(1000, [{ type: 'delta', text: 'Ответ [1]' }, 10], [{ type: 'done', status: 'complete' }, 20])]);
+    expect(plain.dialogs[ID]?.messages.at(-1)).toMatchObject({ sources: null, sources_found: null });
   });
 
   it('событие error: часть текста остаётся, код и текст сервера сохраняются', () => {

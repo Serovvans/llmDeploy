@@ -76,3 +76,15 @@
   outline: 2px solid var(--p-focus);
   outline-offset: 2px;
 }
+
+.thumbnailFailed {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--p-line);
+  border-radius: 4px;
+  color: var(--p-text-muted);
+}

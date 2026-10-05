@@ -186,22 +186,6 @@ async def test_length_limit_is_reported_in_done(portal: Portal) -> None:
     assert (await _messages(client, dialog_id))[1]["status"] == "length_limit"
 
 
-async def test_knowledge_base_is_honestly_unavailable_until_stage_four(portal: Portal) -> None:
-    client = await portal.employee()
-    dialog_id = await new_dialog(client)
-    for knowledge in ("shared", "shared_and_personal"):
-        events = await ask(client, dialog_id, knowledge=knowledge)
-        assert [name for name, _ in events if name != "title"] == [
-            "start", "search_started", "error",
-        ]  # fmt: skip
-        assert events[-1][1]["code"] == "knowledge_unavailable"
-    assert portal.model.requests == []
-    answers = [m for m in await _messages(client, dialog_id) if m["role"] == "assistant"]
-    assert {(m["status"], m["error_code"], m["content"]) for m in answers} == {
-        ("error", "knowledge_unavailable", "")
-    }
-
-
 async def test_empty_answers_are_skipped_in_history(portal: Portal) -> None:
     client = await portal.employee()
     dialog_id = await new_dialog(client)

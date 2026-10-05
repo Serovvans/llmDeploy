@@ -9,6 +9,7 @@ import { DataTable, SortableHeader } from '../components/DataTable';
 import { EmptyState } from '../components/EmptyState';
 import { Notice } from '../components/Notice';
 import { PageHeader } from '../components/PageHeader';
+import { TitleHint } from '../components/TitleHint';
 import { useFocusReturn } from '../hooks/useFocusReturn';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useSession } from '../session/SessionContext';
@@ -196,9 +197,9 @@ function UsersList() {
                   {page.items.map((user) => (
                     <tr key={user.id}>
                       <td className={styles.name}>
-                        <Hint text={user.full_name}>
+                        <TitleHint text={user.full_name}>
                           <span className={styles.ellipsis}>{user.full_name}</span>
-                        </Hint>
+                        </TitleHint>
                         {user.is_me && <span className="p-muted"> {t.me}</span>}
                       </td>
                       <td className="p-mono">{user.login}</td>

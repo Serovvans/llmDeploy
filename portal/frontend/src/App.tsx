@@ -6,6 +6,7 @@ import { ChatProvider } from './chat/ChatProvider';
 import { AppShell } from './components/AppShell';
 import { ChatScreen } from './screens/ChatScreen';
 import { CodeScreen } from './screens/CodeScreen';
+import { KnowledgeScreen } from './screens/KnowledgeScreen';
 import { LoginScreen } from './screens/LoginScreen';
 import { PasswordScreen } from './screens/PasswordScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
@@ -63,7 +64,7 @@ function Workspace() {
         <Routes>
         <Route path="/" element={<Navigate to={HOME} replace />} />
         <Route path="/chat/:id?" element={<ChatScreen />} />
-        <Route path="/knowledge" element={<SectionStub section="knowledge" />} />
+        <Route path="/knowledge" element={<KnowledgeScreen />} />
         <Route path="/sql/:id?" element={<SectionStub section="sql" />} />
         <Route path="/cogis/:id?" element={<SectionStub section="cogis" />} />
         <Route path="/documents/:id?" element={<SectionStub section="documents" />} />

@@ -3,9 +3,9 @@ import { usePageTitle } from '../hooks/usePageTitle';
 import { texts } from '../texts';
 import styles from './SectionStub.module.css';
 
-type Section = 'knowledge' | 'sql' | 'cogis' | 'documents';
+type Section = 'sql' | 'cogis' | 'documents';
 
-/** Место раздела, экран которого появится на этапах 4–5: заголовок и одна строка. */
+/** Место раздела, экран которого появится на этапе 5: заголовок и одна строка. */
 export function SectionStub({ section }: { section: Section }) {
   const title = texts.sections[section];
   usePageTitle(title);

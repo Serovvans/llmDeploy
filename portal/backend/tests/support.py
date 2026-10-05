@@ -18,6 +18,12 @@ from fastapi import FastAPI
 
 from portal.core.container import Container
 from portal.core.ports import CurrentUser
+from portal.kb.ports import (
+    KnowledgeBase,
+    KnowledgeScope,
+    KnowledgeUnavailableError,
+    Retrieval,
+)
 from portal.llm.ports import ChatRequest, ContentDelta, Finished, ReasoningDelta
 
 NEW_PASSWORD = "Надёжный-пароль-2026"
@@ -99,6 +105,38 @@ class ScriptedModel:
         return self.title
 
 
+class FakeKnowledge:
+    """Подменная база знаний: отдаёт заданное тестом и запоминает вызовы.
+
+    `result = None` — база недоступна; `delegate` — настоящая реализация порта (поиск
+    на локальном Qdrant); `gate` — поиск ждёт, пока тест его не отпустит.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, UUID, str]] = []
+        self.result: Retrieval | None = None
+        self.delegate: KnowledgeBase | None = None
+        self.gate: asyncio.Event | None = None
+        self.cancelled = 0
+
+    async def retrieve(self, query: str, user_id: UUID, scope: KnowledgeScope) -> Retrieval:
+        self.calls.append((query, user_id, scope))
+        if self.gate is not None:
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+        if self.delegate is not None:
+            return await self.delegate.retrieve(query, user_id, scope)
+        if self.result is None:
+            raise KnowledgeUnavailableError
+        return self.result
+
+    async def has_cogis_documentation(self) -> bool:
+        return False
+
+
 def parse_events(body: str) -> list[tuple[str, dict[str, Any]]]:
     """События потока по порядку: имя и данные; строки keep-alive пропускаются."""
     events = []
@@ -160,6 +198,7 @@ class Portal:
     container: Container
     clock: FakeClock
     model: "ScriptedModel"
+    knowledge: "FakeKnowledge"
 
     def client(self, ip: str = CLIENT_IP, forwarded_for: str | None = None) -> httpx.AsyncClient:
         """Клиент-«браузер»: свой набор cookie и заголовок защиты от CSRF."""

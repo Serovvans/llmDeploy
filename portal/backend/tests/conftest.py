@@ -19,7 +19,8 @@ from portal.cli import migrate
 from portal.core.app import create_app
 from portal.core.container import build_container
 from portal.core.settings import Settings, load_settings
-from tests.support import FakeClock, Portal, ScriptedModel
+from tests.kb_support import KbBench, kb_settings, make_bench
+from tests.support import FakeClock, FakeKnowledge, Portal, ScriptedModel
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
 SECRET_KEY = base64.b64encode(bytes(range(32))).decode()
@@ -37,6 +38,7 @@ def environ() -> dict[str, str]:
         "PORTAL_DB_PASSWORD": "",
         "PORTAL_SECRET_KEY": SECRET_KEY,
         "PORTAL_LLM_API_KEY": "sk-bf-test",
+        "QDRANT_API_KEY": "qdrant-test",
         "MAX_MODEL_LEN": "65536",
     }
 
@@ -83,18 +85,20 @@ async def make_portal(settings: Settings, *, scripted_model: bool = True) -> Por
     """
     clock = FakeClock(START)
     model = ScriptedModel()
-    container = build_container(settings, clock, model if scripted_model else None)
+    knowledge = FakeKnowledge()
+    container = build_container(settings, clock, model if scripted_model else None, knowledge)
     shutil.rmtree(settings.files.root, ignore_errors=True)
     async with container.engine.begin() as connection:
         await connection.execute(
             sa.text("TRUNCATE users, auth_throttle, audit_log RESTART IDENTITY CASCADE")
         )
-    return Portal(create_app(container), container, clock, model)
+    return Portal(create_app(container), container, clock, model, knowledge)
 
 
 async def close_portal(portal: Portal) -> None:
     await portal.container.generation.shutdown()
     await portal.container.http_client.aclose()
+    await portal.container.qdrant.close()
     await portal.container.engine.dispose()
 
 
@@ -103,3 +107,13 @@ async def portal(settings: Settings) -> AsyncIterator[Portal]:
     built = await make_portal(settings)
     yield built
     await close_portal(built)
+
+
+@pytest.fixture
+async def bench(settings: Settings, tmp_path: Path) -> AsyncIterator[KbBench]:
+    """Портал вместе с воркером базы знаний на локальном Qdrant."""
+    tuned = kb_settings(settings, tmp_path)
+    built = await make_bench(await make_portal(tuned), tuned)
+    yield built
+    await built.qdrant.close()
+    await close_portal(built.portal)

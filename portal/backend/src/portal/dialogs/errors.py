@@ -41,20 +41,3 @@ def attachment_already_sent() -> AppError:
     return AppError(
         409, "attachment_already_sent", "Вложение уже отправлено: удалить его можно с чатом."
     )
-
-
-def file_unreadable() -> AppError:
-    """Файл не открывается."""
-    return AppError(
-        422, "file_unreadable", "Файл не удалось открыть: он повреждён или защищён паролем."
-    )
-
-
-def too_many_pages(max_pages: int) -> AppError:
-    """В PDF больше страниц, чем разрешено."""
-    return AppError(
-        422,
-        "too_many_pages",
-        f"В документе больше {max_pages} страниц.",
-        details={"max_pages": max_pages},
-    )

@@ -2,7 +2,7 @@
   flex: none;
   width: 100%;
   max-width: 824px;
-  margin: 0 auto;
+  margin: 0 var(--p-chat-column-margin, auto);
   padding: 8px 32px 16px;
 }
 

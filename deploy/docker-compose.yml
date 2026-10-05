@@ -232,8 +232,6 @@ services:
       start_period: 30s
 
   # Третий этап развёртывания: портал сотрудников (§3.8, docs/portal-design.md §3).
-  # portal-worker появится вместе с командой `portal worker` (этап 4 пайплайна): сейчас
-  # её нет в образе, и сервис уходил бы в бесконечный перезапуск.
   portal-web:
     build: ../portal/frontend
     profiles: [portal]
@@ -274,6 +272,41 @@ services:
     healthcheck:
       # curl и wget в образе нет; /healthz отвечает 503, если база недоступна.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  portal-worker:
+    # Тот же образ, что у portal-api, с другой командой (docs/portal-design.md §3).
+    build: ../portal/backend
+    profiles: [portal]
+    restart: unless-stopped
+    command: ["portal", "worker"]
+    # По SIGTERM воркер возвращает взятые задания в очередь; разбор PDF в потоке
+    # прервать нельзя, и стандартных 10 с на это не хватает.
+    stop_grace_period: 30s
+    depends_on:
+      # Миграции применяет portal-api: воркер стартует, когда схема уже готова.
+      portal-api:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      # PORTAL_SECRET_KEY сюда не передаётся: ключ второго фактора нужен только portal-api.
+      PORTAL_DB_PASSWORD: ${PORTAL_DB_PASSWORD:?}
+      PORTAL_LLM_API_KEY: ${PORTAL_LLM_API_KEY:-}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?}
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:?}
+    volumes:
+      - portal-files:/data/files
+      - ./portal:/etc/portal:ro
+    networks:
+      # edge — только ради Bifrost: распознавание сканов и эмбеддинги.
+      - edge
+      - portal
+    healthcheck:
+      test: ["CMD", "portal", "worker-health"]
       interval: 30s
       timeout: 10s
       retries: 3

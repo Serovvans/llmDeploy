@@ -4,10 +4,10 @@
 условие `dialogs.owner_id = :owner` в сам запрос (docs/portal-api.md §9.15).
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from portal.dialogs.domain import Attachment, Dialog, DialogKind, Message, MessageStatus
@@ -97,9 +97,15 @@ class DialogRepository(Protocol):
         error_code: str | None,
         reasoning: str | None,
         reasoning_seconds: int | None,
+        sources: Sequence[Mapping[str, Any]] | None,
+        sources_found: int | None,
         dropped_messages: int,
     ) -> None:
         """Сохранить ответ с итоговым состоянием."""
+        ...
+
+    async def interrupt_answer(self, owner_id: UUID, message_id: UUID) -> None:
+        """Перевести ответ `streaming`, который никто не формирует, в `error`/`interrupted`."""
         ...
 
     async def reset_streaming(self) -> None:

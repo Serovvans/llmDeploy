@@ -9,7 +9,7 @@
   flex-direction: column;
   gap: 24px;
   max-width: 824px;
-  margin: 0 auto;
+  margin: 0 var(--p-chat-column-margin, auto);
   padding: 24px 32px;
 }
 
@@ -109,4 +109,23 @@
   display: block;
   max-width: min(960px, 80vw);
   max-height: 70vh;
+}
+
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sourcesTitle {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.sourceCards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 }

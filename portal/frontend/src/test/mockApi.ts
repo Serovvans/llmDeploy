@@ -36,6 +36,11 @@ export const CONFIG = {
     max_attachments: 10,
     max_images: 8,
   },
+  kb: {
+    document_max_bytes: 52428800,
+    document_max_pages: 500,
+    document_extensions: ['.pdf', '.docx', '.txt', '.md', '.jpg', '.jpeg', '.png'],
+  },
 } as PortalConfig;
 
 export const EMPLOYEE: SessionUser = {
@@ -119,6 +124,7 @@ export function mockApi(initial: Record<string, Handler>) {
   const handlers: Record<string, Handler> = {
     'GET /api/config': () => ok(CONFIG),
     'GET /api/dialogs': () => ok({ items: [], next_cursor: null }),
+    'GET /api/kb/documents': () => ok({ items: [], page: 1, page_size: 50, total: 0 }),
     ...initial,
   };
   const calls: ApiCall[] = [];

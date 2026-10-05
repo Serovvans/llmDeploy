@@ -126,6 +126,12 @@ class LlmSettings(_Section):
     context_overflow_marker: str = Field(min_length=1)
     chars_per_token: float = Field(gt=0)
     tokens_per_image: int = Field(ge=1)
+    embedding_model: str = Field(min_length=1)
+    recognition_max_tokens: int = Field(ge=1)
+    recognition_parallel_requests: int = Field(ge=1)
+    recognition_attempts: int = Field(ge=1)
+    recognition_retry_pause_seconds: float = Field(ge=0)
+    recognition_system_prompt: str = Field(min_length=1)
 
 
 class FilesSettings(_Section):
@@ -133,6 +139,7 @@ class FilesSettings(_Section):
 
     root: Path
     text_layer_min_chars: int = Field(ge=1)
+    text_layer_min_valid_share: float = Field(ge=0, le=1)
     image_max_pixels: int = Field(ge=1)
     docx_max_unpacked_bytes: int = Field(ge=1)
     docx_max_xml_bytes: int = Field(ge=1)
@@ -170,12 +177,100 @@ class ChatSettings(_Section):
     system_prompt: str = Field(min_length=1)
 
 
+class KbIndexingSettings(_Section):
+    """Пределы конвейера индексации."""
+
+    document_max_chars: int = Field(ge=1)
+
+
+class KbChunkingSettings(_Section):
+    """Разбиение текста страницы на фрагменты."""
+
+    max_chars: int = Field(ge=1)
+    overlap_chars: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_overlap(self) -> Self:
+        if self.overlap_chars * 2 > self.max_chars:
+            raise ValueError("kb.chunking.overlap_chars не должен превышать половины max_chars")
+        return self
+
+
+class KbEmbeddingsSettings(_Section):
+    """Эмбеддинги (docs/portal-api.md §10.1, §12.1)."""
+
+    dimension: int = Field(ge=1)
+    batch_size: int = Field(ge=1)
+    max_input_chars: int = Field(ge=1)
+    timeout_seconds: float = Field(gt=0)
+    query_instruction: str
+
+
+class KbSearchSettings(_Section):
+    """Гибридный поиск (docs/portal-api.md §10.4)."""
+
+    top_k: int = Field(ge=1)
+    prefetch_limit: int = Field(ge=1)
+    lexical_slots: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_slots(self) -> Self:
+        if self.lexical_slots > self.top_k:
+            raise ValueError("kb.search.lexical_slots не должен превышать top_k")
+        return self
+
+
+class KbQdrantSettings(_Section):
+    """Адрес и коллекция Qdrant; ключ приходит из окружения."""
+
+    url: str = Field(min_length=1)
+    collection: str = Field(min_length=1)
+    timeout_seconds: int = Field(ge=1)
+    upsert_batch_size: int = Field(ge=1)
+
+
+class KbWorkerSettings(_Section):
+    """Очередь заданий (docs/portal-api.md §11)."""
+
+    concurrency: int = Field(ge=1)
+    max_attempts: int = Field(ge=1)
+    retry_base_seconds: int = Field(ge=1)
+    retry_max_seconds: int = Field(ge=1)
+    lease_seconds: int = Field(ge=3)
+    poll_seconds: float = Field(gt=0)
+    call_attempts: int = Field(ge=1)
+    call_retry_pause_seconds: float = Field(ge=0)
+    heartbeat_file: Path
+    heartbeat_stale_seconds: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _check_heartbeat(self) -> Self:
+        if self.heartbeat_stale_seconds <= self.poll_seconds:
+            raise ValueError("kb.worker.heartbeat_stale_seconds должен быть больше poll_seconds")
+        return self
+
+
 class KbSettings(_Section):
-    """База знаний: значения для подсказок интерфейса."""
+    """База знаний: загрузка, индексация, поиск, очередь."""
 
     document_max_bytes: int = Field(ge=1)
     document_max_pages: int = Field(ge=1)
     document_extensions: tuple[str, ...]
+    context_max_tokens: int = Field(ge=1)
+    rules_prompt: str = Field(min_length=1)
+    empty_rules_prompt: str = Field(min_length=1)
+    indexing: KbIndexingSettings
+    chunking: KbChunkingSettings
+    embeddings: KbEmbeddingsSettings
+    search: KbSearchSettings
+    qdrant: KbQdrantSettings
+    worker: KbWorkerSettings
+
+    @model_validator(mode="after")
+    def _check_fragment_fits_embedder(self) -> Self:
+        if self.chunking.max_chars > self.embeddings.max_input_chars:
+            raise ValueError("kb.chunking.max_chars больше kb.embeddings.max_input_chars")
+        return self
 
 
 class TemplateField(_Section):
@@ -260,6 +355,7 @@ class Settings(_Section):
     db_password: SecretStr
     secret_key: SecretBytes | None
     llm_api_key: SecretStr | None
+    qdrant_api_key: SecretStr | None
     max_model_len: int | None
 
     def require_llm_api_key(self) -> str:
@@ -267,6 +363,12 @@ class Settings(_Section):
         if self.llm_api_key is None:
             raise ConfigError("Не задана переменная окружения PORTAL_LLM_API_KEY")
         return self.llm_api_key.get_secret_value()
+
+    def require_qdrant_api_key(self) -> str:
+        """Вернуть ключ `QDRANT_API_KEY` или отказать, если он не задан или пуст."""
+        if self.qdrant_api_key is None:
+            raise ConfigError("Не задана переменная окружения QDRANT_API_KEY")
+        return self.qdrant_api_key.get_secret_value()
 
     def require_max_model_len(self) -> int:
         """Вернуть контекст модели `MAX_MODEL_LEN`; запасного значения нет (§13.5)."""
@@ -351,6 +453,7 @@ def load_settings(
         raise ConfigError("Не задана переменная окружения PORTAL_DB_PASSWORD")
     secret_key = environ.get("PORTAL_SECRET_KEY")
     llm_api_key = environ.get("PORTAL_LLM_API_KEY", "").strip()
+    qdrant_api_key = environ.get("QDRANT_API_KEY", "").strip()
 
     try:
         passwords_file = str(data["auth"]["password"]["common_passwords_file"])
@@ -363,6 +466,7 @@ def load_settings(
             db_password=SecretStr(db_password),
             secret_key=SecretBytes(_decode_secret_key(secret_key)) if secret_key else None,
             llm_api_key=SecretStr(llm_api_key) if llm_api_key else None,
+            qdrant_api_key=SecretStr(qdrant_api_key) if qdrant_api_key else None,
             max_model_len=_parse_max_model_len(environ.get("MAX_MODEL_LEN")),
         )
     except ValueError as error:

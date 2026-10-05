@@ -10,21 +10,26 @@ export function DataTable({ children }: { children: React.ReactNode }) {
 }
 
 interface SortableHeaderProps {
+  /** Список отсортирован по этому столбцу; по умолчанию — да (таблица с одним сортируемым столбцом). */
+  active?: boolean;
   order: SortOrder;
   onToggle: () => void;
   children: React.ReactNode;
 }
 
 /** Сортируемый заголовок столбца: кнопка в `<th>` с `aria-sort` (концепция §9). */
-export function SortableHeader({ order, onToggle, children }: SortableHeaderProps) {
+export function SortableHeader({ active = true, order, onToggle, children }: SortableHeaderProps) {
   const Icon = order === 'asc' ? IconArrowADownRegular16 : IconArrowAUpRegular16;
+  const sort = order === 'asc' ? 'ascending' : 'descending';
   return (
-    <th scope="col" aria-sort={order === 'asc' ? 'ascending' : 'descending'}>
+    <th scope="col" aria-sort={active ? sort : 'none'}>
       <button type="button" className={styles.sort} onClick={onToggle}>
         {children}
-        <span aria-hidden="true" className={styles.sortIcon}>
-          <Icon />
-        </span>
+        {active && (
+          <span aria-hidden="true" className={styles.sortIcon}>
+            <Icon />
+          </span>
+        )}
       </button>
     </th>
   );

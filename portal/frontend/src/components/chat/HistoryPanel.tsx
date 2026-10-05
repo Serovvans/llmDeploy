@@ -6,6 +6,7 @@ import type { Dialog } from '../../api/types';
 import { historyGroup, type ChatState, type HistoryGroup } from '../../chat/state';
 import { texts } from '../../texts';
 import { Notice } from '../Notice';
+import { TitleHint } from '../TitleHint';
 import styles from './HistoryPanel.module.css';
 
 const t = texts.chat;
@@ -60,11 +61,11 @@ export function HistoryPanel({ history, onNewChat, onRename, onRemove, onShowMor
                       const title = dialog.title ?? t.newChat;
                       return (
                         <li key={dialog.id} className={styles.item} data-opener={`history-${dialog.id}`}>
-                          <Hint text={title} pos="right">
+                          <TitleHint text={title} pos="right">
                             <NavLink to={`/chat/${dialog.id}`} className={rowClass}>
                               {title}
                             </NavLink>
-                          </Hint>
+                          </TitleHint>
                           <span className={styles.kebab}>
                             <Hint text={texts.users.actions}>
                               <Kebab aria-label={`${texts.users.actions}: ${title}`}>

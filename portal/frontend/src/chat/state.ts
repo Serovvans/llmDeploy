@@ -1,6 +1,7 @@
 /** Состояние чата: история, сообщения диалогов, идущие ответы и черновики панели запроса. Чистые функции. */
 import type { StreamEvent } from '../api/stream';
-import type { Attachment, Dialog, Message } from '../api/types';
+import type { Attachment, Dialog, Message, Source } from '../api/types';
+import { footnoteNumbers } from './footnotes';
 
 /** Сообщение на экране: `error_message` — текст сервера для кода, которого нет в словаре (только из потока). */
 export interface ChatMessage extends Message {
@@ -9,9 +10,12 @@ export interface ChatMessage extends Message {
 
 /** Ответ, который формируется в этой вкладке. */
 export interface Generation {
-  phase: 'sending' | 'thinking' | 'answering';
+  /** `preparing` — поиск закончен, текста ещё нет: к «Отправляю…» строка состояния не возвращается. */
+  phase: 'sending' | 'searching' | 'preparing' | 'thinking' | 'answering';
   startedAt: number;
   reasoningStartedAt: number | null;
+  /** Всё найденное в базе знаний (событие `sources`); под ответом остаются только упомянутые в тексте. */
+  found: Source[] | null;
 }
 
 export interface DialogView {
@@ -105,10 +109,24 @@ function localMessage(role: 'user' | 'assistant', now: number, patch: Partial<Ch
     reasoning: null,
     reasoning_seconds: null,
     attachments: [],
+    sources: null,
+    sources_found: null,
     dropped_messages: 0,
     created_at: new Date(now).toISOString(),
     ...patch,
   };
+}
+
+/**
+ * Источники завершённого ответа — только те из найденных, на которые в тексте есть сноска;
+ * так же их сохраняет сервер, в том числе у остановленного и оборванного ответа (концепция §4.3).
+ */
+function withCitedSources(answer: ChatMessage, generation: Generation): ChatMessage {
+  if (generation.found === null) {
+    return answer;
+  }
+  const cited = footnoteNumbers(answer.content);
+  return { ...answer, sources: generation.found.filter((source) => cited.has(source.n)) };
 }
 
 /** Применяет событие потока к диалогу (контракт §6.2). Размышления и текст принимаются в любом чередовании. */
@@ -127,6 +145,13 @@ export function applyStreamEvent(view: DialogView, event: StreamEvent, now: numb
       });
       return { ...view, messages };
     }
+    case 'search_started':
+      return { ...view, generation: { ...generation, phase: 'searching' } };
+    case 'sources':
+      return {
+        ...withLastAnswer(view, (answer) => ({ ...answer, sources_found: event.sources.length })),
+        generation: { ...generation, phase: 'preparing', found: event.sources },
+      };
     case 'context_truncated':
       return withLastAnswer(view, (answer) => ({ ...answer, dropped_messages: event.dropped_messages }));
     case 'reasoning_delta':
@@ -153,11 +178,14 @@ export function applyStreamEvent(view: DialogView, event: StreamEvent, now: numb
         generation: { ...generation, phase: 'answering' },
       };
     case 'done':
-      return { ...withLastAnswer(view, (answer) => ({ ...answer, status: event.status })), generation: null };
+      return {
+        ...withLastAnswer(view, (answer) => ({ ...withCitedSources(answer, generation), status: event.status })),
+        generation: null,
+      };
     case 'error':
       return {
         ...withLastAnswer(view, (answer) => ({
-          ...answer,
+          ...withCitedSources(answer, generation),
           status: 'error',
           error_code: event.code,
           error_message: event.message,
@@ -245,7 +273,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ...view,
           status: 'ready',
           messages: [...kept, ...question, localMessage('assistant', action.now, {})],
-          generation: { phase: 'sending', startedAt: action.now, reasoningStartedAt: null },
+          generation: { phase: 'sending', startedAt: action.now, reasoningStartedAt: null, found: null },
         };
       });
     case 'streamEvent': {
@@ -260,7 +288,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'generationStopped':
       return withView(state, action.id, (view) =>
         view.generation
-          ? { ...withLastAnswer(view, (answer) => ({ ...answer, status: 'stopped' })), generation: null }
+          ? {
+              ...withLastAnswer(view, (answer) => ({
+                ...withCitedSources(answer, view.generation as Generation),
+                status: 'stopped',
+              })),
+              generation: null,
+            }
           : view,
       );
     case 'generationRejected':

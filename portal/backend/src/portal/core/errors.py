@@ -101,6 +101,23 @@ def unsupported_file_type() -> AppError:
     return AppError(415, "unsupported_file_type", "Файлы такого типа не принимаются.")
 
 
+def file_unreadable() -> AppError:
+    """Файл не открывается (§1.5)."""
+    return AppError(
+        422, "file_unreadable", "Файл не удалось открыть: он повреждён или защищён паролем."
+    )
+
+
+def too_many_pages(max_pages: int) -> AppError:
+    """В PDF больше страниц, чем разрешено его области (§1.5)."""
+    return AppError(
+        422,
+        "too_many_pages",
+        f"В документе больше {max_pages} страниц.",
+        details={"max_pages": max_pages},
+    )
+
+
 def validation_error(fields: Sequence[FieldError]) -> AppError:
     """Ошибка в полях запроса."""
     return AppError(422, "validation_error", "Проверьте заполнение полей.", fields=fields)

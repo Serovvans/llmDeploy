@@ -14,6 +14,7 @@ ENVIRON = {
     "PORTAL_DB_PASSWORD": "db-secret",
     "PORTAL_SECRET_KEY": SECRET_KEY,
     "PORTAL_LLM_API_KEY": "sk-bf-secret",
+    "QDRANT_API_KEY": "qdrant-secret",
     "MAX_MODEL_LEN": "65536",
 }
 NO_OVERRIDE = Path("/nonexistent/config.override.yaml")
@@ -136,6 +137,7 @@ def test_chat_start_values_match_the_contract() -> None:
         4096, 16384,
     )  # fmt: skip
     assert str(settings.files.root) == "/data/files"
+    assert settings.files.text_layer_min_valid_share == 0.8
     assert settings.require_llm_api_key() == "sk-bf-secret"
     assert settings.require_max_model_len() == 65536
     assert "sk-bf-secret" not in repr(settings)
@@ -148,10 +150,12 @@ def test_chat_start_values_match_the_contract() -> None:
         ("PORTAL_LLM_API_KEY", ""),
         ("PORTAL_LLM_API_KEY", "   "),
         ("MAX_MODEL_LEN", None),
+        ("QDRANT_API_KEY", None),
+        ("QDRANT_API_KEY", ""),
     ],
 )
 def test_serve_refuses_to_start_without_model_settings(variable: str, value: str | None) -> None:
-    """Без ключа портала и контекста модели не стартует только `serve` (§13.5)."""
+    """Без ключа портала, ключа Qdrant и контекста модели не стартует только `serve` (§13.5)."""
     environ = {name: text for name, text in ENVIRON.items() if name != variable}
     if value is not None:
         environ[variable] = value
@@ -179,3 +183,38 @@ def test_page_raster_side_must_fit_the_pixel_limit(tmp_path: Path) -> None:
         load_settings(
             ENVIRON, CONFIG_DIR, _override(tmp_path, {"files": {"image_max_pixels": 1_000_000}})
         )
+
+
+def test_knowledge_base_configuration_has_contract_start_values() -> None:
+    """Стартовые значения §13.6 для базы знаний, распознавания и очереди."""
+    settings = load_settings(ENVIRON, CONFIG_DIR, NO_OVERRIDE)
+    kb, llm = settings.kb, settings.llm
+    assert (kb.document_max_bytes, kb.document_max_pages) == (50 * 1024 * 1024, 500)
+    assert (kb.search.top_k, kb.search.prefetch_limit, kb.search.lexical_slots) == (8, 40, 3)
+    assert (kb.context_max_tokens, kb.embeddings.dimension) == (8000, 1024)
+    worker = kb.worker
+    assert (worker.concurrency, worker.max_attempts, worker.lease_seconds) == (1, 8, 300)
+    assert (worker.retry_base_seconds, worker.retry_max_seconds) == (60, 1800)
+    assert (kb.qdrant.url, kb.qdrant.collection) == ("http://qdrant:6333", "kb_fragments")
+    assert (llm.embedding_model, llm.recognition_max_tokens) == ("embeddings", 4096)
+    assert llm.recognition_parallel_requests == 2
+    assert settings.require_qdrant_api_key() == "qdrant-secret"
+    assert "qdrant-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "kb",
+    [
+        {"chunking": {"overlap_chars": 700}},
+        {"chunking": {"max_chars": 9000}},
+        {"worker": {"heartbeat_stale_seconds": 5}},
+        {"worker": {"concurrency": 0}},
+        {"search": {"top_k": 0}},
+        {"search": {"lexical_slots": 9}},
+    ],
+)
+def test_inconsistent_knowledge_base_settings_stop_startup(
+    tmp_path: Path, kb: dict[str, object]
+) -> None:
+    with pytest.raises(ConfigError):
+        load_settings(ENVIRON, CONFIG_DIR, _override(tmp_path, {"kb": kb}))

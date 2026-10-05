@@ -1,0 +1,29 @@
+.badge {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.icon {
+  display: flex;
+}
+
+.queued {
+  color: var(--p-text-muted);
+}
+
+.error {
+  color: var(--p-error-text);
+}
+
+.detail {
+  max-width: 280px;
+  color: var(--p-text-muted);
+}

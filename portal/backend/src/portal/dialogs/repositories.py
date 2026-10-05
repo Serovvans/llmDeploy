@@ -1,6 +1,6 @@
 """Хранилище диалогов на SQLAlchemy Core; условие владельца — в каждом запросе."""
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -196,6 +196,8 @@ class SqlDialogRepository:
         error_code: str | None,
         reasoning: str | None,
         reasoning_seconds: int | None,
+        sources: Sequence[Mapping[str, Any]] | None,
+        sources_found: int | None,
         dropped_messages: int,
     ) -> None:
         """Сохранить ответ с итоговым состоянием."""
@@ -208,8 +210,22 @@ class SqlDialogRepository:
                 error_code=error_code,
                 reasoning=reasoning,
                 reasoning_seconds=reasoning_seconds,
+                sources=None if sources is None else [dict(source) for source in sources],
+                sources_found=sources_found,
                 dropped_messages=dropped_messages,
             )
+        )
+
+    async def interrupt_answer(self, owner_id: UUID, message_id: UUID) -> None:
+        """Перевести ответ `streaming`, который никто не формирует, в `error`/`interrupted`."""
+        await self._connection.execute(
+            sa.update(messages)
+            .where(
+                messages.c.id == message_id,
+                messages.c.dialog_id.in_(_owned(owner_id)),
+                messages.c.status == "streaming",
+            )
+            .values(status="error", error_code="interrupted")
         )
 
     async def reset_streaming(self) -> None:

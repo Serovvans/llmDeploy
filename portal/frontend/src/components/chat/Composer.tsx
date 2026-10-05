@@ -1,10 +1,10 @@
 import { IconAttachPaperclipRegular16 } from '@skbkontur/icons/IconAttachPaperclipRegular16';
 import { IconMediaUiAStopRegular16 } from '@skbkontur/icons/IconMediaUiAStopRegular16';
-import { Button, Hint, Switcher, Textarea } from '@skbkontur/react-ui';
+import { Button, Hint, Select, Switcher, Textarea } from '@skbkontur/react-ui';
 import { useEffect, useId, useRef } from 'react';
 
 import { attachmentFileUrl } from '../../api/client';
-import type { AnswerMode } from '../../api/types';
+import type { AnswerMode, Knowledge } from '../../api/types';
 import type { Draft } from '../../chat/state';
 import { texts } from '../../texts';
 import { AttachmentChip } from './AttachmentChip';
@@ -17,17 +17,25 @@ const MODES = [
   { value: 'thorough', label: t.modeThorough },
 ];
 
+const KNOWLEDGE: [Knowledge, string][] = [
+  ['none', t.knowledge.none],
+  ['shared', t.knowledge.shared],
+  ['shared_and_personal', t.knowledge.shared_and_personal],
+];
+
 interface ComposerProps {
   /** Чат, к которому относятся загруженные вложения; `null`, пока чат не создан. */
   dialogId: string | null;
   draft: Draft;
   mode: AnswerMode;
+  knowledge: Knowledge;
   /** `generating` — ответ идёт в этой вкладке (есть «Остановить»); `waiting` — формируется в другой. */
   answer: 'idle' | 'generating' | 'waiting';
   /** Подсказка на кнопке «Прикрепить» и расширения для выбора файла; `null`, пока нет конфигурации. */
   attach: { hint: string; extensions: string[] } | null;
   onTextChange: (text: string) => void;
   onModeChange: (mode: AnswerMode) => void;
+  onKnowledgeChange: (knowledge: Knowledge) => void;
   onSend: () => void;
   onStop: () => void;
   onNotice: (notice: string) => void;
@@ -137,6 +145,14 @@ export function Composer(props: ComposerProps) {
               items={MODES}
               value={props.mode}
               onValueChange={(value) => props.onModeChange(value === 'thorough' ? 'thorough' : 'fast')}
+            />
+          </Hint>
+          <Hint text={t.knowledgeHint} maxWidth={320}>
+            <Select<Knowledge, string>
+              items={KNOWLEDGE}
+              value={props.knowledge}
+              onValueChange={props.onKnowledgeChange}
+              renderValue={(value) => t.knowledgeChosen[value]}
             />
           </Hint>
           <span className={styles.spacer} />

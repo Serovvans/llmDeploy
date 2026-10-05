@@ -1,13 +1,14 @@
 import { Hint, Input, Kebab, Loader, MenuItem, SingleToast } from '@skbkontur/react-ui';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
-import type { Dialog } from '../api/types';
+import type { Dialog, Source } from '../api/types';
 import { useChat } from '../chat/ChatProvider';
 import { attachHint } from '../chat/files';
 import { EMPTY_DRAFT, NEW_CHAT } from '../chat/state';
 import { Composer } from '../components/chat/Composer';
 import { HistoryPanel } from '../components/chat/HistoryPanel';
+import { useDocumentViewer } from '../components/kb/DocumentViewer';
 import { MessageList } from '../components/chat/MessageList';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { EmptyState } from '../components/EmptyState';
@@ -104,6 +105,20 @@ export function ChatScreen() {
   const [removing, setRemoving] = useState<Dialog | null>(null);
   const [removePending, setRemovePending] = useState(false);
   const rememberOpener = useFocusReturn(removing !== null || renamingId !== null);
+  const viewer = useDocumentViewer();
+  const { open: openViewer, close: closeViewer } = viewer;
+
+  const openSource = useCallback(
+    (source: Source, openerId: string) =>
+      openViewer(
+        { documentId: source.document_id, title: source.document_title, fragmentId: source.fragment_id },
+        `[data-opener="${openerId}"]`,
+      ),
+    [openViewer],
+  );
+
+  // Просмотр относится к открытому чату: при переходе в другой он закрывается.
+  useEffect(() => closeViewer, [id, closeViewer]);
 
   const key = id ?? NEW_CHAT;
   const view = id ? chat.state.dialogs[id] : undefined;
@@ -201,6 +216,8 @@ export function ChatScreen() {
         view={view}
         onRegenerate={() => chat.regenerate(id)}
         onLoadOlder={() => chat.loadOlder(id)}
+        onOpenSource={openSource}
+        openingFragment={viewer.opening?.fragmentId ?? null}
       />
     );
   }
@@ -209,7 +226,9 @@ export function ChatScreen() {
   const lastAnswer = last?.role === 'assistant' ? last : undefined;
 
   return (
-    <div className={styles.screen}>
+    <div className={viewer.isOpen ? `${styles.screen} ${styles.withViewer}` : styles.screen}>
+      {/* Пока открыт просмотр, панель раздела скрыта: ответ и первоисточник видны одновременно (§3.3). */}
+      {viewer.isOpen || (
       <HistoryPanel
         history={chat.state.history}
         onNewChat={newChat}
@@ -218,6 +237,7 @@ export function ChatScreen() {
         onShowMore={() => chat.loadHistory(true)}
         onRetry={() => chat.loadHistory(false)}
       />
+      )}
       <div className={styles.area}>
         {dialog && renamingId === dialog.id ? (
           <TitleEditor
@@ -255,10 +275,12 @@ export function ChatScreen() {
               dialogId={id ?? null}
               draft={chat.state.drafts[key] ?? EMPTY_DRAFT}
               mode={chat.mode}
+              knowledge={chat.knowledge}
               answer={view?.generation ? 'generating' : formingElsewhere ? 'waiting' : 'idle'}
               attach={config ? { hint: attachHint(config.chat), extensions: config.chat.attachment_extensions } : null}
               onTextChange={(text) => chat.setText(key, text)}
               onModeChange={chat.setMode}
+              onKnowledgeChange={chat.setKnowledge}
               onSend={() => chat.send(key, onCreated)}
               onStop={() => id && chat.stop(id)}
               onNotice={(notice) => chat.setNotice(key, notice)}
@@ -269,6 +291,7 @@ export function ChatScreen() {
           </>
         )}
       </div>
+      {viewer.element}
       {removing && (
         <ConfirmModal
           title={t.remove.title(removing.title ?? t.newChat)}

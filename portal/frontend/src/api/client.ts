@@ -10,6 +10,9 @@ import type {
   CursorPage,
   Dialog,
   DialogKind,
+  DocumentText,
+  KbDocument,
+  KbScope,
   Message,
   ErrorBody,
   FieldError,
@@ -300,7 +303,58 @@ export const api = {
 
   deleteAttachment: (dialogId: string, attachmentId: string) =>
     request<undefined>('DELETE', `/api/dialogs/${dialogId}/attachments/${attachmentId}`),
+
+  listKbDocuments: ({ scope, page, q, sort, order }: KbListQuery) => {
+    const params = new URLSearchParams({ scope, page: String(page), page_size: String(KB_PAGE_SIZE), sort, order });
+    if (q) {
+      params.set('q', q);
+    }
+    return request<Page<KbDocument>>('GET', `/api/kb/documents?${params.toString()}`);
+  },
+
+  uploadKbDocument: async (file: File, scope: KbScope, isCogis: boolean) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('scope', scope);
+    form.append('is_cogis', String(isCogis));
+    const response = await send('POST', '/api/kb/documents', { form });
+    return (await response.json()) as KbDocument;
+  },
+
+  getKbDocument: (id: string) => request<KbDocument>('GET', `/api/kb/documents/${id}`),
+
+  deleteKbDocument: (id: string) => request<undefined>('DELETE', `/api/kb/documents/${id}`),
+
+  retryKbDocument: (id: string) => request<KbDocument>('POST', `/api/kb/documents/${id}/retry`),
+
+  /** Текст страницы: по номеру `page`, иначе страница фрагмента `fragmentId`, иначе первая (контракт §8.3). */
+  getKbDocumentText: (id: string, target: { page?: number; fragmentId?: string }) => {
+    const params = new URLSearchParams();
+    if (target.page !== undefined) {
+      params.set('page', String(target.page));
+    }
+    if (target.fragmentId) {
+      params.set('fragment_id', target.fragmentId);
+    }
+    const query = params.toString();
+    return request<DocumentText>('GET', `/api/kb/documents/${id}/text${query ? `?${query}` : ''}`);
+  },
 };
+
+export const KB_PAGE_SIZE = 50;
+
+export interface KbListQuery {
+  scope: KbScope;
+  page: number;
+  q: string;
+  sort: 'created_at' | 'title';
+  order: SortOrder;
+}
+
+/** Адрес оригинала документа базы знаний; `page` — открыть PDF на странице (контракт §8.2). */
+export function kbFileUrl(documentId: string, page: number | null): string {
+  return `/api/kb/documents/${documentId}/file${page === null ? '' : `#page=${page}`}`;
+}
 
 /** Адрес файла вложения на портале: оригинал и миниатюра изображения (контракт §5.8). */
 export function attachmentFileUrl(dialogId: string, attachmentId: string): string {

@@ -20,9 +20,10 @@ from PIL import Image, UnidentifiedImageError
 
 from portal.core.settings import FilesSettings
 from portal.files.ports import DOCX, MediaType, UnreadableDocumentError
-from portal.files.text import decode_text
+from portal.files.text import looks_like_text, read_text
 
 _PDF_LOCK = threading.Lock()
+_EXPECTED_SIGNS = frozenset("«»№§°")
 _RASTER_LOCK = threading.Lock()
 _XML_SUFFIXES = (".xml", ".rels")
 _SIGNATURES: tuple[tuple[bytes, MediaType], ...] = (
@@ -35,9 +36,24 @@ _DOCX_MAIN_PART = "word/document.xml"
 _IMAGE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG"}
 
 
+def _is_expected(char: str) -> bool:
+    """Символ, обычный для русского или английского документа (перечень — §1.5)."""
+    code = ord(char)
+    return (
+        0x20 <= code <= 0x7E  # латинские буквы, цифры и знаки ASCII
+        or 0x0400 <= code <= 0x04FF  # кириллица
+        or 0x2000 <= code <= 0x206F  # общая пунктуация: тире, кавычки, многоточие
+        or char in _EXPECTED_SIGNS
+        or char.isspace()
+    )
+
+
 @contextmanager
 def _pdf(path: Path) -> Iterator[pdfium.PdfDocument]:
     """Открыть PDF и закрыть его явно, под той же блокировкой.
+
+    Любая ошибка PDFium — при открытии или на отдельной странице — становится
+    `UnreadableDocumentError`.
 
     Объекты PDFium нельзя оставлять сборщику мусора: он освободил бы их в произвольном
     потоке, в обход блокировки.
@@ -48,6 +64,10 @@ def _pdf(path: Path) -> Iterator[pdfium.PdfDocument]:
         raise UnreadableDocumentError from error
     try:
         yield document
+    except pdfium.PdfiumError as error:
+        # Страница, которую PDFium не может прочитать или отрисовать, — такой же
+        # нечитаемый файл: повтор ничего не изменит. Сбой ввода-вывода сюда не попадает.
+        raise UnreadableDocumentError from error
     finally:
         document.close()
 
@@ -84,7 +104,7 @@ class ContentDocumentReader:
             with zipfile.ZipFile(path) as archive:
                 return DOCX if _DOCX_MAIN_PART in archive.namelist() else None
         text_type = _TEXT_EXTENSIONS.get(Path(file_name).suffix.lower())
-        if text_type is not None and decode_text(path.read_bytes()) is not None:
+        if text_type is not None and looks_like_text(path):
             return text_type
         return None
 
@@ -114,15 +134,15 @@ class ContentDocumentReader:
                     text_page.close()
                 finally:
                     pdf_page.close()
-            return layer if len(layer) >= self._settings.text_layer_min_chars else None
+            return layer if self._usable_layer(layer) else None
         if media_type in _IMAGE_FORMATS:
             return None
         if media_type == DOCX:
             return self._docx_text(path)
-        text = decode_text(path.read_bytes())
+        text = read_text(path, self._text_max_chars)
         if text is None:
             raise UnreadableDocumentError
-        return text[: self._text_max_chars]
+        return text
 
     def page_image(self, path: Path, media_type: MediaType, page: int) -> bytes:
         """Изображение страницы в PNG, не больше `render_max_side_px` по длинной стороне."""
@@ -145,6 +165,17 @@ class ContentDocumentReader:
         with image:
             image.save(buffer, format="PNG")
         return buffer.getvalue()
+
+    def _usable_layer(self, layer: str) -> bool:
+        """Годен ли текстовый слой страницы; негодный — страница считается сканом (§1.5).
+
+        Слой негоден, если он короче `text_layer_min_chars` или в нём слишком мало
+        ожидаемых символов. Мусор, составленный из обычных букв, так не ловится.
+        """
+        if len(layer) < self._settings.text_layer_min_chars:
+            return False
+        expected = sum(1 for char in layer if _is_expected(char))
+        return expected / len(layer) >= self._settings.text_layer_min_valid_share
 
     def _render_scale(self, pdf_page: pdfium.PdfPage) -> float:
         """Масштаб отрисовки: по размеру страницы, а не по одной настройке.

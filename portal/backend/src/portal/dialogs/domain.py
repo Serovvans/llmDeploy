@@ -30,7 +30,12 @@ class Dialog:
 
 @dataclass
 class Message:
-    """Вопрос или ответ; `params` — параметры запроса у вопроса (в API не отдаются)."""
+    """Вопрос или ответ.
+
+    `params` — параметры запроса у вопроса (в API не отдаются). `sources` — снимок
+    источников, на которые в ответе есть сноска; `sources_found` — сколько фрагментов
+    нашёл поиск; оба `None`, если поиск в базе знаний не выполнялся (§5.1).
+    """
 
     id: UUID
     dialog_id: UUID
@@ -42,6 +47,8 @@ class Message:
     reasoning: str | None
     reasoning_seconds: int | None
     params: dict[str, Any]
+    sources: list[dict[str, Any]] | None
+    sources_found: int | None
     dropped_messages: int
     created_at: datetime
 

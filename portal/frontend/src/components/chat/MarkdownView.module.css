@@ -115,3 +115,31 @@
     animation: none;
   }
 }
+
+/* Сноска: акцент нейтральный, поэтому её выделяет форма — скобки, моноширинные цифры, подчёркивание (§4.3). */
+.sourceMark {
+  margin: 0;
+  padding: 0 1px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--p-accent);
+  font-family: var(--p-font-mono);
+  font-size: 14px;
+  line-height: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.sourceMark:hover,
+.sourceMark:focus-visible,
+.sourceMarkActive {
+  background: var(--p-surface-3);
+}
+
+.sourceMark:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}

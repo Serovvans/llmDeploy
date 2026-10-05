@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image
@@ -14,7 +15,7 @@ from portal.core.settings import FilesSettings
 from portal.files.ports import DOCX, FileTooLargeError, UnreadableDocumentError
 from portal.files.reader import ContentDocumentReader
 from portal.files.storage import DiskFileStorage
-from portal.files.text import decode_text
+from portal.files.text import decode_text, looks_like_text, read_text, store_as_utf8
 from tests import samples
 
 pytestmark = pytest.mark.anyio
@@ -26,10 +27,11 @@ async def _chunks(*parts: bytes) -> AsyncIterator[bytes]:
 
 
 def _reader(
-    tmp_path: Path, *, text_max_chars: int | None = None, max_side: int = 1568, **overrides: int
+    tmp_path: Path, *, text_max_chars: int | None = None, max_side: int = 1568, **overrides: float
 ) -> ContentDocumentReader:
     values = {
         "text_layer_min_chars": 20,
+        "text_layer_min_valid_share": 0.8,
         "image_max_pixels": 10_000_000,
         "docx_max_unpacked_bytes": 1_000_000,
         "docx_max_xml_bytes": 1_000_000,
@@ -262,3 +264,127 @@ def test_rasters_are_unpacked_one_at_a_time_per_process(
     for thread in mixed:
         thread.join()
     assert state["open"] == 0 and 1 <= state["peak"] <= 2
+
+
+def test_text_files_are_never_read_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Тип определяется по началу файла, а читается не больше, чем нужно вызывающему."""
+    path = tmp_path / "большой.txt"
+    path.write_bytes(("я" * 5_000_000).encode())  # 10 МБ
+
+    def forbidden(self: Path) -> bytes:
+        raise AssertionError("файл прочитан целиком")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    opened = Path.open
+    volume = {"bytes": 0}
+
+    class Counting:
+        def __init__(self, file: Any) -> None:
+            self._file = file
+
+        def read(self, size: int = -1) -> bytes:
+            data: bytes = self._file.read(size)
+            volume["bytes"] += len(data)
+            return data
+
+        def __enter__(self) -> "Counting":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._file.close()
+
+    monkeypatch.setattr(Path, "open", lambda self, *args, **kwargs: Counting(opened(self, *args)))
+    reader = _reader(tmp_path, text_max_chars=1000)
+    assert reader.detect(path, "большой.txt") == "text/plain"
+    assert reader.page_text(path, "text/plain", 1) == "я" * 1000
+    assert volume["bytes"] < 100_000
+
+
+def test_text_detection_and_reading_by_parts(tmp_path: Path) -> None:
+    path = tmp_path / "file"
+    # Многобайтовый символ на границе прочитанной части ошибкой не считается.
+    path.write_bytes(b"a" + ("я" * 40_000).encode())
+    assert looks_like_text(path)
+    assert read_text(path, 10) == "a" + "я" * 9
+    assert read_text(path, None) == "a" + "я" * 40_000
+    path.write_bytes("Текст в старой кодировке".encode("cp1251"))
+    assert looks_like_text(path) and read_text(path, 5) == "Текст"
+    path.write_bytes(b"\x89binary\x00data")
+    assert not looks_like_text(path) and read_text(path, 5) is None
+
+
+def test_store_as_utf8_converts_by_parts_only_when_needed(tmp_path: Path) -> None:
+    path = tmp_path / "file"
+    utf8 = ("Привет " * 1000).encode()
+    path.write_bytes(utf8)
+    assert store_as_utf8(path) == len(utf8) and path.read_bytes() == utf8
+    path.write_bytes(("Привет " * 1000).encode("cp1251"))
+    assert store_as_utf8(path) == len(utf8) and path.read_bytes() == utf8
+    assert list(tmp_path.iterdir()) == [path]  # временного файла не осталось
+
+
+@pytest.mark.parametrize("method", ["get_textpage", "render"])
+def test_pdfium_failure_on_a_page_means_unreadable_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """Сбой PDFium на отдельной странице — постоянная ошибка файла, а не случайный сбой."""
+    import pypdfium2 as pdfium
+
+    reader = _reader(tmp_path)
+    path = tmp_path / "file"
+    path.write_bytes(samples.text_pdf([samples.TEXT_LAYER, ""]))
+
+    def broken(self: object, *args: object, **kwargs: object) -> None:
+        raise pdfium.PdfiumError("Failed to load page.")
+
+    monkeypatch.setattr(pdfium.PdfPage, method, broken)
+    call = reader.page_text if method == "get_textpage" else reader.page_image
+    with pytest.raises(UnreadableDocumentError):
+        call(path, "application/pdf", 1)
+    # Файл, пропавший с диска, — другое дело: это сбой ввода-вывода, его можно повторить.
+    with pytest.raises(OSError):
+        call(tmp_path / "missing", "application/pdf", 1)
+
+
+GARBAGE = "\u0e01\u0e2a\u0e14\u0e1f\u0e2b\u0e01\u0e14\u0e40\u0e49\u0e48" * 5  # нет ToUnicode
+
+
+@pytest.mark.parametrize(
+    ("layer", "usable"),
+    [
+        ("Постановление администрации города о предоставлении участка в аренду.", True),
+        ("Lease agreement No. 14-A dated 2024-03-01, parcel 77:01:0004012:345", True),
+        ("| 1 | 77:01:0004012:345 | 1 250,5 | 12.03.2024 | 49 | 100 % | +/- 3 |", True),
+        ("Выписка № 99/2024 — п. 3 §2 ст. 39.6 ЗК РФ; угол 45°, «Участок»…", True),
+        ("Площадь 1 250 м², допуск ±0,5 м; S = a × b, 12 м³", True),  # ², ±, ×, ³ — малая доля
+        ("Текст\u00a0с неразрывными\tпробелами\nи переводами строк, 2024 г.", True),
+        (GARBAGE, False),
+        ("\ufffd" * 40, False),
+        ("\x01\x02\x03\x04\x05" * 10, False),
+        # Ровно на границе: 80 % ожидаемых символов — годен, чуть меньше — нет.
+        ("а" * 80 + "\u0e01" * 20, True),
+        ("а" * 79 + "\u0e01" * 21, False),
+        # Короткая страница решается прежним порогом длины, доля уже не важна.
+        ("Стр. 7", False),
+        ("а" * 19, False),
+        ("а" * 20, True),
+    ],
+)
+def test_text_layer_usability(tmp_path: Path, layer: str, usable: bool) -> None:
+    assert _reader(tmp_path)._usable_layer(layer) is usable
+
+
+def test_page_with_garbage_layer_is_treated_as_a_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PDF без таблицы соответствия шрифта: вместо текста мусор — страница идёт как скан."""
+    import pypdfium2 as pdfium
+
+    reader = _reader(tmp_path)
+    path = tmp_path / "file"
+    path.write_bytes(samples.text_pdf([samples.TEXT_LAYER]))
+    assert reader.page_text(path, "application/pdf", 1) == samples.TEXT_LAYER
+    monkeypatch.setattr(pdfium.PdfTextPage, "count_chars", lambda self: len(GARBAGE))
+    monkeypatch.setattr(pdfium.PdfTextPage, "get_text_range", lambda self, *args: GARBAGE)
+    assert reader.page_text(path, "application/pdf", 1) is None
+    assert reader.page_image(path, "application/pdf", 1).startswith(b"\x89PNG")

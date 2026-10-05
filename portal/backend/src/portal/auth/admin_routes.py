@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 
 from portal.auth.schemas import (
     AdminUserOut,
@@ -12,22 +12,10 @@ from portal.auth.schemas import (
     CreateUserRequest,
     UpdateUserRequest,
 )
-from portal.core.access import Admin, ContainerDep
+from portal.core.access import Admin, ContainerDep, PageQueryDep
 from portal.core.errors import field_error, not_found, validation_error
-from portal.core.pagination import PageQuery, SortOrder
 
 router = APIRouter(prefix="/api/admin/users")
-
-
-def page_query(
-    page: Annotated[int, Query(ge=1)] = 1,
-    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
-    q: str | None = None,
-    sort: str | None = None,
-    order: SortOrder | None = None,
-) -> PageQuery:
-    """Параметры постраничной выдачи (§1.4)."""
-    return PageQuery(page=page, page_size=page_size, q=q, sort=sort, order=order)
 
 
 def user_id(id: str, _: Admin) -> UUID:
@@ -46,7 +34,7 @@ UserId = Annotated[UUID, Depends(user_id)]
 
 @router.get("")
 async def list_users(
-    admin: Admin, container: ContainerDep, query: Annotated[PageQuery, Depends(page_query)]
+    admin: Admin, container: ContainerDep, query: PageQueryDep
 ) -> AdminUserPageOut:
     """Страница учётных записей."""
     page = await container.admin.list_users(query)

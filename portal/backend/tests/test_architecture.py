@@ -9,6 +9,7 @@ SOURCE = Path(__file__).parent.parent / "src" / "portal"
 FORBIDDEN = {
     "fastapi", "starlette", "sqlalchemy", "httpx", "asyncpg", "alembic", "uvicorn",
     "argon2", "cryptography", "pyotp", "segno", "pypdfium2", "docx", "PIL",
+    "qdrant_client", "yaml",
 }  # fmt: skip
 INNER_MODULES = [
     "auth/domain.py",
@@ -24,8 +25,27 @@ INNER_MODULES = [
     "dialogs/errors.py",
     "dialogs/ports.py",
     "dialogs/context.py",
+    "dialogs/footnotes.py",
+    "files/names.py",
+    "files/text.py",
     "dialogs/service.py",
     "dialogs/generation.py",
+    "kb/domain.py",
+    "kb/ports.py",
+    "kb/store.py",
+    "kb/errors.py",
+    "kb/chunking.py",
+    "kb/lexical.py",
+    "kb/context.py",
+    "kb/retrying.py",
+    "kb/service.py",
+    "kb/retrieval.py",
+    "kb/indexing.py",
+    "kb/reindex.py",
+    "kb/recognizer.py",
+    "kb/evaluation.py",
+    "worker/loop.py",
+    "worker/health.py",
     "core/events.py",
     "core/validation.py",
     "core/errors.py",
@@ -42,6 +62,8 @@ INFRASTRUCTURE = {
     "portal.llm.bifrost", "portal.files.reader", "portal.files.storage",
     "portal.dialogs.repositories", "portal.dialogs.tables", "portal.dialogs.routes",
     "portal.dialogs.schemas",
+    "portal.kb.repositories", "portal.kb.tables", "portal.kb.routes", "portal.kb.schemas",
+    "portal.kb.qdrant", "portal.kb.embedder", "portal.kb.evalset",
 }  # fmt: skip
 
 

@@ -1,0 +1,48 @@
+.title {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  display: block;
+  margin-top: 4px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 160px;
+  padding-bottom: 24px;
+}
+
+.pages {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.recognized {
+  margin-bottom: 12px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.text {
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.mark {
+  border-radius: 2px;
+  background: var(--p-mark-bg);
+  color: var(--p-text);
+}

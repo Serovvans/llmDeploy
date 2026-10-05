@@ -4,10 +4,11 @@ import ipaddress
 from collections.abc import Awaitable, Callable
 from typing import Annotated, cast
 
-from fastapi import Depends, Request, Response
+from fastapi import Depends, Query, Request, Response
 
 from portal.core import errors
 from portal.core.container import Container
+from portal.core.pagination import PageQuery, SortOrder
 from portal.core.ports import CurrentUser, LoginStep, SessionInfo, SessionMissingError
 
 SESSION_COOKIE = "portal_session"
@@ -101,3 +102,17 @@ async def current_admin(user: Employee) -> CurrentUser:
 
 
 Admin = Annotated[CurrentUser, Depends(current_admin)]
+
+
+def page_query(
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+    q: str | None = None,
+    sort: str | None = None,
+    order: SortOrder | None = None,
+) -> PageQuery:
+    """Зависимость: параметры постраничной выдачи (§1.4)."""
+    return PageQuery(page=page, page_size=page_size, q=q, sort=sort, order=order)
+
+
+PageQueryDep = Annotated[PageQuery, Depends(page_query)]

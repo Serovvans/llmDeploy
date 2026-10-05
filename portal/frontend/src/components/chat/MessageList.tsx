@@ -2,10 +2,10 @@ import { IconArrowADownRegular16 } from '@skbkontur/icons/IconArrowADownRegular1
 import { IconArrowRoundSyncForwardRegular16 } from '@skbkontur/icons/IconArrowRoundSyncForwardRegular16';
 import { IconCopyRegular16 } from '@skbkontur/icons/IconCopyRegular16';
 import { Button, Link, Modal, ScrollContainer, Spinner } from '@skbkontur/react-ui';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import { attachmentFileUrl } from '../../api/client';
-import type { Attachment } from '../../api/types';
+import type { Attachment, Source } from '../../api/types';
 import { answerErrorText } from '../../chat/files';
 import type { ChatMessage, DialogView, Generation } from '../../chat/state';
 import { useCopy } from '../../hooks/useCopy';
@@ -13,8 +13,9 @@ import { useFocusReturn } from '../../hooks/useFocusReturn';
 import { texts } from '../../texts';
 import { Notice } from '../Notice';
 import { AttachmentChip, isImage } from './AttachmentChip';
-import { MarkdownView } from './MarkdownView';
+import { MarkdownView, type SourceLinks } from './MarkdownView';
 import styles from './MessageList.module.css';
+import { SourceCard } from './SourceCard';
 import { ThinkingBlock } from './ThinkingBlock';
 
 const t = texts.chat;
@@ -24,7 +25,8 @@ const NEAR_BOTTOM_PX = 48;
 
 /** Через 20 секунд без текста и размышлений к строке состояния добавляется пояснение. */
 function useBusy(generation: Generation | null): boolean {
-  const waitingSince = generation?.phase === 'sending' ? generation.startedAt : null;
+  const waiting = generation && generation.phase !== 'thinking' && generation.phase !== 'answering';
+  const waitingSince = waiting ? generation.startedAt : null;
   const [busySince, setBusySince] = useState<number | null>(null);
   useEffect(() => {
     if (waitingSince === null) {
@@ -36,27 +38,49 @@ function useBusy(generation: Generation | null): boolean {
   return waitingSince !== null && busySince === waitingSince;
 }
 
+/** Открыть просмотр источника; `openerId` — куда вернуть фокус (атрибут `data-opener`). */
+type OpenSource = (source: Source, openerId: string) => void;
+
 interface AnswerProps {
   message: ChatMessage;
   /** Ответ формируется в этой вкладке — только у последнего сообщения. */
   generation: Generation | null;
   isLast: boolean;
   onRegenerate: () => void;
+  onOpenSource: OpenSource;
+  openingFragment: string | null;
 }
 
-function Answer({ message, generation, isLast, onRegenerate }: AnswerProps) {
+function Answer({ message, generation, isLast, onRegenerate, onOpenSource, openingFragment }: AnswerProps) {
   const copy = useCopy();
   const busy = useBusy(generation);
   const hasText = message.content.length > 0;
   const formingElsewhere = message.status === 'streaming' && !generation;
+  const [activeSource, setActiveSource] = useState<number | null>(null);
+  const answerId = useId();
+  // Карточки и кнопки-сноски появляются по завершении ответа, уже отобранными (концепция §4.3).
+  const sources = message.status === 'streaming' ? null : message.sources;
+  const links = useMemo<SourceLinks | undefined>(
+    () =>
+      sources && sources.length > 0
+        ? {
+            sources,
+            active: activeSource,
+            openerId: (n) => `${answerId}-mark-${n}`,
+            onActive: setActiveSource,
+            onOpen: onOpenSource,
+          }
+        : undefined,
+    [sources, activeSource, answerId, onOpenSource],
+  );
 
   return (
     <div className={styles.answer}>
-      {generation?.phase === 'sending' && (
+      {generation && generation.phase !== 'thinking' && generation.phase !== 'answering' && (
         <p className={styles.state}>
           <Spinner type="mini" caption={null} />
           <span>
-            {t.sending}
+            {t[generation.phase]}
             {busy && ` ${t.busy}`}
           </span>
         </p>
@@ -69,7 +93,32 @@ function Answer({ message, generation, isLast, onRegenerate }: AnswerProps) {
           startedAt={generation?.phase === 'thinking' ? generation.reasoningStartedAt : null}
         />
       )}
-      {hasText && !formingElsewhere && <MarkdownView text={message.content} streaming={generation !== null} />}
+      {hasText && !formingElsewhere && (
+        <MarkdownView text={message.content} streaming={generation !== null} links={links} />
+      )}
+      {sources && sources.length > 0 && (
+        <section className={styles.sources}>
+          <h2 className={styles.sourcesTitle}>{t.sources.title}</h2>
+          <div className={styles.sourceCards}>
+            {sources.map((source) => (
+              <SourceCard
+                key={source.n}
+                source={source}
+                active={activeSource === source.n}
+                opening={openingFragment === source.fragment_id}
+                openerId={`${answerId}-card-${source.n}`}
+                onActive={setActiveSource}
+                onOpen={() => onOpenSource(source, `${answerId}-card-${source.n}`)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+      {/* Ноль найденного виден сразу по событию `sources`; «нет ссылок» — по завершении ответа. */}
+      {message.sources_found === 0 && <p className={styles.note}>{t.sources.nothingFound}</p>}
+      {sources && sources.length === 0 && (message.sources_found ?? 0) > 0 && (
+        <p className={styles.note}>{t.sources.notCited}</p>
+      )}
       {formingElsewhere && (
         <p className={styles.state}>
           <Spinner type="mini" caption={null} />
@@ -106,7 +155,13 @@ function Answer({ message, generation, isLast, onRegenerate }: AnswerProps) {
 /** Что сообщает экранному чтению область состояния: фазы, а не текст ответа по словам (концепция §9). */
 function phaseText(view: DialogView): string {
   if (view.generation) {
-    const phases = { sending: t.sending, thinking: t.phase.thinking, answering: t.phase.answering };
+    const phases = {
+      sending: t.sending,
+      searching: t.phase.searching,
+      preparing: t.phase.preparing,
+      thinking: t.phase.thinking,
+      answering: t.phase.answering,
+    };
     return phases[view.generation.phase];
   }
   const last = view.messages.at(-1);
@@ -124,10 +179,14 @@ interface MessageListProps {
   view: DialogView;
   onRegenerate: () => void;
   onLoadOlder: () => void;
+  onOpenSource: OpenSource;
+  /** Цитата, просмотр которой сейчас открывается: на её карточке — индикатор. */
+  openingFragment: string | null;
 }
 
 /** Лента-протокол (концепция §4.2): слева пометка «Вы» или «Ответ», вопрос — на подложке, ответ — текстом. */
-export function MessageList({ dialogId, view, onRegenerate, onLoadOlder }: MessageListProps) {
+export function MessageList(props: MessageListProps) {
+  const { dialogId, view, onRegenerate, onLoadOlder, onOpenSource, openingFragment } = props;
   const scroll = useRef<ScrollContainer>(null);
   const [following, setFollowing] = useState(true);
   const [image, setImage] = useState<Attachment | null>(null);
@@ -192,6 +251,8 @@ export function MessageList({ dialogId, view, onRegenerate, onLoadOlder }: Messa
                   generation={index === view.messages.length - 1 ? view.generation : null}
                   isLast={index === view.messages.length - 1}
                   onRegenerate={onRegenerate}
+                  onOpenSource={onOpenSource}
+                  openingFragment={openingFragment}
                 />
               )}
             </div>

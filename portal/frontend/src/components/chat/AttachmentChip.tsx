@@ -1,6 +1,8 @@
+import { IconDocTextRegular16 } from '@skbkontur/icons/IconDocTextRegular16';
 import { IconWarningCircleRegular16 } from '@skbkontur/icons/IconWarningCircleRegular16';
 import { IconXRegular16 } from '@skbkontur/icons/IconXRegular16';
 import { Link, Spinner } from '@skbkontur/react-ui';
+import { useState } from 'react';
 
 import type { Attachment } from '../../api/types';
 import { texts } from '../../texts';
@@ -22,6 +24,35 @@ export function isImage(attachment: Attachment): boolean {
   return attachment.media_type.startsWith('image/');
 }
 
+const THUMBNAIL_PX = 48;
+
+/**
+ * Миниатюра — оригинал файла в рамке 48×48 (концепция §4.1): запрашивается, когда сообщение подходит
+ * к видимой области; заданные размеры не дают ленте прыгать. Не загрузившаяся заменяется значком файла.
+ */
+function Thumbnail({ src }: { src: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <span className={styles.thumbnailFailed} aria-hidden="true">
+        <IconDocTextRegular16 />
+      </span>
+    );
+  }
+  return (
+    <img
+      className={styles.thumbnail}
+      src={src}
+      alt=""
+      width={THUMBNAIL_PX}
+      height={THUMBNAIL_PX}
+      loading="lazy"
+      decoding="async"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 /** Вложение в панели запроса и в сообщении (концепция §5.5): имя, число страниц PDF, миниатюра изображения. */
 export function AttachmentChip({ name, attachment, fileUrl, failed, onRetry, onRemove, onOpenImage }: AttachmentChipProps) {
   const image = attachment && isImage(attachment) && fileUrl;
@@ -37,12 +68,12 @@ export function AttachmentChip({ name, attachment, fileUrl, failed, onRetry, onR
     <span className={styles.chip}>
       {image && onOpenImage ? (
         <button type="button" className={styles.open} onClick={onOpenImage}>
-          <img className={styles.thumbnail} src={fileUrl} alt="" />
+          <Thumbnail src={fileUrl} />
           {label}
         </button>
       ) : (
         <>
-          {image && <img className={styles.thumbnail} src={fileUrl} alt="" />}
+          {image && <Thumbnail src={fileUrl} />}
           {!attachment && !failed && <Spinner type="mini" caption={null} />}
           {failed && (
             <span className={styles.failed} aria-hidden="true">
