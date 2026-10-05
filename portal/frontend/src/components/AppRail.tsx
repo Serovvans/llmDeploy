@@ -6,10 +6,11 @@ import { IconLocationMapRegular24 } from '@skbkontur/icons/IconLocationMapRegula
 import { IconPeople2Regular24 } from '@skbkontur/icons/IconPeople2Regular24';
 import { IconTechServerRegular24 } from '@skbkontur/icons/IconTechServerRegular24';
 import { IconWeatherSunMoonRegular24 } from '@skbkontur/icons/IconWeatherSunMoonRegular24';
-import { DropdownMenu, MenuHeader, MenuItem, MenuSeparator, SingleToast } from '@skbkontur/react-ui';
+import { DropdownMenu, MenuHeader, MenuItem, MenuSeparator, SingleToast, Spinner } from '@skbkontur/react-ui';
 import { NavLink, useNavigate } from 'react-router-dom';
 
 import type { SessionUser } from '../api/types';
+import { useDocparse } from '../docparse/DocparseProvider';
 import { useSession } from '../session/SessionContext';
 import { errorText, texts } from '../texts';
 import type { ThemePreference } from '../theme/preference';
@@ -50,6 +51,8 @@ export function AppRail({ user }: { user: SessionUser }) {
   const { preference, setPreference } = useThemeChoice();
   const { logout } = useSession();
   const navigate = useNavigate();
+  // Пока идёт разбор документа, у пункта «Документы» вместо иконки — индикатор (концепция §5.9).
+  const parsing = useDocparse().run !== null;
 
   const onLogout = () => {
     logout().catch((error: unknown) => SingleToast.push(errorText(error), { use: 'error' }));
@@ -60,7 +63,13 @@ export function AppRail({ user }: { user: SessionUser }) {
       <div className={styles.group}>
         {SECTIONS.map(({ to, label, Icon }) => (
           <NavLink key={to} to={to} className={itemClass}>
-            <Icon aria-hidden="true" />
+            {to === '/documents' && parsing ? (
+              <span className={styles.spinner}>
+                <Spinner type="mini" caption={null} />
+              </span>
+            ) : (
+              <Icon aria-hidden="true" />
+            )}
             <span>{label}</span>
           </NavLink>
         ))}

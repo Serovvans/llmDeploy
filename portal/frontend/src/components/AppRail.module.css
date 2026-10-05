@@ -72,3 +72,10 @@
   font-weight: 600;
   line-height: 1;
 }
+
+.spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+}

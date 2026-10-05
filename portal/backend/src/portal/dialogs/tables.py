@@ -1,4 +1,4 @@
-"""Таблицы диалогов (docs/portal-api.md §9.6–9.8)."""
+"""Таблицы диалогов и разборов документов (docs/portal-api.md §9.6–9.9)."""
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -54,5 +54,27 @@ attachments = sa.Table(
     sa.Column("page_count", sa.Integer),
     sa.Column("text_content", sa.Text),
     sa.Column("image_pages", postgresql.ARRAY(sa.Integer), nullable=False, server_default="{}"),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+docparses = sa.Table(
+    "docparses",
+    metadata,
+    sa.Column(
+        "dialog_id", sa.Uuid, sa.ForeignKey("dialogs.id", ondelete="CASCADE"), primary_key=True
+    ),
+    sa.Column("status", sa.Text, nullable=False),
+    sa.Column("summary_status", sa.Text, nullable=False, server_default="streaming"),
+    sa.Column("template_id", sa.Text, nullable=False),
+    sa.Column("template_title", sa.Text, nullable=False),
+    sa.Column("free_form", sa.Boolean, nullable=False),
+    sa.Column("file_name", sa.Text, nullable=False),
+    sa.Column("media_type", sa.Text, nullable=False),
+    sa.Column("storage_key", sa.Text, nullable=False),
+    sa.Column("size_bytes", sa.BigInteger, nullable=False),
+    sa.Column("page_count", sa.Integer),
+    sa.Column("fields", postgresql.JSONB, nullable=False, server_default=sa.text("'[]'")),
+    sa.Column("summary", sa.Text, nullable=False, server_default=""),
+    sa.Column("document_text", sa.Text, nullable=False, server_default=""),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
 )

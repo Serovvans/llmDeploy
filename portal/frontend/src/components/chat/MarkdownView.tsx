@@ -2,10 +2,10 @@ import { createContext, useContext, useMemo } from 'react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-import type { Source } from '../../api/types';
+import type { Source, SqlCheck } from '../../api/types';
 import { FOOTNOTE_MARK, markFootnotes, unmarkFootnotes } from '../../chat/footnotes';
 import { texts } from '../../texts';
-import { CodeBlock } from './CodeBlock';
+import { CodeBlock, SqlOrphanNotice } from './CodeBlock';
 import styles from './MarkdownView.module.css';
 
 const LANGUAGE_CLASS = /language-(\S+)/;
@@ -24,8 +24,9 @@ function textOf(node: React.ReactNode): string {
 interface MdNode {
   type: string;
   value?: string;
+  position?: { start: { offset?: number } };
   children?: MdNode[];
-  data?: { hName: string; hProperties: Record<string, unknown> };
+  data?: { hName?: string; hProperties: Record<string, unknown> };
 }
 
 /**
@@ -34,7 +35,17 @@ interface MdNode {
  * возвращается в вид `[n]`: кнопку там поставить нельзя.
  */
 function sourceMarks() {
+  let text = '';
+  let codeLines: number[] = [];
   const split = (node: MdNode): MdNode[] => {
+    const offset = node.position?.start.offset;
+    if (node.type === 'code' && offset !== undefined) {
+      // Строка открытия блока — по ней находится итог проверки (контракт §7.1). Строки считаются как на
+      // сервере, только по `\n`: разбор Markdown считает концом строки и одиночный `\r`.
+      const line = text.slice(0, offset).split('\n').length;
+      node.data = { hProperties: { 'data-line': line } };
+      codeLines.push(line);
+    }
     if (node.type !== 'text' || !node.value) {
       if (node.value) {
         node.value = unmarkFootnotes(node.value);
@@ -54,12 +65,37 @@ function sourceMarks() {
     parts.push({ type: 'text', value: node.value.slice(last) });
     return parts.filter((part) => part.type !== 'text' || part.value);
   };
-  return (tree: MdNode) => {
+  return (tree: MdNode, file: { value: unknown }) => {
+    text = String(file.value);
+    codeLines = [];
     split(tree);
+    // Записи проверки, которым не досталось блока, показываются под текстом ответа.
+    tree.children?.push({
+      type: 'sqlOrphans',
+      data: { hName: 'sql-orphans', hProperties: { lines: codeLines.join(',') } },
+    });
   };
 }
 
 const PLUGINS = [remarkGfm, sourceMarks];
+
+const SqlCheckContext = createContext<SqlCheck | null>(null);
+
+/** Блок кода с итогом проверки, если это блок `sql` проверенного ответа. */
+function CheckedCodeBlock({ code, language, line }: { code: string; language: string | null; line?: number }) {
+  const check = useContext(SqlCheckContext);
+  const block = check?.blocks.find((item) => item.line === Number(line));
+  return <CodeBlock code={code} language={language} check={block} />;
+}
+
+/** Итоги записей, для которых на их строке блока кода нет. */
+function SqlOrphans({ lines }: { lines: string }) {
+  const check = useContext(SqlCheckContext);
+  const drawn = new Set(lines.split(',').map(Number));
+  return check?.blocks
+    .filter((block) => block.line === undefined || !drawn.has(block.line))
+    .map((block) => <SqlOrphanNotice key={block.index} check={block} />);
+}
 
 const COMPONENTS: Components = {
   // Ссылки из ответа — в новой вкладке, без передачи сведений о портале.
@@ -73,9 +109,17 @@ const COMPONENTS: Components = {
   // Блок кода: `pre` с единственным `code` внутри.
   pre: ({ children }) => {
     const code = Array.isArray(children) ? children[0] : children;
-    const props = (code as React.ReactElement<{ className?: string; children?: React.ReactNode }>).props;
+    const props = (
+      code as React.ReactElement<{ className?: string; children?: React.ReactNode; 'data-line'?: number }>
+    ).props;
     const language = LANGUAGE_CLASS.exec(props.className ?? '')?.[1] ?? null;
-    return <CodeBlock code={textOf(props.children).replace(/\n$/, '')} language={language} />;
+    return (
+      <CheckedCodeBlock
+        code={textOf(props.children).replace(/\n$/, '')}
+        language={language}
+        line={props['data-line']}
+      />
+    );
   },
   table: ({ children }) => (
     <div className={styles.tableScroll}>
@@ -99,6 +143,8 @@ interface MarkdownViewProps {
   /** Ответ ещё дописывается: в конце текста — черта. */
   streaming?: boolean;
   links?: SourceLinks;
+  /** Итог проверки блоков `sql` — только у ответа SQL-помощника. */
+  sqlCheck?: SqlCheck | null;
 }
 
 /**
@@ -132,9 +178,9 @@ function SourceMark({ n }: { n: number }) {
   );
 }
 
-const COMPONENTS_WITH_MARKS = { ...COMPONENTS, 'source-mark': SourceMark } as Components;
+const COMPONENTS_WITH_MARKS = { ...COMPONENTS, 'source-mark': SourceMark, 'sql-orphans': SqlOrphans } as Components;
 
-export function MarkdownView({ text, streaming = false, links }: MarkdownViewProps) {
+export function MarkdownView({ text, streaming = false, links, sqlCheck = null }: MarkdownViewProps) {
   const numbers = links?.sources.map((source) => source.n).join(',') ?? '';
   const marked = useMemo(
     () => (numbers ? markFootnotes(text, new Set(numbers.split(',').map(Number))) : text),
@@ -143,11 +189,13 @@ export function MarkdownView({ text, streaming = false, links }: MarkdownViewPro
 
   return (
     <SourceLinksContext.Provider value={links ?? null}>
+      <SqlCheckContext.Provider value={sqlCheck}>
       <div className={streaming ? `${styles.markdown} ${styles.streaming}` : styles.markdown}>
         <Markdown remarkPlugins={PLUGINS} components={COMPONENTS_WITH_MARKS}>
           {marked}
         </Markdown>
       </div>
+      </SqlCheckContext.Provider>
     </SourceLinksContext.Provider>
   );
 }

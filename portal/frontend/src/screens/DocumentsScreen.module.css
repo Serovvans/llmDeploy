@@ -1,0 +1,150 @@
+.screen {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.form,
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 24px 32px;
+}
+
+.loading {
+  height: 240px;
+}
+
+.longDialog {
+  width: 100%;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 8px 32px 0;
+}
+
+.file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.fileName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remove,
+.copy {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--p-text-muted);
+  cursor: pointer;
+}
+
+.remove:hover,
+.copy:hover {
+  background: var(--p-surface-3);
+}
+
+.remove:focus-visible,
+.copy:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.error {
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.hint,
+.description {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.submit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.phase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.heading {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.fieldTitle {
+  width: 40%;
+  color: var(--p-text) !important;
+  white-space: normal !important;
+}
+
+.copyCell {
+  width: 48px;
+  padding: 0 !important;
+}
+
+/* Кнопка копирования — при наведении на строку и при фокусе. */
+.copy {
+  opacity: 0;
+}
+
+.fieldRow:hover .copy,
+.copy:focus-visible {
+  opacity: 1;
+}

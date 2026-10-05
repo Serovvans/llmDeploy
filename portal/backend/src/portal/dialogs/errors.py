@@ -14,6 +14,11 @@ def nothing_to_regenerate() -> AppError:
     return AppError(409, "nothing_to_regenerate", "В диалоге нет вопроса, на который отвечать.")
 
 
+def nothing_to_export() -> AppError:
+    """В диалоге нечего экспортировать."""
+    return AppError(409, "nothing_to_export", "В диалоге пока нечего сохранять в файл.")
+
+
 def too_many_images() -> AppError:
     """Изображений и страниц-сканов больше, чем принимает модель."""
     return AppError(

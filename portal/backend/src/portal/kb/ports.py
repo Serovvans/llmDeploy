@@ -130,7 +130,16 @@ class KnowledgeUnavailableError(Exception):
 
 
 class RecognitionFailedError(Exception):
-    """Страница не распознана и после повторов."""
+    """Страница не распознана и после повторов.
+
+    `cause` — что случилось с моделью: `overloaded` — перегружена, `unavailable` —
+    недоступна или оборвала ответ (§13.3). Индексация причину не различает.
+    """
+
+    def __init__(self, cause: Literal["overloaded", "unavailable"] = "unavailable") -> None:
+        """Запомнить причину."""
+        super().__init__(cause)
+        self.cause = cause
 
 
 class EmbeddingsUnavailableError(Exception):

@@ -1,11 +1,13 @@
 import { IconArrowADownRegular16 } from '@skbkontur/icons/IconArrowADownRegular16';
 import { IconArrowRoundSyncForwardRegular16 } from '@skbkontur/icons/IconArrowRoundSyncForwardRegular16';
 import { IconCopyRegular16 } from '@skbkontur/icons/IconCopyRegular16';
+import { IconNetDownloadRegular16 } from '@skbkontur/icons/IconNetDownloadRegular16';
 import { Button, Link, Modal, ScrollContainer, Spinner } from '@skbkontur/react-ui';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import { attachmentFileUrl } from '../../api/client';
 import type { Attachment, Source } from '../../api/types';
+import { exportDocx } from '../../chat/exportDocx';
 import { answerErrorText } from '../../chat/files';
 import type { ChatMessage, DialogView, Generation } from '../../chat/state';
 import { useCopy } from '../../hooks/useCopy';
@@ -49,9 +51,12 @@ interface AnswerProps {
   onRegenerate: () => void;
   onOpenSource: OpenSource;
   openingFragment: string | null;
+  dialogId: string;
+  nothingFoundText: string;
 }
 
-function Answer({ message, generation, isLast, onRegenerate, onOpenSource, openingFragment }: AnswerProps) {
+function Answer(props: AnswerProps) {
+  const { message, generation, isLast, onRegenerate, onOpenSource, openingFragment, dialogId } = props;
   const copy = useCopy();
   const busy = useBusy(generation);
   const hasText = message.content.length > 0;
@@ -94,7 +99,12 @@ function Answer({ message, generation, isLast, onRegenerate, onOpenSource, openi
         />
       )}
       {hasText && !formingElsewhere && (
-        <MarkdownView text={message.content} streaming={generation !== null} links={links} />
+        <MarkdownView
+          text={message.content}
+          streaming={generation !== null}
+          links={links}
+          sqlCheck={message.sql_check}
+        />
       )}
       {sources && sources.length > 0 && (
         <section className={styles.sources}>
@@ -115,7 +125,7 @@ function Answer({ message, generation, isLast, onRegenerate, onOpenSource, openi
         </section>
       )}
       {/* Ноль найденного виден сразу по событию `sources`; «нет ссылок» — по завершении ответа. */}
-      {message.sources_found === 0 && <p className={styles.note}>{t.sources.nothingFound}</p>}
+      {message.sources_found === 0 && <p className={styles.note}>{props.nothingFoundText}</p>}
       {sources && sources.length === 0 && (message.sources_found ?? 0) > 0 && (
         <p className={styles.note}>{t.sources.notCited}</p>
       )}
@@ -144,6 +154,15 @@ function Answer({ message, generation, isLast, onRegenerate, onOpenSource, openi
           {isLast && (
             <Link component="button" icon={<IconArrowRoundSyncForwardRegular16 />} onClick={onRegenerate}>
               {t.regenerate}
+            </Link>
+          )}
+          {hasText && (
+            <Link
+              component="button"
+              icon={<IconNetDownloadRegular16 />}
+              onClick={() => void exportDocx(dialogId, message.id)}
+            >
+              {t.exportAnswer}
             </Link>
           )}
         </div>
@@ -182,6 +201,10 @@ interface MessageListProps {
   onOpenSource: OpenSource;
   /** Цитата, просмотр которой сейчас открывается: на её карточке — индикатор. */
   openingFragment: string | null;
+  /** Строка под ответом, когда поиск ничего не нашёл; по умолчанию — как в чате. */
+  nothingFoundText?: string;
+  /** Содержимое над сообщениями в той же прокрутке (результат разбора документа). */
+  header?: React.ReactNode;
 }
 
 /** Лента-протокол (концепция §4.2): слева пометка «Вы» или «Ответ», вопрос — на подложке, ответ — текстом. */
@@ -210,6 +233,7 @@ export function MessageList(props: MessageListProps) {
         }}
       >
         <div className={styles.column}>
+          {props.header}
           {view.olderCursor && (
             <p className={styles.earlier}>
               <Link component="button" onClick={onLoadOlder}>
@@ -221,6 +245,7 @@ export function MessageList(props: MessageListProps) {
             <div key={message.id} className={styles.row}>
               <div className={styles.who}>{message.role === 'user' ? t.you : t.answer}</div>
               {message.role === 'user' ? (
+                <div className={styles.questionColumn}>
                 <div className={styles.question}>
                   {message.content && <p className={styles.questionText}>{message.content}</p>}
                   {message.attachments.length > 0 && (
@@ -245,6 +270,13 @@ export function MessageList(props: MessageListProps) {
                     </div>
                   )}
                 </div>
+                {/* Опасные операции во вставленном запросе — под вопросом, на всю ширину колонки (§5.7). */}
+                {message.sql_dangers?.map((danger) => (
+                  <Notice key={danger} kind="warning">
+                    {texts.sql.dangers[danger]}
+                  </Notice>
+                ))}
+                </div>
               ) : (
                 <Answer
                   message={message}
@@ -253,6 +285,8 @@ export function MessageList(props: MessageListProps) {
                   onRegenerate={onRegenerate}
                   onOpenSource={onOpenSource}
                   openingFragment={openingFragment}
+                  dialogId={dialogId}
+                  nothingFoundText={props.nothingFoundText ?? t.sources.nothingFound}
                 />
               )}
             </div>

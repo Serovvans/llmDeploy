@@ -24,9 +24,13 @@ async def test_create_and_read_dialog(portal: Portal) -> None:
     assert (await client.get(f"/api/dialogs/{dialog['id']}")).json() == dialog
 
 
-async def test_only_chat_dialogs_can_be_created_at_this_stage(portal: Portal) -> None:
+async def test_dialog_kinds_that_can_be_created(portal: Portal) -> None:
     client = await portal.employee()
-    for body in ({"kind": "sql"}, {"kind": "docparse"}, {"kind": "chat", "title": "x"}, {}):
+    for kind in ("chat", "sql", "cogis"):
+        response = await client.post("/api/dialogs", json={"kind": kind})
+        assert response.status_code == 201 and response.json()["kind"] == kind
+    # Диалог разбора создаётся только запуском разбора.
+    for body in ({"kind": "docparse"}, {"kind": "other"}, {"kind": "chat", "title": "x"}, {}):
         response = await client.post("/api/dialogs", json=body)
         assert response.status_code == 422, body
         assert response.json()["error"]["code"] == "validation_error"
@@ -197,7 +201,7 @@ async def test_unknown_and_malformed_ids_are_not_found(portal: Portal) -> None:
         "/api/dialogs/not-a-uuid",
         f"/api/dialogs/{dialog_id}/attachments/{uuid4()}/file",
         f"/api/dialogs/{dialog_id}/attachments/not-a-uuid/file",
-        f"/api/dialogs/{dialog_id}/export",
+        f"/api/dialogs/{uuid4()}/export",
     ):
         response = await client.get(path)
         assert response.status_code == 404, path

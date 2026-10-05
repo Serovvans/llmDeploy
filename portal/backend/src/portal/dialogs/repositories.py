@@ -9,9 +9,17 @@ from uuid import UUID
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from portal.dialogs.domain import Attachment, Dialog, DialogKind, Message, MessageStatus
+from portal.dialogs.domain import (
+    Attachment,
+    Dialog,
+    DialogKind,
+    Docparse,
+    Message,
+    MessageStatus,
+    SummaryStatus,
+)
 from portal.dialogs.ports import DialogRepository, DialogUnitOfWork
-from portal.dialogs.tables import attachments, dialogs, messages
+from portal.dialogs.tables import attachments, dialogs, docparses, messages
 
 type _Row = sa.Row[*tuple[Any, ...]]
 
@@ -37,10 +45,21 @@ def _owned(owner_id: UUID) -> sa.Select[tuple[UUID]]:
 
 
 _HAS_MESSAGES = sa.exists().where(messages.c.dialog_id == dialogs.c.id)
+# Скрытый диалог разбора: таблицы реквизитов ещё нет, он не виден ни одному маршруту (§7.3).
+_HIDDEN = sa.exists().where(
+    docparses.c.dialog_id == dialogs.c.id, docparses.c.status == "processing"
+)
+_READY_DOCPARSE = sa.exists().where(
+    docparses.c.dialog_id == dialogs.c.id, docparses.c.status == "ready"
+)
+
+
+def _docparse(row: _Row) -> Docparse:
+    return Docparse(**{column.name: getattr(row, column.name) for column in docparses.c})
 
 
 class SqlDialogRepository:
-    """Таблицы `dialogs`, `messages`, `attachments`."""
+    """Таблицы `dialogs`, `messages`, `attachments`, `docparses`."""
 
     def __init__(self, connection: AsyncConnection) -> None:
         """Работать в транзакции переданного соединения."""
@@ -55,7 +74,9 @@ class SqlDialogRepository:
         self, owner_id: UUID, dialog_id: UUID, *, lock: bool = False
     ) -> Dialog | None:
         """Диалог владельца; `lock` — `SELECT … FOR UPDATE`."""
-        query = sa.select(dialogs).where(dialogs.c.id == dialog_id, dialogs.c.owner_id == owner_id)
+        query = sa.select(dialogs).where(
+            dialogs.c.id == dialog_id, dialogs.c.owner_id == owner_id, sa.not_(_HIDDEN)
+        )
         if lock:
             query = query.with_for_update()
         row = (await self._connection.execute(query)).first()
@@ -65,8 +86,11 @@ class SqlDialogRepository:
         self, owner_id: UUID, kind: DialogKind, limit: int, before: tuple[datetime, UUID] | None
     ) -> list[Dialog]:
         """Диалоги владельца с сообщениями, по убыванию `updated_at`, после курсора."""
+        # В истории — диалоги с сообщениями; разбор в истории с момента готовности таблицы.
         query = sa.select(dialogs).where(
-            dialogs.c.owner_id == owner_id, dialogs.c.kind == kind, _HAS_MESSAGES
+            dialogs.c.owner_id == owner_id,
+            dialogs.c.kind == kind,
+            sa.or_(_HAS_MESSAGES, _READY_DOCPARSE),
         )
         if before is not None:
             query = query.where(sa.tuple_(dialogs.c.updated_at, dialogs.c.id) < sa.tuple_(*before))
@@ -77,8 +101,11 @@ class SqlDialogRepository:
         self, owner_id: UUID | None, created_before: datetime
     ) -> list[tuple[UUID, UUID]]:
         """Диалоги без сообщений старше срока: пары (владелец, диалог)."""
+        # Разбор документа пустым диалогом не считается: он существует и без вопросов.
         query = sa.select(dialogs.c.owner_id, dialogs.c.id).where(
-            dialogs.c.created_at < created_before, sa.not_(_HAS_MESSAGES)
+            dialogs.c.created_at < created_before,
+            dialogs.c.kind != "docparse",
+            sa.not_(_HAS_MESSAGES),
         )
         if owner_id is not None:
             query = query.where(dialogs.c.owner_id == owner_id)
@@ -198,6 +225,7 @@ class SqlDialogRepository:
         reasoning_seconds: int | None,
         sources: Sequence[Mapping[str, Any]] | None,
         sources_found: int | None,
+        sql_check: Mapping[str, Any] | None,
         dropped_messages: int,
     ) -> None:
         """Сохранить ответ с итоговым состоянием."""
@@ -212,6 +240,7 @@ class SqlDialogRepository:
                 reasoning_seconds=reasoning_seconds,
                 sources=None if sources is None else [dict(source) for source in sources],
                 sources_found=sources_found,
+                sql_check=None if sql_check is None else dict(sql_check),
                 dropped_messages=dropped_messages,
             )
         )
@@ -227,6 +256,118 @@ class SqlDialogRepository:
             )
             .values(status="error", error_code="interrupted")
         )
+
+    async def set_question_params(
+        self, owner_id: UUID, message_id: UUID, params: Mapping[str, Any]
+    ) -> None:
+        """Заменить сохранённые параметры вопроса."""
+        await self._connection.execute(
+            sa.update(messages)
+            .where(messages.c.id == message_id, messages.c.dialog_id.in_(_owned(owner_id)))
+            .values(params=dict(params))
+        )
+
+    async def add_docparse(self, docparse: Docparse) -> None:
+        """Создать разбор; его диалог уже создан в этой же транзакции."""
+        values = {column.name: getattr(docparse, column.name) for column in docparses.c}
+        await self._connection.execute(sa.insert(docparses).values(**values))
+
+    async def get_docparse(self, owner_id: UUID, dialog_id: UUID) -> Docparse | None:
+        """Готовый разбор владельца; скрытый не отдаётся."""
+        row = (
+            await self._connection.execute(
+                sa.select(docparses).where(
+                    docparses.c.dialog_id == dialog_id,
+                    docparses.c.dialog_id.in_(_owned(owner_id)),
+                    docparses.c.status == "ready",
+                )
+            )
+        ).first()
+        return _docparse(row) if row else None
+
+    async def publish_docparse(
+        self,
+        owner_id: UUID,
+        dialog_id: UUID,
+        *,
+        fields: Sequence[Mapping[str, Any]],
+        document_text: str,
+        title: str,
+        now: datetime,
+    ) -> None:
+        """Сохранить таблицу и текст, назвать диалог и сделать разбор видимым."""
+        await self._connection.execute(
+            sa.update(docparses)
+            .where(docparses.c.dialog_id == dialog_id, docparses.c.dialog_id.in_(_owned(owner_id)))
+            .values(
+                status="ready",
+                summary_status="streaming",
+                fields=[dict(field) for field in fields],
+                document_text=document_text,
+            )
+        )
+        await self._connection.execute(
+            sa.update(dialogs)
+            .where(dialogs.c.id == dialog_id, dialogs.c.owner_id == owner_id)
+            .values(title=title, updated_at=now)
+        )
+
+    async def finish_summary(
+        self, owner_id: UUID, dialog_id: UUID, summary: str, status: SummaryStatus
+    ) -> None:
+        """Сохранить краткое содержание с итоговым состоянием."""
+        await self._connection.execute(
+            sa.update(docparses)
+            .where(docparses.c.dialog_id == dialog_id, docparses.c.dialog_id.in_(_owned(owner_id)))
+            .values(summary=summary, summary_status=status)
+        )
+
+    async def docparse_exists(self, owner_id: UUID, dialog_id: UUID) -> bool:
+        """Существует ли ещё разбор (скрытый тоже)."""
+        found = await self._connection.scalar(
+            sa.select(docparses.c.dialog_id).where(
+                docparses.c.dialog_id == dialog_id, docparses.c.dialog_id.in_(_owned(owner_id))
+            )
+        )
+        return found is not None
+
+    async def delete_hidden_docparse(self, owner_id: UUID, dialog_id: UUID) -> str | None:
+        """Удалить скрытый диалог разбора; вернуть ключ его файла, если диалог был."""
+        key: str | None = await self._connection.scalar(
+            sa.select(docparses.c.storage_key).where(
+                docparses.c.dialog_id == dialog_id,
+                docparses.c.dialog_id.in_(_owned(owner_id)),
+                docparses.c.status == "processing",
+            )
+        )
+        if key is not None:
+            await self._connection.execute(
+                sa.delete(dialogs).where(dialogs.c.id == dialog_id, dialogs.c.owner_id == owner_id)
+            )
+        return key
+
+    async def reset_docparses(self) -> list[str]:
+        """Старт процесса: зависшие краткие содержания — в `error`, скрытые разборы удалить.
+
+        Служебный запрос без условия владельца, как `reset_streaming`.
+        """
+        await self._connection.execute(
+            sa.update(docparses)
+            .where(docparses.c.status == "ready", docparses.c.summary_status == "streaming")
+            .values(summary_status="error")
+        )
+        hidden = (
+            await self._connection.execute(
+                sa.select(docparses.c.dialog_id, docparses.c.storage_key).where(
+                    docparses.c.status == "processing"
+                )
+            )
+        ).all()
+        if hidden:
+            await self._connection.execute(
+                sa.delete(dialogs).where(dialogs.c.id.in_([row.dialog_id for row in hidden]))
+            )
+        return [row.storage_key for row in hidden]
 
     async def reset_streaming(self) -> None:
         """Перевести все ответы `streaming` в `error`/`interrupted`.

@@ -6,11 +6,23 @@
 
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
-from portal.dialogs.domain import Attachment, Dialog, DialogKind, Message, MessageStatus
+from portal.dialogs.context import Turn
+from portal.dialogs.domain import (
+    Attachment,
+    Dialog,
+    DialogKind,
+    Docparse,
+    Message,
+    MessageStatus,
+    SummaryStatus,
+)
+from portal.kb.ports import KnowledgeScope
+from portal.llm.ports import ReasoningEffort
 
 
 class DialogRepository(Protocol):
@@ -23,7 +35,10 @@ class DialogRepository(Protocol):
     async def get_dialog(
         self, owner_id: UUID, dialog_id: UUID, *, lock: bool = False
     ) -> Dialog | None:
-        """Диалог владельца; `lock` — держать строку до конца транзакции."""
+        """Диалог владельца; `lock` — держать строку до конца транзакции.
+
+        Скрытый диалог разбора (таблицы реквизитов ещё нет) не виден ни здесь, ни в списке.
+        """
         ...
 
     async def list_dialogs(
@@ -99,6 +114,7 @@ class DialogRepository(Protocol):
         reasoning_seconds: int | None,
         sources: Sequence[Mapping[str, Any]] | None,
         sources_found: int | None,
+        sql_check: Mapping[str, Any] | None,
         dropped_messages: int,
     ) -> None:
         """Сохранить ответ с итоговым состоянием."""
@@ -106,6 +122,54 @@ class DialogRepository(Protocol):
 
     async def interrupt_answer(self, owner_id: UUID, message_id: UUID) -> None:
         """Перевести ответ `streaming`, который никто не формирует, в `error`/`interrupted`."""
+        ...
+
+    async def set_question_params(
+        self, owner_id: UUID, message_id: UUID, params: Mapping[str, Any]
+    ) -> None:
+        """Заменить сохранённые параметры вопроса (схема SQL при повторной генерации)."""
+        ...
+
+    async def add_docparse(self, docparse: Docparse) -> None:
+        """Создать разбор вместе с его скрытым диалогом."""
+        ...
+
+    async def get_docparse(self, owner_id: UUID, dialog_id: UUID) -> Docparse | None:
+        """Готовый разбор владельца; скрытый не отдаётся."""
+        ...
+
+    async def publish_docparse(
+        self,
+        owner_id: UUID,
+        dialog_id: UUID,
+        *,
+        fields: Sequence[Mapping[str, Any]],
+        document_text: str,
+        title: str,
+        now: datetime,
+    ) -> None:
+        """Сохранить таблицу и текст, назвать диалог и сделать разбор видимым (§7.3, шаг 4)."""
+        ...
+
+    async def finish_summary(
+        self, owner_id: UUID, dialog_id: UUID, summary: str, status: SummaryStatus
+    ) -> None:
+        """Сохранить краткое содержание с итоговым состоянием; пишется один раз."""
+        ...
+
+    async def docparse_exists(self, owner_id: UUID, dialog_id: UUID) -> bool:
+        """Существует ли ещё разбор (скрытый тоже): удаление диалога обрывает его поток."""
+        ...
+
+    async def delete_hidden_docparse(self, owner_id: UUID, dialog_id: UUID) -> str | None:
+        """Удалить скрытый диалог разбора; вернуть ключ его файла, если диалог был."""
+        ...
+
+    async def reset_docparses(self) -> list[str]:
+        """Старт процесса: зависшие краткие содержания — в `error`, скрытые разборы удалить.
+
+        Возвращает ключи файлов удалённых разборов.
+        """
         ...
 
     async def reset_streaming(self) -> None:
@@ -158,4 +222,40 @@ class DialogUnitOfWorkFactory(Protocol):
 
     def __call__(self) -> AbstractAsyncContextManager[DialogUnitOfWork]:
         """Начать транзакцию."""
+        ...
+
+
+@dataclass(frozen=True)
+class AnswerPlan:
+    """Из чего собирается запрос к модели на один вопрос (§5.4).
+
+    `scope` — область поиска в базе знаний, `None` — поиск не выполняется. `sql_dialect`
+    задан у диалога `sql`: по нему проверяются блоки `sql` готового ответа.
+    """
+
+    system: str
+    question: Turn
+    effort: ReasoningEffort
+    max_tokens: int
+    scope: KnowledgeScope | None = None
+    sql_dialect: str | None = None
+
+
+class DialogTool(Protocol):
+    """Правила вида диалога, отличного от чата: `sql`, `cogis`, `docparse` (§5.3, §7)."""
+
+    async def accept(
+        self, owner_id: UUID, dialog_id: UUID, content: str, params: Mapping[str, Any]
+    ) -> list[str] | None:
+        """Проверки до открытия потока; вернуть `sql_dangers` вопроса (`None` — нечего)."""
+        ...
+
+    async def plan(
+        self, owner_id: UUID, dialog_id: UUID, content: str, params: Mapping[str, Any]
+    ) -> AnswerPlan:
+        """Системное сообщение, вопрос с блоками данных и параметры запроса к модели."""
+        ...
+
+    async def review(self, plan: AnswerPlan, content: str) -> Mapping[str, Any] | None:
+        """Проверка готового ответа (`SqlCheck`); `None` — у этого вида её нет."""
         ...

@@ -1,10 +1,15 @@
 /** Разбор потока событий портала (контракт §6.1): `event:` и одна строка `data:` с JSON, пустая строка — конец события. */
 
-import type { Source } from './types';
+import type { DocparseField, Source, SqlCheck, SqlDanger } from './types';
 
-/** События потока ответа (контракт §6.2). Событие неизвестного типа разбор пропускает. */
+/** События потоков ответа и разбора документа (контракт §6.2, §6.4). Событие неизвестного типа разбор пропускает. */
 export type StreamEvent =
   | { type: 'start'; user_message_id: string; assistant_message_id: string }
+  | { type: 'sql_question_check'; dangers: SqlDanger[] }
+  | ({ type: 'sql_check' } & SqlCheck)
+  | { type: 'progress'; page_from: number; page_to: number; pages_total: number }
+  | { type: 'extraction_started' }
+  | { type: 'extraction'; dialog_id: string; fields: DocparseField[] }
   | { type: 'search_started' }
   | { type: 'sources'; sources: Source[] }
   | { type: 'context_truncated'; dropped_messages: number }
@@ -12,10 +17,15 @@ export type StreamEvent =
   | { type: 'delta'; text: string }
   | { type: 'title'; title: string }
   | { type: 'done'; status: 'complete' | 'length_limit' }
-  | { type: 'error'; code: string; message: string };
+  | { type: 'error'; code: string; message: string; details?: { page: number; pages_total: number } };
 
 const KNOWN_EVENTS = new Set<string>([
   'start',
+  'sql_question_check',
+  'sql_check',
+  'progress',
+  'extraction_started',
+  'extraction',
   'search_started',
   'sources',
   'context_truncated',

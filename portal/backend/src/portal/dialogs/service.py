@@ -4,10 +4,12 @@ import asyncio
 import base64
 import binascii
 import json
-from collections.abc import AsyncIterator, Callable
+import re
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from portal.core.errors import (
@@ -22,7 +24,14 @@ from portal.core.errors import (
 from portal.core.ports import Clock
 from portal.core.settings import ChatSettings
 from portal.dialogs import errors
-from portal.dialogs.domain import TITLE_MAX_LENGTH, Attachment, Dialog, DialogKind, Message
+from portal.dialogs.domain import (
+    TITLE_MAX_LENGTH,
+    Attachment,
+    Dialog,
+    DialogKind,
+    Docparse,
+    Message,
+)
 from portal.dialogs.ports import DialogUnitOfWorkFactory
 from portal.files.names import display_file_name
 from portal.files.ports import (
@@ -36,6 +45,30 @@ from portal.files.text import store_as_utf8
 from portal.llm.ports import MAX_IMAGES_PER_REQUEST
 
 _TEXT_TYPES = ("text/plain", "text/markdown")
+_ALL_POSITIONS = 2**31 - 1
+# Название раздела — запасное имя файла экспорта, когда у диалога нет названия (§5.9).
+_SECTION_TITLES: dict[DialogKind, str] = {
+    "chat": "Чат",
+    "sql": "SQL-помощник",
+    "cogis": "Помощник CoGIS",
+    "docparse": "Разбор документа",
+}
+_FORBIDDEN_IN_FILE_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+# Окончания названия, которые считаются расширением загруженного файла (§5.9).
+_FILE_EXTENSIONS = (".pdf", ".docx", ".txt", ".md", ".jpg", ".jpeg", ".png")
+
+
+def export_file_name(title: str) -> str:
+    """Имя файла экспорта по названию диалога (§5.9).
+
+    Название разбора — имя загруженного файла: одно его расширение отбрасывается, если
+    название после этого не пусто («выписка.docx», а не «выписка.docx.docx»).
+    """
+    name = _FORBIDDEN_IN_FILE_NAME.sub("_", title).strip()
+    extension = next((item for item in _FILE_EXTENSIONS if name.lower().endswith(item)), "")
+    if extension and name[: -len(extension)].strip():
+        name = name[: -len(extension)].strip()
+    return f"{name or 'dialog'}.docx"
 
 
 @dataclass(frozen=True)
@@ -77,6 +110,20 @@ def _decode_cursor(cursor: str) -> list[object]:
     return values
 
 
+class DialogExporter(Protocol):
+    """Сборка файла экспорта; реализация — на `python-docx`."""
+
+    def answer(self, title: str, view: MessageView) -> bytes:
+        """Файл с одним ответом."""
+        ...
+
+    def dialog(
+        self, title: str, dialog: Dialog, docparse: Docparse | None, views: Sequence[MessageView]
+    ) -> bytes:
+        """Файл с диалогом целиком."""
+        ...
+
+
 class DialogService:
     """Диалоги и вложения владельца; чужое всегда `not_found`."""
 
@@ -90,12 +137,15 @@ class DialogService:
         empty_ttl_hours: int,
         text_max_chars: int,
         is_forming: Callable[[UUID], bool],
+        summary_forming: Callable[[UUID], bool],
+        exporter: DialogExporter,
     ) -> None:
         """Получить зависимости явно.
 
         `text_max_chars` — сколько символов текста вложения хранить: больше заведомо не
         поместится в запрос к модели, сколько бы ни развернулось из файла. `is_forming`
-        отвечает, формируется ли ответ прямо сейчас.
+        отвечает, формируется ли ответ прямо сейчас, `summary_forming` — пишется ли краткое
+        содержание разбора.
         """
         self._uow_factory = uow_factory
         self._storage = storage
@@ -105,11 +155,20 @@ class DialogService:
         self._empty_ttl = timedelta(hours=empty_ttl_hours)
         self._text_max_chars = text_max_chars
         self._is_forming = is_forming
+        self._summary_forming = summary_forming
+        self._exporter = exporter
 
     async def reset_interrupted(self) -> None:
-        """При старте процесса перевести зависшие ответы в ошибку `interrupted` (§5.5)."""
+        """При старте процесса убрать следы прерванной работы (§5.5, «Зависший ответ»).
+
+        Ответы `streaming` становятся `interrupted`, недописанные краткие содержания —
+        `error`, скрытые диалоги разбора удаляются вместе с файлами.
+        """
         async with self._uow_factory() as uow:
             await uow.dialogs.reset_streaming()
+            orphans = await uow.dialogs.reset_docparses()
+        for key in orphans:
+            await self._storage.delete(key)
 
     # --- диалоги ---
 
@@ -136,11 +195,26 @@ class DialogService:
 
     async def get(self, owner_id: UUID, dialog_id: UUID) -> Dialog:
         """Диалог владельца."""
+        return (await self.get_with_docparse(owner_id, dialog_id))[0]
+
+    async def get_with_docparse(
+        self, owner_id: UUID, dialog_id: UUID
+    ) -> tuple[Dialog, Docparse | None]:
+        """Диалог владельца и, у вида `docparse`, результат разбора (§7.3)."""
         async with self._uow_factory() as uow:
             dialog = await uow.dialogs.get_dialog(owner_id, dialog_id)
-        if dialog is None:
-            raise not_found()
-        return dialog
+            if dialog is None:
+                raise not_found()
+            docparse = None
+            if dialog.kind == "docparse":
+                docparse = await uow.dialogs.get_docparse(owner_id, dialog_id)
+                stuck = docparse is not None and docparse.summary_status == "streaming"
+                if docparse is not None and stuck and not self._summary_forming(dialog_id):
+                    # Поток разбора уже не идёт: содержание осталось неполным. Интерфейс в
+                    # состоянии «пишется» сам из него не выйдет.
+                    docparse.summary_status = "error"
+                    await uow.dialogs.finish_summary(owner_id, dialog_id, docparse.summary, "error")
+        return dialog, docparse
 
     async def list(
         self, owner_id: UUID, kind: DialogKind, limit: int, cursor: str | None
@@ -201,8 +275,44 @@ class DialogService:
                 return False
             for attachment in await uow.dialogs.dialog_attachments(owner_id, dialog_id):
                 await self._storage.delete(attachment.storage_key)
+            docparse = await uow.dialogs.get_docparse(owner_id, dialog_id)
+            if docparse is not None:
+                await self._storage.delete(docparse.storage_key)
             await uow.dialogs.delete_dialog(owner_id, dialog_id)
         return True
+
+    async def export(
+        self, owner_id: UUID, dialog_id: UUID, message_id: UUID | None
+    ) -> tuple[str, bytes]:
+        """Имя файла и содержимое DOCX: один ответ или диалог целиком (§5.9)."""
+        async with self._uow_factory() as uow:
+            dialog = await uow.dialogs.get_dialog(owner_id, dialog_id)
+            if dialog is None:
+                raise not_found()
+            docparse = await uow.dialogs.get_docparse(owner_id, dialog_id)
+            found = await uow.dialogs.history(owner_id, dialog_id, _ALL_POSITIONS)
+            files = await uow.dialogs.message_attachments(
+                owner_id, [message.id for message in found if message.role == "user"]
+            )
+        views = [MessageView(message, files.get(message.id, [])) for message in found]
+        title = dialog.title or f"{_SECTION_TITLES[dialog.kind]} {dialog.created_at:%Y-%m-%d}"
+        if message_id is not None:
+            answer = next(
+                (
+                    view
+                    for view in views
+                    if view.message.id == message_id and view.message.role == "assistant"
+                ),
+                None,
+            )
+            if answer is None:
+                raise not_found()
+            content = await asyncio.to_thread(self._exporter.answer, title, answer)
+        elif not views and docparse is None:
+            raise errors.nothing_to_export()
+        else:
+            content = await asyncio.to_thread(self._exporter.dialog, title, dialog, docparse, views)
+        return export_file_name(title), content
 
     async def messages(
         self, owner_id: UUID, dialog_id: UUID, limit: int, cursor: str | None

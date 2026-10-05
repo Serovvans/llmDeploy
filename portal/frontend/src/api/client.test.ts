@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { fail, liveSse, mockApi, ok, session, sse } from '../test/mockApi';
 import { errorText, texts } from '../texts';
-import type { ChatMessageBody } from './types';
 import { api, ApiError, closeOpenStreams, isAbort, NetworkError, onSessionSignal, StreamBrokenError } from './client';
 
 describe('клиент API', () => {
@@ -114,7 +113,7 @@ describe('клиент API', () => {
     });
     const listener = vi.fn();
     const unsubscribe = onSessionSignal(listener);
-    const body: ChatMessageBody = { content: 'Вопрос', attachment_ids: [], mode: 'fast', knowledge: 'none' };
+    const body = { content: 'Вопрос', attachment_ids: [], mode: 'fast', knowledge: 'none' };
 
     const refused = api.sendMessage('d-1', body, new AbortController().signal);
     await expect(refused.next()).rejects.toMatchObject({ code: 'generation_in_progress' });

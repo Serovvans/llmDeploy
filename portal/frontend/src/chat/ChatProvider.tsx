@@ -3,10 +3,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useReducer,
 
 import { api, isAbort, isApiError, NetworkError, StreamBrokenError } from '../api/client';
 import type { StreamEvent } from '../api/stream';
-import type { AnswerMode, Dialog, Knowledge, Message, PortalConfig } from '../api/types';
+import type { AnswerMode, Dialog, DialogKind, Knowledge, Message, PortalConfig, QuestionParams } from '../api/types';
 import { errorText, texts } from '../texts';
 import { checkFile, sendErrorText, uploadErrorText } from './files';
-import { chatReducer, EMPTY_DRAFT, INITIAL_STATE, NEW_CHAT, type ChatState, type Draft } from './state';
+import { chatReducer, EMPTY_DRAFT, INITIAL_STATE, newDialogKey, type ChatState, type Draft } from './state';
 
 const MODE_STORAGE_KEY = 'portal.chat.mode';
 
@@ -31,8 +31,17 @@ function readKnowledge(): Knowledge {
   }
 }
 
-/** Вызывается, когда чат создан на сервере: экран переходит на его адрес. */
+/** Вызывается, когда диалог создан на сервере: экран переходит на его адрес. */
 type OnCreated = (id: string) => void;
+
+/** Отказ до открытия потока. Вернуть `true` — экран обработал его сам, текст под панелью запроса не нужен. */
+type OnRefused = (error: unknown) => boolean;
+
+const NEW_PREFIX = 'new:';
+
+function kindOfNewKey(key: string): DialogKind | null {
+  return key.startsWith(NEW_PREFIX) ? (key.slice(NEW_PREFIX.length) as DialogKind) : null;
+}
 
 interface ChatApi {
   state: ChatState;
@@ -40,8 +49,8 @@ interface ChatApi {
   setMode: (mode: AnswerMode) => void;
   knowledge: Knowledge;
   setKnowledge: (knowledge: Knowledge) => void;
-  loadHistory: (more: boolean) => void;
-  openDialog: (id: string) => void;
+  loadHistory: (kind: DialogKind, more: boolean) => void;
+  openDialog: (kind: DialogKind, id: string) => void;
   refreshDialog: (id: string) => void;
   loadOlder: (id: string) => void;
   setText: (key: string, text: string) => void;
@@ -49,11 +58,21 @@ interface ChatApi {
   addFiles: (key: string, files: File[], onCreated: OnCreated) => void;
   retryFile: (key: string, fileKey: string) => void;
   removeFile: (key: string, fileKey: string) => void;
-  send: (key: string, onCreated: OnCreated) => void;
-  regenerate: (id: string) => void;
+  /** `params` — параметры вопроса своего вида диалога (контракт §5.3). */
+  send: (kind: DialogKind, key: string, params: QuestionParams, onCreated: OnCreated, onRefused?: OnRefused) => void;
+  /** `body` — только для `sql`: схема взамен удалённой. */
+  regenerate: (
+    kind: DialogKind,
+    id: string,
+    options?: { body?: { schema_id: string | null }; onRefused?: OnRefused },
+  ) => void;
   stop: (id: string) => void;
   rename: (id: string, title: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
+  /** Диалог, появившийся не через отправку вопроса (готовый разбор документа), — в начало своей истории. */
+  addDialog: (dialog: Dialog) => void;
+  /** Диалог удалён в другой вкладке: убрать его строку и ленту без запроса к серверу. */
+  forgetDialog: (id: string) => void;
 }
 
 const ChatContext = createContext<ChatApi | null>(null);
@@ -64,6 +83,33 @@ export function useChat(): ChatApi {
     throw new Error('useChat вызван вне ChatProvider');
   }
   return chat;
+}
+
+/** Диалоги одного вида: история этого вида и ключ черновика нового диалога. */
+export function useDialogs(kind: DialogKind) {
+  const chat = useChat();
+  const { loadHistory, send, regenerate, openDialog } = chat;
+  const loadKindHistory = useCallback((more: boolean) => loadHistory(kind, more), [kind, loadHistory]);
+  const sendOfKind = useCallback(
+    (key: string, params: QuestionParams, onCreated: OnCreated, onRefused?: OnRefused) =>
+      send(kind, key, params, onCreated, onRefused),
+    [kind, send],
+  );
+  const regenerateOfKind = useCallback(
+    (id: string, options?: { body?: { schema_id: string | null }; onRefused?: OnRefused }) =>
+      regenerate(kind, id, options),
+    [kind, regenerate],
+  );
+  const openOfKind = useCallback((id: string) => openDialog(kind, id), [kind, openDialog]);
+  return {
+    ...chat,
+    history: chat.state.history[kind],
+    newKey: newDialogKey(kind),
+    loadHistory: loadKindHistory,
+    send: sendOfKind,
+    regenerate: regenerateOfKind,
+    openDialog: openOfKind,
+  };
 }
 
 /**
@@ -121,19 +167,24 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
     [updateDraft],
   );
 
-  const loadHistory = useCallback((more: boolean) => {
+  const loadHistory = useCallback((kind: DialogKind, more: boolean) => {
     if (!more) {
-      dispatch({ type: 'historyLoading' });
+      dispatch({ type: 'historyLoading', kind });
     }
-    api.listDialogs('chat', more ? stateRef.current.history.nextCursor : null).then(
-      (page) => dispatch({ type: 'historyLoaded', items: page.items, nextCursor: page.next_cursor, append: more }),
-      () => dispatch({ type: 'historyFailed' }),
+    api.listDialogs(kind, more ? stateRef.current.history[kind].nextCursor : null).then(
+      (page) => dispatch({ type: 'historyLoaded', kind, items: page.items, nextCursor: page.next_cursor, append: more }),
+      () => dispatch({ type: 'historyFailed', kind }),
     );
   }, []);
 
-  useEffect(() => {
-    loadHistory(false);
-  }, [loadHistory]);
+  /** Вид диалога по истории; `null` — диалога в загруженной части историй нет. */
+  const kindOf = useCallback((id: string): DialogKind | null => {
+    const histories = stateRef.current.history;
+    return (
+      (Object.keys(histories) as DialogKind[]).find((kind) => histories[kind].items.some((item) => item.id === id)) ??
+      null
+    );
+  }, []);
 
   const refreshDialog = useCallback((id: string) => {
     api.listMessages(id, null).then(
@@ -143,30 +194,36 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
   }, []);
 
   const openDialog = useCallback(
-    (id: string) => {
+    (kind: DialogKind, id: string) => {
       const view = stateRef.current.dialogs[id];
       if (view && view.status === 'ready') {
         return;
       }
+      const known = kindOf(id);
       dispatch({ type: 'messagesLoading', id });
-      api.listMessages(id, null).then(
-        (page) => {
+      // Диалога может не быть в загруженной части истории: вид и название для заголовка берутся отдельно.
+      // Не удалось узнать (кроме «не найден») — лента показывается без названия.
+      const dialog =
+        known === null
+          ? api.getDialog(id).catch((error: unknown) => (isApiError(error, 'not_found') ? Promise.reject(error) : null))
+          : null;
+      Promise.all([dialog, api.listMessages(id, null)]).then(
+        ([found, page]) => {
+          // Диалог другого раздела по адресу этого — «не найден», а не чужая лента с панелью раздела.
+          if ((found?.kind ?? known ?? kind) !== kind) {
+            dispatch({ type: 'messagesFailed', id, notFound: true });
+            return;
+          }
           dispatch({ type: 'messagesLoaded', id, items: page.items, nextCursor: page.next_cursor, older: false });
-          // Чата может не быть в загруженной части истории: название для заголовка берётся отдельно.
-          // Чат без сообщений в истории не показывается.
-          if (page.items.length > 0 && !stateRef.current.history.items.some((item) => item.id === id)) {
-            api.getDialog(id).then(
-              (dialog) => dispatch({ type: 'dialogUpserted', dialog, toTop: false }),
-              () => {
-                // Название не получено: в заголовке остаётся «Новый чат».
-              },
-            );
+          // Диалог без сообщений в истории не показывается.
+          if (found && page.items.length > 0) {
+            dispatch({ type: 'dialogUpserted', dialog: found, toTop: false });
           }
         },
         (error: unknown) => dispatch({ type: 'messagesFailed', id, notFound: isApiError(error, 'not_found') }),
       );
     },
-    [],
+    [kindOf],
   );
 
   const loadOlder = useCallback((id: string) => {
@@ -182,13 +239,14 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
 
   /** Чат создаётся на сервере при первой отправке или первом вложении (контракт §5.2). */
   const ensureDialog = useCallback(async (key: string, onCreated: OnCreated): Promise<string> => {
-    if (key !== NEW_CHAT) {
+    const kind = kindOfNewKey(key);
+    if (kind === null) {
       return key;
     }
-    const dialog = await api.createDialog('chat');
+    const dialog = await api.createDialog(kind);
     unlisted.current.set(dialog.id, dialog);
     dispatch({ type: 'messagesLoaded', id: dialog.id, items: [], nextCursor: null, older: false });
-    dispatch({ type: 'draftMoved', from: NEW_CHAT, to: dialog.id });
+    dispatch({ type: 'draftMoved', from: key, to: dialog.id });
     onCreated(dialog.id);
     return dialog.id;
   }, []);
@@ -308,10 +366,12 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
    */
   const runStream = useCallback(
     async (
+      kind: DialogKind,
       id: string,
       open: (signal: AbortSignal) => AsyncGenerator<StreamEvent>,
       question: string | null,
       rollback: () => void,
+      onRefused?: OnRefused,
     ) => {
       const controller = new AbortController();
       streams.current.set(id, controller);
@@ -329,9 +389,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
         for await (const event of open(controller.signal)) {
           if (event.type === 'error' && event.code === 'dialog_deleted') {
             // Чат удалён в другой вкладке: лента закрывается, набранный текст переезжает в новый чат.
-            dispatch({ type: 'draftMoved', from: id, to: NEW_CHAT });
+            dispatch({ type: 'draftMoved', from: id, to: newDialogKey(kind) });
             dispatch({ type: 'dialogRemoved', id });
-            SingleToast.push(texts.chat.remove.elsewhere);
+            SingleToast.push(texts.dialogs[kind].removedElsewhere);
             return;
           }
           dispatch({ type: 'streamEvent', id, event, now: Date.now() });
@@ -362,9 +422,11 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
           }
         } else if (isApiError(error, 'unauthenticated')) {
           rollback();
+        } else if (onRefused?.(error)) {
+          rollback();
         } else {
           // Без конфигурации (она не загрузилась) текст отказа — общий.
-          reject(config ? sendErrorText(error, config) : errorText(error));
+          reject(config ? sendErrorText(error, config, kind) : errorText(error));
         }
       } finally {
         streams.current.delete(id);
@@ -376,11 +438,13 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
   );
 
   const send = useCallback(
-    (key: string, onCreated: OnCreated) => {
+    (kind: DialogKind, key: string, params: QuestionParams, onCreated: OnCreated, onRefused?: OnRefused) => {
       if (!config) {
         return;
       }
       const draft = stateRef.current.drafts[key] ?? EMPTY_DRAFT;
+      // Вложения, режим ответа и база знаний — только у чата (контракт §5.3).
+      const isChat = 'mode' in params;
       const composer = texts.chat.composer;
       const ready = draft.attachments.flatMap((item) => (item.attachment ? [item.attachment] : []));
       const images = ready.reduce((sum, attachment) => sum + attachment.image_count, 0);
@@ -410,7 +474,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
           if (created) {
             unlisted.current.delete(id);
             dispatch({ type: 'dialogUpserted', dialog: created, toTop: true });
-          } else if (!stateRef.current.history.items.some((item) => item.id === id)) {
+          } else if (kindOf(id) === null) {
             // Чат без сообщений, открытый по адресу (например, после обновления страницы): в истории его ещё нет.
             api.getDialog(id).then(
               (dialog) => dispatch({ type: 'dialogUpserted', dialog, toTop: true }),
@@ -422,8 +486,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
           dispatch({ type: 'generationStarted', id, question: { content, attachments: ready }, now });
           dispatch({ type: 'dialogTouched', id, now: new Date(now).toISOString() });
           updateDraft(id, () => EMPTY_DRAFT);
-          const body = { content, attachment_ids: ready.map((a) => a.id), mode, knowledge };
+          const body = { content, ...params, ...(isChat ? { attachment_ids: ready.map((a) => a.id) } : {}) };
           void runStream(
+            kind,
             id,
             (signal) => api.sendMessage(id, body, signal),
             content,
@@ -442,27 +507,33 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
                 dispatch({ type: 'dialogUnlisted', id });
               }
             },
+            onRefused,
           );
         },
         (error: unknown) => setNotice(key, errorText(error)),
       );
     },
-    [config, ensureDialog, knowledge, mode, runStream, setNotice, updateDraft],
+    [config, ensureDialog, kindOf, runStream, setNotice, updateDraft],
   );
 
   const regenerate = useCallback(
-    (id: string) => {
+    (kind: DialogKind, id: string, options?: { body?: { schema_id: string | null }; onRefused?: OnRefused }) => {
       const before = stateRef.current.dialogs[id]?.messages ?? [];
       dispatch({ type: 'generationStarted', id, question: null, now: Date.now() });
       void runStream(
+        kind,
         id,
-        (signal) => api.regenerate(id, signal),
+        (signal) => api.regenerate(id, signal, options?.body),
         null,
         () => dispatch({ type: 'generationRejected', id, messages: before }),
+        options?.onRefused,
       );
     },
     [runStream],
   );
+
+  const addDialog = useCallback((dialog: Dialog) => dispatch({ type: 'dialogUpserted', dialog, toTop: true }), []);
+  const forgetDialog = useCallback((id: string) => dispatch({ type: 'dialogRemoved', id }), []);
 
   const stop = useCallback((id: string) => streams.current.get(id)?.abort(), []);
 
@@ -497,6 +568,8 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       stop,
       rename,
       remove,
+      addDialog,
+      forgetDialog,
     }),
     [
       state,
@@ -518,6 +591,8 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       stop,
       rename,
       remove,
+      addDialog,
+      forgetDialog,
     ],
   );
 

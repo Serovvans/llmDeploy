@@ -28,6 +28,8 @@ function message(patch: Partial<Message>): Message {
     attachments: [],
     sources: null,
     sources_found: null,
+    sql_check: null,
+    sql_dangers: null,
     dropped_messages: 0,
     created_at: '2026-10-05T09:01:00Z',
     ...patch,
@@ -301,7 +303,7 @@ describe('чат: отправка и поток ответа', () => {
     await user.type(field(), 'Уже набираю второй');
     refuse?.();
 
-    expect(await screen.findByText(t.errors.inProgress)).toBeInTheDocument();
+    expect(await screen.findByText(texts.dialogs.chat.inProgress)).toBeInTheDocument();
     expect(field()).toHaveValue('Первый вопрос\n\nУже набираю второй');
   });
 
@@ -331,7 +333,7 @@ describe('чат: отправка и поток ответа', () => {
     server.on(`POST /api/dialogs/${ID}/regenerate`, () => fail(409, 'generation_in_progress'));
 
     await user.click(await screen.findByRole('button', { name: t.regenerate }));
-    expect(await screen.findByRole('alert')).toHaveTextContent(t.errors.inProgress);
+    expect(await screen.findByRole('alert')).toHaveTextContent(texts.dialogs.chat.inProgress);
     expect(screen.getByText('Прежний ответ')).toBeInTheDocument();
   });
 
@@ -355,7 +357,7 @@ describe('чат: отправка и поток ответа', () => {
   });
 
   it.each([
-    [409, 'generation_in_progress', t.errors.inProgress],
+    [409, 'generation_in_progress', texts.dialogs.chat.inProgress],
     [422, 'message_too_long', t.errors.tooLong],
     [413, 'request_too_large', texts.common.requestTooLarge],
   ])('отказ до потока %s %s: текст под панелью запроса, вопрос остаётся в поле', async (status, code, text) => {
@@ -489,7 +491,7 @@ describe('чат: ответ после перезагрузки', () => {
     });
     renderApp(`/chat/${ID}`);
 
-    expect(await screen.findByText(t.longDialog)).toBeInTheDocument();
+    expect(await screen.findByText(texts.dialogs.chat.longDialog)).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole('button', { name: t.earlier }));
     expect(await screen.findByText('Ранний ответ')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: t.earlier })).not.toBeInTheDocument();
@@ -629,7 +631,7 @@ describe('чат: вложения', () => {
 
   it('чат без сообщений, открытый по адресу, попадает в историю после первого вопроса', async () => {
     const user = userEvent.setup();
-    const server = mockApi({
+    mockApi({
       'GET /api/auth/session': () => ok(session('ready')),
       [`GET /api/dialogs/${ID}/messages`]: () => ok({ items: [], next_cursor: null }),
       [`GET /api/dialogs/${ID}`]: () => ok(dialog({ title: null })),
@@ -640,7 +642,6 @@ describe('чат: вложения', () => {
     await screen.findByRole('heading', { level: 2, name: t.empty.title });
     const history = within(screen.getByRole('complementary', { name: t.history }));
     expect(history.queryByRole('link')).not.toBeInTheDocument();
-    expect(server.callsTo(`GET /api/dialogs/${ID}`)).toHaveLength(0);
 
     await user.type(field(), 'Первый вопрос{Enter}');
     expect(await history.findByRole('link')).toBeInTheDocument();

@@ -22,6 +22,8 @@ from portal.dialogs.routes import ATTACHMENT_UPLOAD_PATH
 from portal.dialogs.routes import router as dialogs_router
 from portal.kb.routes import DOCUMENT_UPLOAD_PATH
 from portal.kb.routes import router as kb_router
+from portal.tools.routes import DOCPARSE_UPLOAD_PATH
+from portal.tools.routes import router as tools_router
 
 _SESSION_ENDED_CODES = frozenset({"unauthenticated", "login_step_expired"})
 
@@ -55,6 +57,7 @@ def _body_limits(container: Container) -> tuple[BodyLimit, list[tuple[re.Pattern
     server = container.settings.server
     attachment_limit = container.settings.chat.attachment_max_bytes
     document_limit = container.settings.kb.document_max_bytes
+    docparse_limit = container.settings.docparse.document_max_bytes
     default = BodyLimit(
         server.json_body_max_bytes, errors.request_too_large(server.json_body_max_bytes)
     )
@@ -73,6 +76,13 @@ def _body_limits(container: Container) -> tuple[BodyLimit, list[tuple[re.Pattern
                 errors.file_too_large(document_limit),
             ),
         ),
+        (
+            DOCPARSE_UPLOAD_PATH,
+            BodyLimit(
+                docparse_limit + server.multipart_overhead_bytes,
+                errors.file_too_large(docparse_limit),
+            ),
+        ),
     ]
     return default, uploads
 
@@ -87,6 +97,8 @@ def create_app(container: Container) -> FastAPI:
         await container.dialogs.purge_empty()
         yield
         await container.generation.shutdown()
+        await container.docparse.shutdown()
+        container.sql_checker.close()
         await container.http_client.aclose()
         await container.qdrant.close()
         await container.engine.dispose()
@@ -102,6 +114,7 @@ def create_app(container: Container) -> FastAPI:
     app.include_router(admin_router)
     app.include_router(config_router)
     app.include_router(dialogs_router)
+    app.include_router(tools_router)
     app.include_router(kb_router)
 
     @app.get("/healthz")

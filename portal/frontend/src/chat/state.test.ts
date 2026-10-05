@@ -26,6 +26,8 @@ function message(patch: Partial<Message>): Message {
     attachments: [],
     sources: null,
     sources_found: null,
+    sql_check: null,
+    sql_dangers: null,
     dropped_messages: 0,
     created_at: '2026-10-05T09:00:00Z',
     ...patch,
@@ -100,7 +102,7 @@ describe('состояние чата', () => {
       ),
     ]);
     expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ dropped_messages: 4, status: 'length_limit' });
-    expect(state.history.items[0]?.title).toBe('Аренда участка');
+    expect(state.history.chat.items[0]?.title).toBe('Аренда участка');
   });
 
   it('поиск в базе знаний: фаза, число найденного сразу, под ответом — только упомянутые вне кода', () => {

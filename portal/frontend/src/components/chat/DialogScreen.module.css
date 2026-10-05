@@ -50,3 +50,10 @@
   --p-chat-column-margin: 0;
   padding-right: 560px;
 }
+
+.banner {
+  width: 100%;
+  max-width: 824px;
+  margin: 0 var(--p-chat-column-margin, auto);
+  padding: 12px 32px 0;
+}

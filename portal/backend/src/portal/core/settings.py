@@ -6,12 +6,24 @@
 """
 
 import base64
+import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretBytes, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretBytes,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
+
+# Значение high модель не принимает (docs/design.md §3.1): настройки отвергают его при старте.
+ReasoningEffort = Literal["low", "medium", "xhigh"]
 
 CONFIG_DIR = Path("config")
 OVERRIDE_PATH = Path("/etc/portal/config.override.yaml")
@@ -306,7 +318,20 @@ class DocparseSettings(_Section):
     document_max_bytes: int = Field(ge=1)
     max_pages: int = Field(ge=1)
     document_extensions: tuple[str, ...]
+    max_output_tokens: int = Field(ge=1)
+    dialog_reserve_tokens: int = Field(ge=0)
+    run_timeout_seconds: int = Field(ge=1)
+    free_form_max_items: int = Field(ge=1)
+    reasoning_effort: ReasoningEffort
+    extraction_system_prompt: str = Field(min_length=1)
+    free_form_system_prompt: str = Field(min_length=1)
+    summary_system_prompt: str = Field(min_length=1)
+    dialog_system_prompt: str = Field(min_length=1)
     templates: tuple[DocparseTemplate, ...]
+
+    def template(self, template_id: str) -> DocparseTemplate | None:
+        """Шаблон по идентификатору."""
+        return next((item for item in self.templates if item.id == template_id), None)
 
     @model_validator(mode="after")
     def _check_unique_ids(self) -> Self:
@@ -321,6 +346,16 @@ class SqlDialect(_Section):
 
     id: str = Field(min_length=1)
     title: str = Field(min_length=1)
+    sqlglot: str = Field(min_length=1)
+
+
+class SqlPrompts(_Section):
+    """Системные сообщения SQL-помощника по действиям; `{dialect}` — название диалекта."""
+
+    write: str = Field(min_length=1)
+    explain: str = Field(min_length=1)
+    debug: str = Field(min_length=1)
+    optimize: str = Field(min_length=1)
 
 
 class SqlSettings(_Section):
@@ -329,12 +364,54 @@ class SqlSettings(_Section):
     dialects: tuple[SqlDialect, ...] = Field(min_length=1)
     default_dialect: str
     schema_max_chars: int = Field(ge=1)
+    max_schemas: int = Field(ge=1)
+    reasoning_effort: ReasoningEffort
+    max_output_tokens: int = Field(ge=1)
+    check_max_chars: int = Field(ge=1)
+    check_timeout_seconds: float = Field(gt=0)
+    error_line_patterns: tuple[str, ...]
+    error_line_check_chars: int = Field(ge=1)
+
+    @field_validator("error_line_patterns")
+    @classmethod
+    def _check_patterns(cls, patterns: tuple[str, ...]) -> tuple[str, ...]:
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                raise ValueError(
+                    "sql.error_line_patterns: негодное регулярное выражение"
+                ) from error
+        return patterns
+
+    system_prompts: SqlPrompts
+
+    def dialect(self, dialect_id: str) -> SqlDialect | None:
+        """Диалект по идентификатору."""
+        return next((item for item in self.dialects if item.id == dialect_id), None)
 
     @model_validator(mode="after")
     def _check_default(self) -> Self:
         if self.default_dialect not in {dialect.id for dialect in self.dialects}:
             raise ValueError("sql.default_dialect нет в sql.dialects")
         return self
+
+
+class CogisPrompts(_Section):
+    """Системные сообщения помощника CoGIS по действиям."""
+
+    write: str = Field(min_length=1)
+    explain: str = Field(min_length=1)
+    debug: str = Field(min_length=1)
+
+
+class CogisSettings(_Section):
+    """Помощник по плагинам CoGIS."""
+
+    reasoning_effort: ReasoningEffort
+    max_output_tokens: int = Field(ge=1)
+    system_prompts: CogisPrompts
+    no_documentation_notice: str = Field(min_length=1)
 
 
 class Settings(_Section):
@@ -350,6 +427,7 @@ class Settings(_Section):
     kb: KbSettings
     docparse: DocparseSettings
     sql: SqlSettings
+    cogis: CogisSettings
 
     common_passwords: frozenset[str] = Field(repr=False)
     db_password: SecretStr

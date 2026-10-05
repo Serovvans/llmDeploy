@@ -3,7 +3,7 @@ import { Button, Hint, Kebab, Link, Loader, MenuItem, ScrollContainer } from '@s
 import { NavLink } from 'react-router-dom';
 
 import type { Dialog } from '../../api/types';
-import { historyGroup, type ChatState, type HistoryGroup } from '../../chat/state';
+import { historyGroup, type History, type HistoryGroup } from '../../chat/state';
 import { texts } from '../../texts';
 import { Notice } from '../Notice';
 import { TitleHint } from '../TitleHint';
@@ -13,9 +13,15 @@ const t = texts.chat;
 const GROUPS: HistoryGroup[] = ['today', 'yesterday', 'week', 'earlier'];
 
 interface HistoryPanelProps {
-  history: ChatState['history'];
+  history: History;
+  /** Адрес раздела: строка истории ведёт на `basePath/:id`. */
+  basePath: string;
+  /** Подпись кнопки и название диалога, которому модель ещё не дала названия. */
+  newLabel: string;
   onNewChat: () => void;
-  onRename: (dialog: Dialog) => void;
+  /** «Переименовать» есть не у всех разделов: название разбора — имя файла. */
+  onRename?: (dialog: Dialog) => void;
+  onExport: (dialog: Dialog) => void;
   onRemove: (dialog: Dialog) => void;
   onShowMore: () => void;
   onRetry: () => void;
@@ -26,7 +32,8 @@ function rowClass({ isActive }: { isActive: boolean }): string {
 }
 
 /** Панель раздела — история чатов по дате последнего сообщения (концепция §5.5). */
-export function HistoryPanel({ history, onNewChat, onRename, onRemove, onShowMore, onRetry }: HistoryPanelProps) {
+export function HistoryPanel(props: HistoryPanelProps) {
+  const { history, basePath, newLabel, onNewChat, onRename, onExport, onRemove, onShowMore, onRetry } = props;
   const now = new Date();
   const groups = GROUPS.map((group) => ({
     group,
@@ -37,13 +44,13 @@ export function HistoryPanel({ history, onNewChat, onRename, onRemove, onShowMor
     <aside className={styles.panel} aria-label={t.history}>
       <div className={styles.new}>
         <Button use="primary" width="100%" icon={<IconPlusRegular16 />} onClick={onNewChat}>
-          {t.newChat}
+          {newLabel}
         </Button>
       </div>
       <div className={styles.scroll}>
         <ScrollContainer>
           <Loader
-            active={history.status === 'loading' && history.items.length === 0}
+            active={history.status !== 'ready' && history.status !== 'failed' && history.items.length === 0}
             caption={texts.common.loading}
             delayBeforeSpinnerShow={300}
           >
@@ -58,18 +65,19 @@ export function HistoryPanel({ history, onNewChat, onRename, onRemove, onShowMor
                   <h2 className={styles.group}>{t.groups[group]}</h2>
                   <ul className={styles.items}>
                     {items.map((dialog) => {
-                      const title = dialog.title ?? t.newChat;
+                      const title = dialog.title ?? newLabel;
                       return (
                         <li key={dialog.id} className={styles.item} data-opener={`history-${dialog.id}`}>
                           <TitleHint text={title} pos="right">
-                            <NavLink to={`/chat/${dialog.id}`} className={rowClass}>
+                            <NavLink to={`${basePath}/${dialog.id}`} className={rowClass}>
                               {title}
                             </NavLink>
                           </TitleHint>
                           <span className={styles.kebab}>
                             <Hint text={texts.users.actions}>
                               <Kebab aria-label={`${texts.users.actions}: ${title}`}>
-                                <MenuItem onClick={() => onRename(dialog)}>{t.menu.rename}</MenuItem>
+                                {onRename && <MenuItem onClick={() => onRename(dialog)}>{t.menu.rename}</MenuItem>}
+                                <MenuItem onClick={() => onExport(dialog)}>{t.menu.exportDocx}</MenuItem>
                                 <MenuItem onClick={() => onRemove(dialog)}>{t.menu.remove}</MenuItem>
                               </Kebab>
                             </Hint>

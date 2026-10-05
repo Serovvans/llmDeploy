@@ -1,6 +1,6 @@
 /** Состояние чата: история, сообщения диалогов, идущие ответы и черновики панели запроса. Чистые функции. */
 import type { StreamEvent } from '../api/stream';
-import type { Attachment, Dialog, Message, Source } from '../api/types';
+import type { Attachment, Dialog, DialogKind, Message, Source } from '../api/types';
 import { footnoteNumbers } from './footnotes';
 
 /** Сообщение на экране: `error_message` — текст сервера для кода, которого нет в словаре (только из потока). */
@@ -42,19 +42,31 @@ export interface Draft {
   notice: string | null;
 }
 
+/** История диалогов одного вида; `idle` — ещё не запрашивалась. */
+export interface History {
+  status: 'idle' | 'loading' | 'ready' | 'failed';
+  items: Dialog[];
+  nextCursor: string | null;
+}
+
+/** Диалоги всех видов: чат, SQL-помощник, помощник CoGIS, вопросы по разобранному документу. */
 export interface ChatState {
-  history: { status: 'loading' | 'ready' | 'failed'; items: Dialog[]; nextCursor: string | null };
+  history: Record<DialogKind, History>;
   dialogs: Record<string, DialogView>;
   drafts: Record<string, Draft>;
 }
 
-/** Ключ черновика чата, которого ещё нет на сервере. */
-export const NEW_CHAT = 'new';
+/** Ключ черновика диалога, которого ещё нет на сервере. */
+export function newDialogKey(kind: DialogKind): string {
+  return `new:${kind}`;
+}
+
+const EMPTY_HISTORY: History = { status: 'idle', items: [], nextCursor: null };
 
 export const EMPTY_DRAFT: Draft = { text: '', attachments: [], notice: null };
 
 export const INITIAL_STATE: ChatState = {
-  history: { status: 'loading', items: [], nextCursor: null },
+  history: { chat: EMPTY_HISTORY, sql: EMPTY_HISTORY, cogis: EMPTY_HISTORY, docparse: EMPTY_HISTORY },
   dialogs: {},
   drafts: {},
 };
@@ -62,9 +74,9 @@ export const INITIAL_STATE: ChatState = {
 const EMPTY_VIEW: DialogView = { status: 'ready', messages: [], olderCursor: null, generation: null };
 
 export type ChatAction =
-  | { type: 'historyLoading' }
-  | { type: 'historyLoaded'; items: Dialog[]; nextCursor: string | null; append: boolean }
-  | { type: 'historyFailed' }
+  | { type: 'historyLoading'; kind: DialogKind }
+  | { type: 'historyLoaded'; kind: DialogKind; items: Dialog[]; nextCursor: string | null; append: boolean }
+  | { type: 'historyFailed'; kind: DialogKind }
   | { type: 'dialogUpserted'; dialog: Dialog; toTop: boolean }
   | { type: 'dialogTouched'; id: string; now: string }
   | { type: 'dialogRemoved'; id: string }
@@ -111,6 +123,8 @@ function localMessage(role: 'user' | 'assistant', now: number, patch: Partial<Ch
     attachments: [],
     sources: null,
     sources_found: null,
+    sql_check: null,
+    sql_dangers: null,
     dropped_messages: 0,
     created_at: new Date(now).toISOString(),
     ...patch,
@@ -145,6 +159,21 @@ export function applyStreamEvent(view: DialogView, event: StreamEvent, now: numb
       });
       return { ...view, messages };
     }
+    case 'sql_question_check': {
+      // Предупреждение об опасной операции во вставленном запросе — у вопроса, до начала ответа.
+      const index = view.messages.length - 2;
+      const messages = view.messages.map((message, i) =>
+        i === index && message.role === 'user' ? { ...message, sql_dangers: event.dangers } : message,
+      );
+      return { ...view, messages };
+    }
+    case 'sql_check':
+      return withLastAnswer(view, (answer) => ({ ...answer, sql_check: { blocks: event.blocks } }));
+    case 'progress':
+    case 'extraction_started':
+    case 'extraction':
+      // События потока разбора документа: у диалогов их не бывает.
+      return view;
     case 'search_started':
       return { ...view, generation: { ...generation, phase: 'searching' } };
     case 'sources':
@@ -205,42 +234,50 @@ function upsertDialog(items: Dialog[], dialog: Dialog, toTop: boolean): Dialog[]
   return items.map((item) => (item.id === dialog.id ? dialog : item));
 }
 
+function withHistory(state: ChatState, kind: DialogKind, update: (history: History) => History): ChatState {
+  return { ...state, history: { ...state.history, [kind]: update(state.history[kind]) } };
+}
+
+/** Применяет правку к истории того вида, в которой есть диалог `id`. */
+function withHistoryOf(state: ChatState, id: string, update: (items: Dialog[]) => Dialog[]): ChatState {
+  const kind = (Object.keys(state.history) as DialogKind[]).find((candidate) =>
+    state.history[candidate].items.some((item) => item.id === id),
+  );
+  return kind ? withHistory(state, kind, (history) => ({ ...history, items: update(history.items) })) : state;
+}
+
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case 'historyLoading':
-      return { ...state, history: { ...state.history, status: 'loading' } };
-    case 'historyLoaded': {
-      const known = new Set(action.items.map((item) => item.id));
-      const items = action.append
-        ? [...state.history.items.filter((item) => !known.has(item.id)), ...action.items]
-        : action.items;
-      return { ...state, history: { status: 'ready', items, nextCursor: action.nextCursor } };
-    }
+      return withHistory(state, action.kind, (history) => ({ ...history, status: 'loading' }));
+    case 'historyLoaded':
+      return withHistory(state, action.kind, (history) => {
+        const known = new Set(action.items.map((item) => item.id));
+        const items = action.append
+          ? [...history.items.filter((item) => !known.has(item.id)), ...action.items]
+          : action.items;
+        return { status: 'ready', items, nextCursor: action.nextCursor };
+      });
     case 'historyFailed':
-      return { ...state, history: { ...state.history, status: 'failed' } };
+      return withHistory(state, action.kind, (history) => ({ ...history, status: 'failed' }));
     case 'dialogUpserted':
-      return {
-        ...state,
-        history: { ...state.history, items: upsertDialog(state.history.items, action.dialog, action.toTop) },
-      };
-    case 'dialogTouched': {
-      const dialog = state.history.items.find((item) => item.id === action.id);
-      if (!dialog) {
-        return state;
-      }
-      const touched = { ...dialog, updated_at: action.now };
-      return { ...state, history: { ...state.history, items: upsertDialog(state.history.items, touched, true) } };
-    }
+      return withHistory(state, action.dialog.kind, (history) => ({
+        ...history,
+        items: upsertDialog(history.items, action.dialog, action.toTop),
+      }));
+    case 'dialogTouched':
+      return withHistoryOf(state, action.id, (items) => {
+        const dialog = items.find((item) => item.id === action.id) as Dialog;
+        return upsertDialog(items, { ...dialog, updated_at: action.now }, true);
+      });
     case 'dialogUnlisted':
-      return { ...state, history: { ...state.history, items: state.history.items.filter((item) => item.id !== action.id) } };
-    case 'dialogRemoved': {
-      const items = state.history.items.filter((item) => item.id !== action.id);
+      return withHistoryOf(state, action.id, (items) => items.filter((item) => item.id !== action.id));
+    case 'dialogRemoved':
       return {
-        history: { ...state.history, items },
+        ...withHistoryOf(state, action.id, (items) => items.filter((item) => item.id !== action.id)),
         dialogs: { ...state.dialogs, [action.id]: { ...EMPTY_VIEW, status: 'deleted' } },
         drafts: without(state.drafts, action.id),
       };
-    }
     case 'messagesLoading':
       return withView(state, action.id, (view) => ({ ...view, status: view.messages.length ? view.status : 'loading' }));
     case 'messagesLoaded':
@@ -277,12 +314,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         };
       });
     case 'streamEvent': {
-      if (action.event.type === 'title') {
-        const title = action.event.title;
-        const items = state.history.items.map((item) => (item.id === action.id ? { ...item, title } : item));
-        return { ...state, history: { ...state.history, items } };
-      }
       const event = action.event;
+      if (event.type === 'title') {
+        return withHistoryOf(state, action.id, (items) =>
+          items.map((item) => (item.id === action.id ? { ...item, title: event.title } : item)),
+        );
+      }
       return withView(state, action.id, (view) => applyStreamEvent(view, event, action.now));
     }
     case 'generationStopped':

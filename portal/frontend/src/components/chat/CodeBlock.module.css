@@ -18,6 +18,7 @@
 }
 
 .code {
+  position: relative;
   margin: 0;
   padding: 12px;
   overflow-x: auto;
@@ -108,4 +109,27 @@
 :global(html[data-theme='dark']) .code :global(.hljs-comment),
 :global(html[data-theme='dark']) .code :global(.hljs-doctag) {
   color: #adadad;
+}
+
+.errorLine {
+  position: absolute;
+  left: 0;
+  width: 3px;
+  height: 22px;
+  background: var(--p-warning-icon);
+}
+
+.check {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.valid {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
 }

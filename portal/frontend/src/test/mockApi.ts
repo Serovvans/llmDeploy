@@ -7,6 +7,9 @@ interface MockResponse {
   body?: unknown;
   /** Поток событий вместо тела JSON. */
   stream?: ReadableStream<Uint8Array>;
+  /** Содержимое файла вместо тела JSON. */
+  file?: string;
+  headers?: Record<string, string>;
 }
 
 type Handler = (body: unknown, url: URL) => MockResponse | Promise<MockResponse>;
@@ -35,6 +38,24 @@ export const CONFIG = {
     attachment_extensions: ['.jpg', '.jpeg', '.png', '.pdf', '.docx', '.txt', '.md'],
     max_attachments: 10,
     max_images: 8,
+  },
+  docparse: {
+    document_max_bytes: 52428800,
+    max_pages: 40,
+    document_extensions: ['.pdf', '.docx', '.jpg', '.jpeg', '.png'],
+    templates: [
+      { id: 'egrn', title: 'Выписка ЕГРН', description: 'Сведения об объекте недвижимости и правах на него', free_form: false },
+      { id: 'free', title: 'Произвольный документ', description: 'Без таблицы реквизитов заранее, модель сама выделит главное', free_form: true },
+    ],
+  },
+  sql: {
+    dialects: [
+      { id: 'postgres', title: 'PostgreSQL + PostGIS' },
+      { id: 'mssql', title: 'Microsoft SQL Server' },
+    ],
+    default_dialect: 'postgres',
+    schema_max_chars: 50000,
+    max_schemas: 50,
   },
   kb: {
     document_max_bytes: 52428800,
@@ -125,6 +146,8 @@ export function mockApi(initial: Record<string, Handler>) {
     'GET /api/config': () => ok(CONFIG),
     'GET /api/dialogs': () => ok({ items: [], next_cursor: null }),
     'GET /api/kb/documents': () => ok({ items: [], page: 1, page_size: 50, total: 0 }),
+    'GET /api/sql/schemas': () => ok({ items: [] }),
+    'GET /api/kb/cogis-documentation': () => ok({ available: true }),
     ...initial,
   };
   const calls: ApiCall[] = [];
@@ -140,6 +163,9 @@ export function mockApi(initial: Record<string, Handler>) {
       throw new Error(`Тест не описал ответ на ${method} ${url.pathname}`);
     }
     const response = await handler(body, url);
+    if (response.file !== undefined) {
+      return new Response(response.file, { status: response.status, headers: response.headers });
+    }
     if (response.stream) {
       return new Response(abortable(response.stream, init.signal), {
         status: response.status,

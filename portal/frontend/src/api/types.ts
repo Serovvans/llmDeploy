@@ -77,7 +77,12 @@ export interface PortalConfig {
     document_extensions: string[];
     templates: { id: string; title: string; description: string; free_form: boolean }[];
   };
-  sql: { dialects: { id: string; title: string }[]; default_dialect: string; schema_max_chars: number };
+  sql: {
+    dialects: { id: string; title: string }[];
+    default_dialect: string;
+    schema_max_chars: number;
+    max_schemas: number;
+  };
 }
 
 export interface FieldError {
@@ -107,6 +112,8 @@ export interface Dialog {
   title: string | null;
   created_at: string;
   updated_at: string;
+  /** Только у диалога вида `docparse` в ответе `GET /api/dialogs/{id}`. */
+  docparse?: DocparseResult;
 }
 
 export interface Attachment {
@@ -133,7 +140,26 @@ export interface Source {
   quote: string;
 }
 
-/** Сообщение диалога (контракт §5.1). Поля проверки SQL понадобятся на этапе 5. */
+export type SqlDanger = 'drop' | 'truncate' | 'delete_without_where' | 'update_without_where';
+
+/** Проверка блоков `sql` ответа (контракт §7.1): `index` — номер блока среди блоков этого языка, с нуля. */
+export interface SqlCheck {
+  blocks: {
+    index: number;
+    /**
+     * Строка текста ответа (с единицы, делитель — `\n`), на которой блок открывается: по ней итог привязан
+     * к блоку. У сообщений, сохранённых до появления поля, его нет — запись показывается под текстом ответа.
+     */
+    line?: number;
+    /** `null` — проверить не удалось, причина — в `unchecked`; опасные операции определяются при любом значении. */
+    valid: boolean | null;
+    unchecked?: string | null;
+    error: { line: number; column: number; near: string } | null;
+    dangers: SqlDanger[];
+  }[];
+}
+
+/** Сообщение диалога (контракт §5.1). */
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -146,6 +172,10 @@ export interface Message {
   /** `null` — поиск в базе знаний не выполнялся; `[]` — выполнялся, сносок в ответе нет. */
   sources: Source[] | null;
   sources_found: number | null;
+  /** Только у ответа в диалоге `sql`. */
+  sql_check: SqlCheck | null;
+  /** Только у вопроса в диалоге `sql`: опасные операции во вставленном запросе. */
+  sql_dangers: SqlDanger[] | null;
   dropped_messages: number;
   created_at: string;
 }
@@ -154,13 +184,45 @@ export type AnswerMode = 'fast' | 'thorough';
 
 export type Knowledge = 'none' | 'shared' | 'shared_and_personal';
 
-/** Тело сообщения чата (контракт §5.3). */
-export interface ChatMessageBody {
-  content: string;
-  attachment_ids: string[];
-  mode: AnswerMode;
-  knowledge: Knowledge;
+export type SqlAction = 'write' | 'explain' | 'debug' | 'optimize';
+export type CogisAction = 'write' | 'explain' | 'debug';
+
+/** Параметры вопроса по виду диалога (контракт §5.3); к ним добавляется `content`. */
+export type QuestionParams =
+  | { mode: AnswerMode; knowledge: Knowledge }
+  | { action: SqlAction; dialect: string; schema_id: string | null }
+  | { action: CogisAction }
+  | Record<string, never>;
+
+export interface SqlSchemaSummary {
+  id: string;
+  name: string;
+  updated_at: string;
 }
+
+export interface SqlSchema extends SqlSchemaSummary {
+  content: string;
+}
+
+export type SummaryStatus = 'streaming' | 'complete' | 'stopped' | 'length_limit' | 'error';
+
+export interface DocparseField {
+  title: string;
+  value: string | null;
+}
+
+/** Результат разбора документа — поле `docparse` диалога (контракт §7.3). */
+export interface DocparseResult {
+  file_name: string;
+  page_count: number | null;
+  template_id: string;
+  template_title: string;
+  free_form: boolean;
+  fields: DocparseField[];
+  summary: string;
+  summary_status: SummaryStatus;
+}
+
 
 export type KbStatus = 'queued' | 'processing' | 'ready' | 'error';
 

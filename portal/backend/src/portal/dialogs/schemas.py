@@ -11,18 +11,20 @@ from portal.dialogs.domain import (
     Attachment,
     Dialog,
     DialogKind,
+    Docparse,
     Knowledge,
     MessageRole,
     MessageStatus,
+    SummaryStatus,
 )
 from portal.dialogs.service import MessageView
 from portal.files.ports import MediaType
 
 
 class CreateDialogRequest(RequestModel):
-    """`POST /api/dialogs`; виды `sql` и `cogis` появятся на этапе 5."""
+    """`POST /api/dialogs`; диалог `docparse` создаётся только запуском разбора."""
 
-    kind: Literal["chat"]
+    kind: Literal["chat", "sql", "cogis"]
 
 
 class RenameDialogRequest(RequestModel):
@@ -38,6 +40,68 @@ class ChatMessageRequest(RequestModel):
     attachment_ids: tuple[UUID, ...] = ()
     mode: AnswerMode
     knowledge: Knowledge
+
+
+class SqlMessageRequest(RequestModel):
+    """Тело сообщения в диалоге `sql`: все поля обязательны, `schema_id: null` — без схемы."""
+
+    content: str
+    action: Literal["write", "explain", "debug", "optimize"]
+    dialect: str
+    schema_id: UUID | None
+
+
+class CogisMessageRequest(RequestModel):
+    """Тело сообщения в диалоге `cogis`."""
+
+    content: str
+    action: Literal["write", "explain", "debug"]
+
+
+class DocparseMessageRequest(RequestModel):
+    """Вопрос по разобранному документу."""
+
+    content: str
+
+
+class SqlRegenerateRequest(RequestModel):
+    """Необязательное тело повторной генерации в диалоге `sql`: замена схемы (§5.6)."""
+
+    schema_id: UUID | None
+
+
+class DocparseFieldOut(BaseModel):
+    """Реквизит разбора; `value: null` — в документе его нет."""
+
+    title: str
+    value: str | None
+
+
+class DocparseOut(BaseModel):
+    """Результат разбора — поле `docparse` диалога (§7.3)."""
+
+    file_name: str
+    page_count: int | None
+    template_id: str
+    template_title: str
+    free_form: bool
+    fields: list[DocparseFieldOut]
+    summary: str
+    summary_status: SummaryStatus
+
+    @classmethod
+    def of(cls, docparse: Docparse) -> "DocparseOut":
+        """Собрать из разбора; пока содержание пишется, поле `summary` пусто."""
+        return cls(
+            file_name=docparse.file_name,
+            page_count=docparse.page_count,
+            template_id=docparse.template_id,
+            template_title=docparse.template_title,
+            free_form=docparse.free_form,
+            fields=[DocparseFieldOut.model_validate(item) for item in docparse.fields],
+            summary=docparse.summary,
+            summary_status=docparse.summary_status,
+        )
 
 
 class DialogOut(BaseModel):
@@ -59,6 +123,12 @@ class DialogOut(BaseModel):
             created_at=dialog.created_at,
             updated_at=dialog.updated_at,
         )
+
+
+class DialogDetailsOut(DialogOut):
+    """`GET /api/dialogs/{id}` для вида `docparse`: диалог с результатом разбора."""
+
+    docparse: DocparseOut
 
 
 class DialogListOut(BaseModel):
@@ -104,7 +174,7 @@ class SourceOut(BaseModel):
 
 
 class MessageOut(BaseModel):
-    """Объект `Message`; поля проверки SQL пока всегда `null` — диалоги `sql` на этапе 5."""
+    """Объект `Message`."""
 
     id: UUID
     role: MessageRole
@@ -116,8 +186,8 @@ class MessageOut(BaseModel):
     attachments: list[AttachmentOut]
     sources: list[SourceOut] | None
     sources_found: int | None
-    sql_check: dict[str, Any] | None = None
-    sql_dangers: list[str] | None = None
+    sql_check: dict[str, Any] | None
+    sql_dangers: list[str] | None
     dropped_messages: int
     created_at: ApiTime
 
@@ -138,6 +208,8 @@ class MessageOut(BaseModel):
             if message.sources is None
             else [SourceOut.model_validate(source) for source in message.sources],
             sources_found=message.sources_found,
+            sql_check=message.sql_check,
+            sql_dangers=message.sql_dangers,
             dropped_messages=message.dropped_messages,
             created_at=message.created_at,
         )

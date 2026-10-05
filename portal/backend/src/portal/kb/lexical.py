@@ -18,7 +18,10 @@ from portal.kb.ports import SparseVector
 _NORMALIZATION = str.maketrans({"ё": "е", **dict.fromkeys("‐‑‒–—―−", "-")})
 # Шаг 2. Знак номера с пробелами вокруг: слева отрезок из букв и цифр, справа — тоже
 # (правый только просматривается, чтобы стать левым для следующего знака).
-_SPACED_SIGN = re.compile(r"([^\W_]+)[ \t ]*([-/])[ \t ]*(?=([^\W_]+))")
+# Просмотр назад в начале обязателен: поиск стартует только с начала отрезка. Без него
+# длинный отрезок без знака перебирался с каждой своей буквы — квадратичное время на
+# тексте вопроса, а вектор запроса считается в цикле событий `portal-api`.
+_SPACED_SIGN = re.compile(r"(?<![^\W_])([^\W_]+)[ \t\xa0]*([-/])[ \t\xa0]*(?=([^\W_]+))")
 # Шаг 3. Слово или составной номер: отрезки из букв и цифр, соединённые знаками «: / . -»
 # (77:01:0004012:345, 14-а, 123/2024-пп, 05.10.2026).
 _TOKEN = re.compile(r"[^\W_]+(?:[:/.\-][^\W_]+)*")
@@ -30,14 +33,23 @@ _CYRILLIC = re.compile(r"[а-я]")
 _CYRILLIC_WORD = re.compile(r"[а-я]+")
 _DIGIT = re.compile(r"\d")
 _STEM_CACHE_SIZE = 100_000
+# Настоящие слова короче; более длинные отрезки в кеш не кладутся, иначе запросами из
+# длинных «слов» его память можно было бы раздуть.
+_STEM_CACHE_WORD_CHARS = 40
 
 _stemmer = snowballstemmer.stemmer("russian")
 
 
 @lru_cache(maxsize=_STEM_CACHE_SIZE)
+def _cached_stem(word: str) -> str:
+    return str(_stemmer.stemWord(word))
+
+
 def _stem(word: str) -> str:
     """Основа русского слова по Snowball; слова в текстах повторяются — ответ запоминается."""
-    return str(_stemmer.stemWord(word))
+    if len(word) > _STEM_CACHE_WORD_CHARS:
+        return str(_stemmer.stemWord(word))
+    return _cached_stem(word)
 
 
 def _join_spaced_number(match: re.Match[str]) -> str:

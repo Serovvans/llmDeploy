@@ -29,12 +29,18 @@
   text-align: right;
 }
 
-.question {
+.questionColumn {
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+}
+
+.question {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   padding: 8px 12px;
   border-radius: 8px;
   background: var(--p-surface-2);

@@ -6,7 +6,6 @@ import { readEvents, type StreamEvent } from './stream';
 import type {
   AdminUser,
   Attachment,
-  ChatMessageBody,
   CursorPage,
   Dialog,
   DialogKind,
@@ -24,6 +23,8 @@ import type {
   SecondFactorSetup,
   Session,
   SortOrder,
+  SqlSchema,
+  SqlSchemaSummary,
   TemporaryPasswordResult,
 } from './types';
 
@@ -81,7 +82,7 @@ export function onSessionSignal(listener: SessionSignalListener): () => void {
   };
 }
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 async function parseError(response: Response): Promise<ApiError> {
   try {
@@ -164,13 +165,17 @@ export function isAbort(error: unknown): boolean {
  * Обрыв соединения после статуса 200 — `StreamBrokenError`; закрытие через `signal` — ошибка отмены (`isAbort`).
  * Событие `error` с кодом `session_ended` дополнительно сообщает о потере сессии, как отказ `unauthenticated`.
  */
-async function* stream(path: string, json: unknown, signal: AbortSignal): AsyncGenerator<StreamEvent> {
+async function* stream(
+  path: string,
+  body: { json?: unknown; form?: FormData },
+  signal: AbortSignal,
+): AsyncGenerator<StreamEvent> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal.addEventListener('abort', abort);
   openStreams.add(controller);
   try {
-    const response = await send('POST', path, { json, accept: 'text/event-stream', signal: controller.signal });
+    const response = await send('POST', path, { ...body, accept: 'text/event-stream', signal: controller.signal });
     if (!response.body) {
       throw new StreamBrokenError();
     }
@@ -289,10 +294,43 @@ export const api = {
       `/api/dialogs/${id}/messages${cursor ? `?${new URLSearchParams({ cursor }).toString()}` : ''}`,
     ),
 
-  sendMessage: (id: string, body: ChatMessageBody, signal: AbortSignal) =>
-    stream(`/api/dialogs/${id}/messages`, body, signal),
+  /** Вопрос в диалоге любого вида: `content` и параметры этого вида (контракт §5.3). */
+  sendMessage: (id: string, body: { content: string } & Record<string, unknown>, signal: AbortSignal) =>
+    stream(`/api/dialogs/${id}/messages`, { json: body }, signal),
 
-  regenerate: (id: string, signal: AbortSignal) => stream(`/api/dialogs/${id}/regenerate`, undefined, signal),
+  /** `body` — только для `sql`: `{ schema_id }` взамен удалённой схемы вопроса (контракт §5.6). */
+  regenerate: (id: string, signal: AbortSignal, body?: { schema_id: string | null }) =>
+    stream(`/api/dialogs/${id}/regenerate`, { json: body }, signal),
+
+  /** Файл DOCX: диалог целиком или один ответ `messageId` (контракт §5.9). */
+  exportDialog: async (id: string, messageId?: string) => {
+    const query = messageId ? `?${new URLSearchParams({ message_id: messageId }).toString()}` : '';
+    const response = await send('GET', `/api/dialogs/${id}/export${query}`, { accept: DOCX_TYPE });
+    const name = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get('Content-Disposition') ?? '')?.[1];
+    return { blob: await response.blob(), fileName: name ? decodeURIComponent(name) : null };
+  },
+
+  listSqlSchemas: () => request<{ items: SqlSchemaSummary[] }>('GET', '/api/sql/schemas'),
+
+  getSqlSchema: (id: string) => request<SqlSchema>('GET', `/api/sql/schemas/${id}`),
+
+  createSqlSchema: (schema: { name: string; content: string }) => request<SqlSchema>('POST', '/api/sql/schemas', schema),
+
+  updateSqlSchema: (id: string, schema: { name: string; content: string }) =>
+    request<SqlSchema>('PUT', `/api/sql/schemas/${id}`, schema),
+
+  deleteSqlSchema: (id: string) => request<undefined>('DELETE', `/api/sql/schemas/${id}`),
+
+  /** Есть ли в общей базе готовая документация CoGIS (контракт §8.1). */
+  getCogisDocumentation: () => request<{ available: boolean }>('GET', '/api/kb/cogis-documentation'),
+
+  /** Разбор документа: поток `progress` → `extraction` → `delta` → `done` (контракт §6.4). */
+  startDocparse: (file: File, templateId: string, signal: AbortSignal) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('template_id', templateId);
+    return stream('/api/docparse', { form }, signal);
+  },
 
   uploadAttachment: async (dialogId: string, file: File) => {
     const form = new FormData();
@@ -340,6 +378,8 @@ export const api = {
     return request<DocumentText>('GET', `/api/kb/documents/${id}/text${query ? `?${query}` : ''}`);
   },
 };
+
+const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
 export const KB_PAGE_SIZE = 50;
 

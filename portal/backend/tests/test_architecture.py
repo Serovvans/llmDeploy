@@ -8,7 +8,7 @@ import pytest
 SOURCE = Path(__file__).parent.parent / "src" / "portal"
 FORBIDDEN = {
     "fastapi", "starlette", "sqlalchemy", "httpx", "asyncpg", "alembic", "uvicorn",
-    "argon2", "cryptography", "pyotp", "segno", "pypdfium2", "docx", "PIL",
+    "argon2", "cryptography", "pyotp", "segno", "pypdfium2", "docx", "PIL", "sqlglot",
     "qdrant_client", "yaml",
 }  # fmt: skip
 INNER_MODULES = [
@@ -26,6 +26,13 @@ INNER_MODULES = [
     "dialogs/ports.py",
     "dialogs/context.py",
     "dialogs/footnotes.py",
+    "dialogs/markdown.py",
+    "dialogs/watch.py",
+    "tools/errors.py",
+    "tools/sql_check.py",
+    "tools/sql_schemas.py",
+    "tools/dialog_tools.py",
+    "tools/docparse.py",
     "files/names.py",
     "files/text.py",
     "dialogs/service.py",
@@ -61,7 +68,9 @@ INFRASTRUCTURE = {
     "portal.core.container", "portal.core.middleware", "portal.core.sse",
     "portal.llm.bifrost", "portal.files.reader", "portal.files.storage",
     "portal.dialogs.repositories", "portal.dialogs.tables", "portal.dialogs.routes",
-    "portal.dialogs.schemas",
+    "portal.dialogs.schemas", "portal.dialogs.export",
+    "portal.tools.sql_repository", "portal.tools.tables", "portal.tools.routes",
+    "portal.tools.schemas", "portal.tools.sql_syntax",
     "portal.kb.repositories", "portal.kb.tables", "portal.kb.routes", "portal.kb.schemas",
     "portal.kb.qdrant", "portal.kb.embedder", "portal.kb.evalset",
 }  # fmt: skip

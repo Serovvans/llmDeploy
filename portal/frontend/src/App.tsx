@@ -3,15 +3,18 @@ import { useEffect } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 
 import { ChatProvider } from './chat/ChatProvider';
+import { DocparseProvider } from './docparse/DocparseProvider';
 import { AppShell } from './components/AppShell';
 import { ChatScreen } from './screens/ChatScreen';
 import { CodeScreen } from './screens/CodeScreen';
+import { CogisScreen } from './screens/CogisScreen';
+import { DocumentsScreen } from './screens/DocumentsScreen';
 import { KnowledgeScreen } from './screens/KnowledgeScreen';
 import { LoginScreen } from './screens/LoginScreen';
 import { PasswordScreen } from './screens/PasswordScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
 import { SecondFactorScreen } from './screens/SecondFactorScreen';
-import { SectionStub } from './screens/SectionStub';
+import { SqlScreen } from './screens/SqlScreen';
 import { CrashBoundary, NotFoundScreen, UnavailableScreen } from './screens/ServiceScreens';
 import { UsersScreen } from './screens/UsersScreen';
 import { loginStepPath, useSession } from './session/SessionContext';
@@ -60,19 +63,21 @@ function Workspace() {
   const user = session.user;
   return (
     <ChatProvider config={config}>
+      <DocparseProvider config={config}>
       <AppShell user={user}>
         <Routes>
         <Route path="/" element={<Navigate to={HOME} replace />} />
         <Route path="/chat/:id?" element={<ChatScreen />} />
         <Route path="/knowledge" element={<KnowledgeScreen />} />
-        <Route path="/sql/:id?" element={<SectionStub section="sql" />} />
-        <Route path="/cogis/:id?" element={<SectionStub section="cogis" />} />
-        <Route path="/documents/:id?" element={<SectionStub section="documents" />} />
+        <Route path="/sql/:id?" element={<SqlScreen />} />
+        <Route path="/cogis/:id?" element={<CogisScreen />} />
+        <Route path="/documents/:id?" element={<DocumentsScreen />} />
         <Route path="/admin/users" element={<UsersScreen />} />
         <Route path="/profile" element={<ProfileScreen user={user} />} />
         <Route path="*" element={<NotFoundScreen />} />
         </Routes>
       </AppShell>
+      </DocparseProvider>
     </ChatProvider>
   );
 }

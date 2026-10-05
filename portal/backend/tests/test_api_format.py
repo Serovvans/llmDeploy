@@ -186,6 +186,7 @@ async def test_config_is_available_on_any_login_step(portal: Portal) -> None:
         "dialects": [{"id": "postgres", "title": "PostgreSQL + PostGIS"}],
         "default_dialect": "postgres",
         "schema_max_chars": 50000,
+        "max_schemas": 50,
     }
 
 

@@ -97,6 +97,8 @@ async def make_portal(settings: Settings, *, scripted_model: bool = True) -> Por
 
 async def close_portal(portal: Portal) -> None:
     await portal.container.generation.shutdown()
+    await portal.container.docparse.shutdown()
+    portal.container.sql_checker.close()
     await portal.container.http_client.aclose()
     await portal.container.qdrant.close()
     await portal.container.engine.dispose()

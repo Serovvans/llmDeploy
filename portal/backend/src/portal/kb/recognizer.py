@@ -44,8 +44,10 @@ class ModelPageRecognizer:
         tasks = [asyncio.create_task(self._page(image)) for image in images]
         try:
             return list(await asyncio.gather(*tasks))
-        except (ModelUnavailableError, ModelOverloadedError, ContextOverflowError) as error:
-            raise RecognitionFailedError from error
+        except ModelOverloadedError as error:
+            raise RecognitionFailedError("overloaded") from error
+        except (ModelUnavailableError, ContextOverflowError) as error:
+            raise RecognitionFailedError("unavailable") from error
         finally:
             # Сбой одной страницы прекращает запросы остальных: их итог уже не нужен.
             for task in tasks:

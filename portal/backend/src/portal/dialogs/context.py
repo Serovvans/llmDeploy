@@ -10,9 +10,7 @@ from portal.dialogs.domain import Attachment, Message
 from portal.files.ports import MediaType
 from portal.llm.ports import MAX_IMAGES_PER_REQUEST, TokenEstimator
 
-_BLOCK = "вложение"
-# Закрывающая пометка блока в любом написании: с пробелами и в любом регистре.
-_CLOSING_TAG = re.compile(rf"<\s*/\s*{_BLOCK}", re.IGNORECASE)
+_ATTACHMENT = "вложение"
 
 
 @dataclass(frozen=True)
@@ -33,21 +31,34 @@ class Turn:
     images: tuple[ImageRef, ...] = ()
 
 
-def _inert(text: str) -> str:
-    """Не дать содержимому закрыть свой блок данных: разметка блока — только наша."""
-    return _CLOSING_TAG.sub(rf"<\\/{_BLOCK}", text)
+def data_block(tag: str, body: str, name: str | None = None) -> str:
+    """Размеченный блок недоверенных данных для запроса к модели.
+
+    Разметка блока — только наша: закрывающая пометка в содержимом и в имени
+    обезвреживается в любом написании (с пробелами, в любом регистре), так что
+    содержимое не может закрыть свой блок и выдать продолжение за указания.
+    """
+    closing = re.compile(rf"<\s*/\s*{re.escape(tag)}", re.IGNORECASE)
+
+    def inert(text: str) -> str:
+        return closing.sub(rf"<\\/{tag}", text)
+
+    opening = tag
+    if name is not None:
+        shown = inert(name).replace('"', "'").replace("\n", " ")
+        opening = f'{tag} имя="{shown}"'
+    return f"<{opening}>\n{inert(body)}\n</{tag}>"
 
 
 def _attachment_block(attachment: Attachment) -> str:
-    name = _inert(attachment.file_name).replace('"', "'").replace("\n", " ")
     scans = len(attachment.image_pages)
     if attachment.text_content:
-        body = _inert(attachment.text_content)
+        body = attachment.text_content
     elif scans:
         body = f"(изображений: {scans}, они приложены к сообщению)"
     else:
         body = "(в файле нет текста)"
-    return f'<{_BLOCK} имя="{name}">\n{body}\n</{_BLOCK}>'
+    return data_block(_ATTACHMENT, body, attachment.file_name)
 
 
 def question_turn(content: str, attachments: Sequence[Attachment]) -> Turn:
@@ -102,11 +113,14 @@ def fit_history(
     """
     fixed = estimator.text(system) + _tokens([question], estimator)
     dropped = min(min_dropped, len(history))
+    # Суммы по оставшейся истории ведутся вычитанием: проход по истории один.
+    tokens = _tokens(history[dropped:], estimator)
+    images = len(question.images) + sum(len(turn.images) for turn in history[dropped:])
     while dropped < len(history):
-        kept = history[dropped:]
-        images = len(question.images) + sum(len(turn.images) for turn in kept)
-        fits = fixed + _tokens(kept, estimator) <= budget and images <= MAX_IMAGES_PER_REQUEST
-        if fits and kept[0].role == "user":
+        fits = fixed + tokens <= budget and images <= MAX_IMAGES_PER_REQUEST
+        if fits and history[dropped].role == "user":
             break
+        tokens -= _tokens([history[dropped]], estimator)
+        images -= len(history[dropped].images)
         dropped += 1
     return dropped

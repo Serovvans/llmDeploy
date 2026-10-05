@@ -23,37 +23,51 @@ const KNOWLEDGE: [Knowledge, string][] = [
   ['shared_and_personal', t.knowledge.shared_and_personal],
 ];
 
-interface ComposerProps {
-  /** Чат, к которому относятся загруженные вложения; `null`, пока чат не создан. */
-  dialogId: string | null;
-  draft: Draft;
+/** Вложения, режим ответа и база знаний — только в чате (концепция §4.1). */
+interface ChatControls {
   mode: AnswerMode;
   knowledge: Knowledge;
-  /** `generating` — ответ идёт в этой вкладке (есть «Остановить»); `waiting` — формируется в другой. */
-  answer: 'idle' | 'generating' | 'waiting';
   /** Подсказка на кнопке «Прикрепить» и расширения для выбора файла; `null`, пока нет конфигурации. */
   attach: { hint: string; extensions: string[] } | null;
-  onTextChange: (text: string) => void;
   onModeChange: (mode: AnswerMode) => void;
   onKnowledgeChange: (knowledge: Knowledge) => void;
-  onSend: () => void;
-  onStop: () => void;
-  onNotice: (notice: string) => void;
   onAddFiles: (files: File[]) => void;
   onRetryFile: (key: string) => void;
   onRemoveFile: (key: string) => void;
 }
 
-/** Панель запроса (концепция §4.1): поле, вложения, режим ответа, «Отправить» / «Остановить». */
+interface ComposerProps {
+  /** Диалог, к которому относятся загруженные вложения; `null`, пока он не создан. */
+  dialogId: string | null;
+  draft: Draft;
+  /** `generating` — ответ идёт в этой вкладке (есть «Остановить»); `waiting` — формируется в другой. */
+  answer: 'idle' | 'generating' | 'waiting';
+  /** Подсказка в поле ввода; по умолчанию — как в чате. */
+  placeholder?: string;
+  /** Поле набирается моноширинным шрифтом — режимы со вставкой запроса или кода. */
+  mono?: boolean;
+  /** Что сказать под полем при попытке отправить во время ответа. */
+  waitText?: string;
+  /** Постоянная строка под панелью — что портал не делает. */
+  note?: string;
+  chat?: ChatControls;
+  onTextChange: (text: string) => void;
+  onSend: () => void;
+  onStop: () => void;
+  onNotice: (notice: string) => void;
+}
+
+/** Панель запроса (концепция §4.1) — одна на всех рабочих экранах: поле, «Отправить» / «Остановить». */
 export function Composer(props: ComposerProps) {
-  const { dialogId, draft, answer } = props;
+  const { dialogId, draft, answer, chat } = props;
+  const placeholder = props.placeholder ?? t.placeholder;
   const textarea = useRef<Textarea>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const noticeId = useId();
   const hintId = useId();
   const busy = answer !== 'idle';
 
-  // Фокус — в поле ввода: при открытии чата и после отправки.
+  // Фокус — в поле ввода: при открытии диалога и после отправки.
   useEffect(() => {
     textarea.current?.focus();
   }, [dialogId]);
@@ -61,7 +75,7 @@ export function Composer(props: ComposerProps) {
   const send = () => {
     textarea.current?.focus();
     if (busy) {
-      props.onNotice(t.waitAnswer);
+      props.onNotice(props.waitText ?? t.waitAnswer);
     } else {
       props.onSend();
     }
@@ -78,14 +92,14 @@ export function Composer(props: ComposerProps) {
 
   const onPaste = (event: React.ClipboardEvent) => {
     const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'));
-    if (images.length > 0) {
+    if (chat && images.length > 0) {
       event.preventDefault();
-      props.onAddFiles(images);
+      chat.onAddFiles(images);
     }
   };
 
   const onFilesChosen = (event: React.ChangeEvent<HTMLInputElement>) => {
-    props.onAddFiles(Array.from(event.target.files ?? []));
+    chat?.onAddFiles(Array.from(event.target.files ?? []));
     event.target.value = '';
   };
 
@@ -101,8 +115,8 @@ export function Composer(props: ComposerProps) {
                 attachment={item.attachment}
                 fileUrl={dialogId && item.attachment ? attachmentFileUrl(dialogId, item.attachment.id) : null}
                 failed={item.status === 'failed'}
-                onRetry={() => props.onRetryFile(item.key)}
-                onRemove={() => props.onRemoveFile(item.key)}
+                onRetry={() => chat?.onRetryFile(item.key)}
+                onRemove={() => chat?.onRemoveFile(item.key)}
               />
             ))}
           </div>
@@ -114,8 +128,9 @@ export function Composer(props: ComposerProps) {
           rows={2}
           maxRows={10}
           extraRow={false}
-          placeholder={t.placeholder}
-          aria-label={t.placeholder}
+          placeholder={placeholder}
+          aria-label={placeholder}
+          className={props.mono ? 'p-mono' : undefined}
           aria-describedby={`${hintId} ${draft.notice ? noticeId : ''}`.trim()}
           value={draft.text}
           onValueChange={props.onTextChange}
@@ -123,38 +138,42 @@ export function Composer(props: ComposerProps) {
           onPaste={onPaste}
         />
         <div className={styles.controls}>
-          <input
-            ref={fileInput}
-            type="file"
-            multiple
-            hidden
-            accept={props.attach?.extensions.join(',')}
-            onChange={onFilesChosen}
-          />
-          <Hint text={props.attach?.hint ?? ''} maxWidth={320}>
-            <Button
-              icon={<IconAttachPaperclipRegular16 />}
-              disabled={!props.attach}
-              onClick={() => fileInput.current?.click()}
-            >
-              {t.attach}
-            </Button>
-          </Hint>
-          <Hint text={t.modeHint} maxWidth={320}>
-            <Switcher
-              items={MODES}
-              value={props.mode}
-              onValueChange={(value) => props.onModeChange(value === 'thorough' ? 'thorough' : 'fast')}
-            />
-          </Hint>
-          <Hint text={t.knowledgeHint} maxWidth={320}>
-            <Select<Knowledge, string>
-              items={KNOWLEDGE}
-              value={props.knowledge}
-              onValueChange={props.onKnowledgeChange}
-              renderValue={(value) => t.knowledgeChosen[value]}
-            />
-          </Hint>
+          {chat && (
+            <>
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                hidden
+                accept={chat.attach?.extensions.join(',')}
+                onChange={onFilesChosen}
+              />
+              <Hint text={chat.attach?.hint ?? ''} maxWidth={320}>
+                <Button
+                  icon={<IconAttachPaperclipRegular16 />}
+                  disabled={!chat.attach}
+                  onClick={() => fileInput.current?.click()}
+                >
+                  {t.attach}
+                </Button>
+              </Hint>
+              <Hint text={t.modeHint} maxWidth={320}>
+                <Switcher
+                  items={MODES}
+                  value={chat.mode}
+                  onValueChange={(value) => chat.onModeChange(value === 'thorough' ? 'thorough' : 'fast')}
+                />
+              </Hint>
+              <Hint text={t.knowledgeHint} maxWidth={320}>
+                <Select<Knowledge, string>
+                  items={KNOWLEDGE}
+                  value={chat.knowledge}
+                  onValueChange={chat.onKnowledgeChange}
+                  renderValue={(value) => t.knowledgeChosen[value]}
+                />
+              </Hint>
+            </>
+          )}
           <span className={styles.spacer} />
           {answer === 'generating' ? (
             <Button icon={<IconMediaUiAStopRegular16 />} onClick={props.onStop}>
@@ -170,6 +189,7 @@ export function Composer(props: ComposerProps) {
       <p id={hintId} className={styles.hint}>
         {t.hint}
       </p>
+      {props.note && <p className={styles.hint}>{props.note}</p>}
       {draft.notice && (
         <p id={noticeId} className={styles.notice} role="alert">
           {draft.notice}

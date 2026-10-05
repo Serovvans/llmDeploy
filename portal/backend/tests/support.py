@@ -1,6 +1,7 @@
 """Общие помощники тестов: стенд приложения, подменные часы, шаги входа."""
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ import pytest
 import sqlalchemy as sa
 import uvicorn
 from fastapi import FastAPI
+from llm_stub import replies
 
 from portal.core.container import Container
 from portal.core.ports import CurrentUser
@@ -24,7 +26,7 @@ from portal.kb.ports import (
     KnowledgeUnavailableError,
     Retrieval,
 )
-from portal.llm.ports import ChatRequest, ContentDelta, Finished, ReasoningDelta
+from portal.llm.ports import ChatRequest, ContentDelta, Finished, ImagePart, ReasoningDelta
 
 NEW_PASSWORD = "Надёжный-пароль-2026"
 CLIENT_IP = "203.0.113.5"
@@ -77,6 +79,11 @@ class ScriptedModel:
         self.requests: list[ChatRequest] = []
         self.title_requests: list[ChatRequest] = []
         self.title: str | Exception | asyncio.Event = "«Название от модели»"
+        # None — ответ по умолчанию; иначе строка, исключение или событие-затвор.
+        self.extraction: str | Exception | asyncio.Event | None = None
+        self.recognition: str | Exception | asyncio.Event | None = None
+        self.extraction_requests: list[ChatRequest] = []
+        self.recognition_requests: list[ChatRequest] = []
         self.closed = 0
 
     async def stream(
@@ -96,13 +103,31 @@ class ScriptedModel:
             self.closed += 1
 
     async def complete(self, request: ChatRequest) -> str:
+        """Ответ без потока: реквизиты по схеме, текст страницы-скана или название диалога."""
+        if request.json_schema is not None:
+            self.extraction_requests.append(request)
+            return await self._scripted(self.extraction, request)
+        if any(isinstance(part, ImagePart) for part in request.messages[-1].parts):
+            self.recognition_requests.append(request)
+            return await self._scripted(self.recognition, request)
         self.title_requests.append(request)
-        if isinstance(self.title, Exception):
-            raise self.title
-        if isinstance(self.title, asyncio.Event):
-            await self.title.wait()
+        return await self._scripted(self.title, request)
+
+    @staticmethod
+    async def _scripted(answer: Any, request: ChatRequest) -> str:
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, asyncio.Event):
+            await answer.wait()
             return "Поздно"
-        return self.title
+        if answer is None:
+            if request.json_schema is not None:
+                # Как заглушка стенда: значение каждого поля — «заглушка: <имя>».
+                filled = replies.schema_instance(request.json_schema)
+                return json.dumps(filled, ensure_ascii=False)
+            image = next(p for p in request.messages[-1].parts if isinstance(p, ImagePart))
+            return f"Распознанный текст страницы {hashlib.sha256(image.data).hexdigest()[:8]}."
+        return str(answer)
 
 
 class FakeKnowledge:
@@ -118,6 +143,7 @@ class FakeKnowledge:
         self.delegate: KnowledgeBase | None = None
         self.gate: asyncio.Event | None = None
         self.cancelled = 0
+        self.documented = False  # есть ли в общей базе документация CoGIS
 
     async def retrieve(self, query: str, user_id: UUID, scope: KnowledgeScope) -> Retrieval:
         self.calls.append((query, user_id, scope))
@@ -134,7 +160,7 @@ class FakeKnowledge:
         return self.result
 
     async def has_cogis_documentation(self) -> bool:
-        return False
+        return self.documented
 
 
 def parse_events(body: str) -> list[tuple[str, dict[str, Any]]]:
@@ -318,4 +344,32 @@ async def upload(
     return await client.post(
         f"/api/dialogs/{dialog_id}/attachments",
         files={"file": (name, content, "application/octet-stream")},
+    )
+
+
+async def new_tool_dialog(client: httpx.AsyncClient, kind: str) -> str:
+    """Создать диалог инструмента и вернуть его идентификатор."""
+    response = await client.post("/api/dialogs", json={"kind": kind})
+    assert response.status_code == 201, response.text
+    created: str = response.json()["id"]
+    return created
+
+
+async def post_events(
+    client: httpx.AsyncClient, path: str, body: dict[str, Any]
+) -> list[tuple[str, dict[str, Any]]]:
+    """Отправить тело на маршрут с потоком и вернуть события по порядку."""
+    response = await client.post(path, json=body)
+    assert response.status_code == 200, response.text
+    return parse_events(response.text)
+
+
+async def start_docparse(
+    client: httpx.AsyncClient, name: str, content: bytes, template_id: str = "egrn"
+) -> httpx.Response:
+    """Запустить разбор документа и дождаться конца потока."""
+    return await client.post(
+        "/api/docparse",
+        files={"file": (name, content, "application/octet-stream")},
+        data={"template_id": template_id},
     )

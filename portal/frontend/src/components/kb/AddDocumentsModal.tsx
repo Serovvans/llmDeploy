@@ -24,16 +24,19 @@ interface AddDocumentsModalProps {
   limits: PortalConfig['kb'];
   /** База открытой вкладки — предвыбранный вариант «Куда добавить». */
   scope: KbScope;
+  /** Отметка «Это документация CoGIS» стоит сразу (переход из помощника CoGIS). */
+  cogis?: boolean;
   /** Документ загружен: список пора обновить. */
   onUploaded: () => void;
   onClose: () => void;
 }
 
 /** Добавление документов (концепция §5.6): файлы уходят по одному запросу по кнопке «Добавить». */
-export function AddDocumentsModal({ limits, scope: initialScope, onUploaded, onClose }: AddDocumentsModalProps) {
+export function AddDocumentsModal(props: AddDocumentsModalProps) {
+  const { limits, scope: initialScope, onUploaded, onClose } = props;
   const [files, setFiles] = useState<PickedFile[]>([]);
   const [scope, setScope] = useState<KbScope>(initialScope);
-  const [isCogis, setIsCogis] = useState(false);
+  const [isCogis, setIsCogis] = useState(props.cogis ?? false);
   const [noFiles, setNoFiles] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const uploader = useRef<FileUploader>(null);

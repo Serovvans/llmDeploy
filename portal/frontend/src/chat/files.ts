@@ -1,6 +1,6 @@
 /** Проверки и тексты вложений чата (концепция §5.5). Окончательно всё решает сервер. */
 import { isApiError } from '../api/client';
-import type { PortalConfig } from '../api/types';
+import type { DialogKind, PortalConfig } from '../api/types';
 import { errorText, texts } from '../texts';
 
 type ChatLimits = PortalConfig['chat'];
@@ -59,12 +59,15 @@ export function uploadErrorText(error: unknown, fileName: string, limits: ChatLi
 }
 
 /** Текст отказа до открытия потока ответа — под панелью запроса. */
-export function sendErrorText(error: unknown, config: PortalConfig): string {
+export function sendErrorText(error: unknown, config: PortalConfig, kind: DialogKind): string {
   if (isApiError(error, 'message_too_long')) {
     return texts.chat.errors.tooLong;
   }
+  if (isApiError(error, 'schema_not_found')) {
+    return texts.sql.schemaDeleted;
+  }
   if (isApiError(error, 'generation_in_progress')) {
-    return texts.chat.errors.inProgress;
+    return texts.dialogs[kind].inProgress;
   }
   if (isApiError(error, 'too_many_images')) {
     return texts.chat.files.tooManyImages(detail(error, 'max_images') ?? config.chat.max_images);

@@ -54,5 +54,6 @@ async def get_config(_: AnySession, container: ContainerDep) -> dict[str, Any]:
             ],
             "default_dialect": settings.sql.default_dialect,
             "schema_max_chars": settings.sql.schema_max_chars,
+            "max_schemas": settings.sql.max_schemas,
         },
     }

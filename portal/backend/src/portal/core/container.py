@@ -16,7 +16,10 @@ from portal.core.clock import SystemClock
 from portal.core.db import create_engine
 from portal.core.ports import Clock, SessionAuthenticator
 from portal.core.settings import Settings
+from portal.dialogs.domain import DialogKind
+from portal.dialogs.export import DocxExporter
 from portal.dialogs.generation import GenerationService
+from portal.dialogs.ports import DialogTool
 from portal.dialogs.repositories import SqlDialogUnitOfWorkFactory
 from portal.dialogs.service import DialogService
 from portal.files.reader import ContentDocumentReader
@@ -33,6 +36,11 @@ from portal.kb.service import KbService
 from portal.llm.bifrost import BifrostChatModel
 from portal.llm.estimator import RatioTokenEstimator
 from portal.llm.ports import ChatModel
+from portal.tools.dialog_tools import CogisTool, DocparseDialogTool, SqlTool
+from portal.tools.docparse import DocparseService
+from portal.tools.sql_repository import SqlSchemaStoreFactory
+from portal.tools.sql_schemas import SqlSchemaService
+from portal.tools.sql_syntax import SqlSyntaxChecker
 from portal.worker.loop import Worker
 
 
@@ -55,6 +63,9 @@ class Container(AdminContainer):
     http_client: httpx.AsyncClient
     dialogs: DialogService
     generation: GenerationService
+    sql_schemas: SqlSchemaService
+    sql_checker: SqlSyntaxChecker
+    docparse: DocparseService
     qdrant: AsyncQdrantClient
     kb: KbService
     knowledge: KnowledgeBase
@@ -161,14 +172,36 @@ def build_container(
         estimator,
         settings.kb,
     )
+    model = chat_model or BifrostChatModel(http_client, settings.llm, llm_api_key)
+    sql_schemas = SqlSchemaService(SqlSchemaStoreFactory(base.engine), clock, settings.sql)
+    sql_checker = SqlSyntaxChecker(settings.sql.check_max_chars, settings.sql.check_timeout_seconds)
+    docparse = DocparseService(
+        dialog_uow,
+        model,
+        ModelPageRecognizer(model, settings.llm),
+        estimator,
+        storage,
+        reader,
+        auth,
+        clock,
+        settings,
+        max_model_len,
+    )
+    tools: dict[DialogKind, DialogTool] = {
+        "sql": SqlTool(sql_schemas, sql_checker, settings.sql),
+        "cogis": CogisTool(knowledge, settings.cogis),
+        "docparse": DocparseDialogTool(dialog_uow, settings.docparse),
+    }
     generation = GenerationService(
         dialog_uow,
-        chat_model or BifrostChatModel(http_client, settings.llm, llm_api_key),
+        model,
         estimator,
         storage,
         reader,
         auth,
         knowledge,
+        tools,
+        docparse.is_forming,
         clock,
         settings,
         max_model_len,
@@ -190,7 +223,12 @@ def build_container(
             settings.dialogs.empty_ttl_hours,
             text_max_chars,
             generation.is_forming,
+            docparse.is_forming,
+            DocxExporter(),
         ),
+        sql_schemas=sql_schemas,
+        sql_checker=sql_checker,
+        docparse=docparse,
         generation=generation,
         qdrant=qdrant,
         kb=KbService(kb_uow, storage, reader, clock, settings.kb),

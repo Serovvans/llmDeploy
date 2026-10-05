@@ -55,7 +55,7 @@ describe('разбор потока событий', () => {
     const events = await collect(
       streamOf(
         ': keep-alive\n\n',
-        'event: sql_check\ndata: {}\n\n',
+        'event: future_event\ndata: {}\n\n',
         'event: delta\ndata: не JSON\n\n',
         ': keep-alive\n',
         'event: delta\r\ndata: {"text":"ок"}\r\n\r\n',

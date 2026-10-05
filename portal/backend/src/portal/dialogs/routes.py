@@ -16,16 +16,22 @@ from portal.core.errors import field_error, not_found, validation_error
 from portal.core.sse import event_stream_response
 from portal.core.validation import validation_failure
 from portal.dialogs.domain import DialogKind
-from portal.dialogs.generation import ChatMessageInput
+from portal.dialogs.generation import UNSET, QuestionInput, _Unset
 from portal.dialogs.schemas import (
     AttachmentOut,
     ChatMessageRequest,
+    CogisMessageRequest,
     CreateDialogRequest,
+    DialogDetailsOut,
     DialogListOut,
     DialogOut,
+    DocparseMessageRequest,
+    DocparseOut,
     MessageListOut,
     MessageOut,
     RenameDialogRequest,
+    SqlMessageRequest,
+    SqlRegenerateRequest,
 )
 from portal.files.ports import DOCX
 
@@ -83,10 +89,15 @@ async def create_dialog(
     return DialogOut.of(await container.dialogs.create(user.id, body.kind))
 
 
-@router.get("/{id}")
-async def get_dialog(target: DialogId, user: Employee, container: ContainerDep) -> DialogOut:
-    """Диалог владельца."""
-    return DialogOut.of(await container.dialogs.get(user.id, target))
+@router.get("/{id}", response_model=None)
+async def get_dialog(
+    target: DialogId, user: Employee, container: ContainerDep
+) -> DialogOut | DialogDetailsOut:
+    """Диалог владельца; у разбора документа — вместе с его результатом."""
+    dialog, docparse = await container.dialogs.get_with_docparse(user.id, target)
+    if docparse is None:
+        return DialogOut.of(dialog)
+    return DialogDetailsOut(**DialogOut.of(dialog).model_dump(), docparse=DocparseOut.of(docparse))
 
 
 @router.patch("/{id}")
@@ -119,6 +130,27 @@ async def list_messages(
     )
 
 
+def _question(kind: DialogKind, body: dict[str, Any]) -> QuestionInput:
+    """Разобрать тело сообщения по виду диалога (§5.3); чужие виду поля — ошибка."""
+    try:
+        if kind == "chat":
+            chat = ChatMessageRequest.model_validate(body)
+            params = {"mode": chat.mode, "knowledge": chat.knowledge}
+            return QuestionInput(chat.content, params, chat.attachment_ids)
+        if kind == "sql":
+            sql = SqlMessageRequest.model_validate(body)
+            schema_id = None if sql.schema_id is None else str(sql.schema_id)
+            return QuestionInput(
+                sql.content, {"action": sql.action, "dialect": sql.dialect, "schema_id": schema_id}
+            )
+        if kind == "cogis":
+            cogis = CogisMessageRequest.model_validate(body)
+            return QuestionInput(cogis.content, {"action": cogis.action})
+        return QuestionInput(DocparseMessageRequest.model_validate(body).content, {})
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+
+
 @router.post("/{id}/messages")
 async def send_message(
     body: dict[str, Any],
@@ -131,23 +163,55 @@ async def send_message(
 
     Тело разбирается после поиска диалога: его состав зависит от вида диалога (§5.3).
     """
-    await container.dialogs.get(user.id, target)
-    try:
-        parsed = ChatMessageRequest.model_validate(body)
-    except ValidationError as error:
-        raise validation_failure(error.errors()) from None
-    message = ChatMessageInput(parsed.content, parsed.attachment_ids, parsed.mode, parsed.knowledge)
-    channel = await container.generation.send(user, session.session_id, target, message)
+    dialog = await container.dialogs.get(user.id, target)
+    channel = await container.generation.send(
+        user, session.session_id, target, dialog.kind, _question(dialog.kind, body)
+    )
     return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
 
 
 @router.post("/{id}/regenerate")
 async def regenerate(
-    target: DialogId, user: Employee, session: ReadySession, container: ContainerDep
+    request: Request,
+    target: DialogId,
+    user: Employee,
+    session: ReadySession,
+    container: ContainerDep,
 ) -> StreamingResponse:
-    """Сформировать последний ответ заново; ответ — поток событий (§6)."""
-    channel = await container.generation.regenerate(user, session.session_id, target)
+    """Сформировать последний ответ заново; ответ — поток событий (§6).
+
+    Тело читается только в диалоге `sql`: там оно может заменить схему базы (§5.6).
+    """
+    dialog = await container.dialogs.get(user.id, target)
+    schema_id: UUID | _Unset | None = UNSET
+    if dialog.kind == "sql" and (raw := await request.body()).strip():
+        try:
+            schema_id = SqlRegenerateRequest.model_validate_json(raw).schema_id
+        except ValidationError as error:
+            raise validation_failure(error.errors()) from None
+    channel = await container.generation.regenerate(
+        user, session.session_id, target, dialog.kind, schema_id
+    )
     return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
+
+
+@router.get("/{id}/export")
+async def export_dialog(
+    target: DialogId, user: Employee, container: ContainerDep, message_id: str | None = None
+) -> Response:
+    """Файл DOCX: диалог целиком или один ответ (§5.9)."""
+    answer_id = None if message_id is None else _uuid(message_id)
+    file_name, content = await container.dialogs.export(user.id, target, answer_id)
+    return Response(
+        content,
+        media_type=DOCX,
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"dialog.docx\"; filename*=UTF-8''{quote(file_name)}"
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 async def _chunks(file: UploadFile) -> AsyncIterator[bytes]:

@@ -13,6 +13,7 @@ import {
   Tabs,
 } from '@skbkontur/react-ui';
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 
 import { api, isApiError, KB_PAGE_SIZE, type KbListQuery } from '../api/client';
 import type { KbDocument, KbScope, Page } from '../api/types';
@@ -47,7 +48,10 @@ export function KnowledgeScreen() {
   const [reloads, setReloads] = useState(0);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [page, setPage] = useState<{ scope: KbScope; data: Page<KbDocument> } | null>(null);
-  const [adding, setAdding] = useState(false);
+  // Переход из помощника CoGIS: окно добавления открыто сразу, выбраны общая база и отметка CoGIS.
+  const fromCogis = (useLocation().state as { addCogisDocumentation?: boolean } | null)?.addCogisDocumentation === true;
+  const [adding, setAdding] = useState(fromCogis);
+  const [addingCogis, setAddingCogis] = useState(fromCogis);
   const [removing, setRemoving] = useState<KbDocument | null>(null);
   const [removePending, setRemovePending] = useState(false);
   const rememberOpener = useFocusReturn(adding || removing !== null);
@@ -319,7 +323,16 @@ export function KnowledgeScreen() {
 
       {viewer.element}
       {adding && config && (
-        <AddDocumentsModal limits={config.kb} scope={query.scope} onUploaded={reload} onClose={() => setAdding(false)} />
+        <AddDocumentsModal
+          limits={config.kb}
+          scope={addingCogis ? 'shared' : query.scope}
+          cogis={addingCogis}
+          onUploaded={reload}
+          onClose={() => {
+            setAdding(false);
+            setAddingCogis(false);
+          }}
+        />
       )}
       {removing && (
         <ConfirmModal
