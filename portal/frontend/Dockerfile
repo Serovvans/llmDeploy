@@ -47,8 +47,9 @@ COPY <<'EOF' /etc/caddy/Caddyfile
 		file_server
 	}
 
-	# Адреса экранов: маршрут выбирает само приложение.
-	@screen path / /login /login/code /password /second-factor /chat /chat/* /knowledge /sql /sql/* /cogis /cogis/* /documents /documents/* /admin/users /profile
+	# Адреса экранов — те же, что в маршрутах приложения (src/App.tsx). У разделов с
+	# историей допустим один сегмент — идентификатор диалога; глубже — уже 404.
+	@screen path_regexp ^/(login(/code)?|password|second-factor|knowledge|admin/users|profile|(chat|sql|cogis|documents)(/[^/]*)?)?$
 	handle @screen {
 		rewrite * /index.html
 		file_server

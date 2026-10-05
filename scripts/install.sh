@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Установка и запуск LLM-сервиса на подготовленной ВМ (docs/design.md §9, docs/runbook.md §2).
 #
-# Развёртывание идёт двумя этапами (docs/design.md §3.7); обёртки — в Makefile (make help).
+# Развёртывание идёт этапами (docs/design.md §3.7, §3.8); обёртки — в Makefile (make help).
 # Запуск из клона репозитория на ВМ, после scripts/install_host.sh и перезагрузки:
 #
 #   sudo bash scripts/install.sh --stage model
@@ -11,12 +11,20 @@
 #   sudo bash scripts/install.sh --stage gateway --hostname llm.corp.example --tls corp
 #       Этап 2 — внешний доступ: добавляет профиль gateway (Caddy + Bifrost) и 443.
 #
+#   sudo bash scripts/install.sh --stage portal
+#       Этап 3 — портал сотрудников (docs/portal-design.md §3, §7): добавляет профиль
+#       portal. Требует уже включённых gateway и embeddings и ключа PORTAL_LLM_API_KEY
+#       в deploy/.env (выдать: make key NAME=portal).
+#
 # Аргументы (при повторном запуске берутся из deploy/.env, а заданные явно —
 # перезаписывают значение в .env):
-#   --stage model|gateway  этап; по умолчанию — тот, что уже записан в deploy/.env.
-#                          gateway только добавляет профиль: чтобы вернуться к одной
-#                          модели, уберите gateway из COMPOSE_PROFILES в deploy/.env
-#   --hostname NAME    DNS-имя сервиса (LLM_HOSTNAME); нужно на этапе gateway
+#   --stage model|gateway|portal
+#                      этап; по умолчанию — тот, что уже записан в deploy/.env.
+#                      gateway и portal только добавляют профиль: чтобы вернуться назад,
+#                      уберите профиль из COMPOSE_PROFILES в deploy/.env (для portal —
+#                      ещё и очистите SITE_MODE)
+#   --hostname NAME    DNS-имя сервиса или, до привязки домена, IP-адрес ВМ
+#                      (LLM_HOSTNAME); нужно на этапе gateway
 #   --tls MODE         corp — сертификат в deploy/certs/{fullchain,privkey}.pem;
 #                      internal — собственный CA Caddy (TLS_MODE); нужно на этапе gateway
 #   --profiles LIST    дополнительные профили: "", embeddings, monitoring или
@@ -25,14 +33,20 @@
 #
 # Что делает:
 #   1. preflight.sh;
-#   2. deploy/.env из .env.example; пустые секреты генерируются, заданные не меняются;
+#   2. deploy/.env из .env.example; пустые секреты генерируются, заданные не меняются.
+#      Секреты портала дописываются на любом этапе: compose интерполирует сервисы и
+#      выключенных профилей, без них не выполнится ни одна команда docker compose;
 #   3. (gateway + corp) проверка сертификата: срок, имя хоста, соответствие ключу;
-#   4. docker compose config и pull;
+#   4. docker compose config и pull; (portal) сборка образов portal-api, portal-worker
+#      и portal-web из этого клона — при каждом запуске, чтобы после git pull образы
+#      соответствовали коду;
 #   5. предзагрузка весов моделей в volume hf-cache;
 #   6. systemd-юнит llm-stack с путём к этому клону, запуск и ожидание healthy;
 #   7. (gateway + internal) выгрузка корневого сертификата Caddy в deploy/caddy-root.crt;
 #   8. проверка: этап model — на 127.0.0.1:8000 запрос без ключа даёт 401, с ключом
-#      модель отвечает; этап gateway — через 443 запрос без ключа 401/403, / — 404.
+#      модель отвечает; этап gateway — через 443 запрос без ключа 401/403, / — 404;
+#      этап portal — через 443 / отдаёт страницу входа, /api/auth/session без сессии —
+#      401, админ-API Bifrost и /metrics — 404, запрос к модели без ключа — 401/403.
 # Идемпотентен: повторный запуск применяет изменения .env и compose.
 set -euo pipefail
 
@@ -53,6 +67,11 @@ readonly HOSTNAME_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Z
 readonly PROFILES_RE='^((embeddings|monitoring)(,(embeddings|monitoring))?)?$'
 # Профиль второго этапа: Caddy и Bifrost (docs/design.md §3.7).
 readonly GATEWAY_PROFILE="gateway"
+# Профиль третьего этапа: портал сотрудников (docs/portal-design.md §3).
+readonly PORTAL_PROFILE="portal"
+# У этих сервисов build без image: сами после git pull они не пересоберутся. portal-api
+# и portal-worker — один код в двух образах, поэтому собираются одной командой.
+readonly PORTAL_BUILD_SERVICES=(portal-api portal-worker portal-web)
 readonly VLLM_LOCAL_URL="http://127.0.0.1:8000"
 readonly MINIMAL_CHAT_BODY='{"model": "default", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}'
 # Первый запрос к прогретой модели укладывается в секунды; запас — на загруженную ВМ.
@@ -141,9 +160,9 @@ parse_args() {
       *) die "неизвестный аргумент «$1»" "bash scripts/install.sh --help" ;;
     esac
   done
-  [[ -z "$arg_stage" || "$arg_stage" == "model" || "$arg_stage" == "gateway" ]] ||
-    die "--stage «${arg_stage}»: ожидается model или gateway" \
-      "--stage model — только модель, --stage gateway — добавить внешний доступ (docs/design.md §3.7)"
+  [[ -z "$arg_stage" || "$arg_stage" =~ ^(model|gateway|portal)$ ]] ||
+    die "--stage «${arg_stage}»: ожидается model, gateway или portal" \
+      "--stage model — только модель, gateway — добавить внешний доступ, portal — добавить портал (docs/design.md §3.7, §3.8)"
 }
 
 check_system() {
@@ -165,17 +184,19 @@ run_preflight() {
     die "preflight не прошёл" "исправить пункты FAIL из сводки выше и повторить установку"
 }
 
-# Убирает профиль gateway из списка, оставляя дополнительные (embeddings, monitoring).
-without_gateway() {
+# Убирает профили этапов (gateway, portal) из списка, оставляя дополнительные
+# (embeddings, monitoring).
+without_stage_profiles() {
   local list=",$1,"
   list="${list//,${GATEWAY_PROFILE},/,}"
+  list="${list//,${PORTAL_PROFILE},/,}"
   list="${list#,}"
   printf '%s' "${list%,}"
 }
 
 # Определяет этап и итоговый COMPOSE_PROFILES: дополнительные профили из --profiles
-# (иначе сохраняются из .env) плюс gateway, если внешний доступ уже включён или его
-# включает --stage gateway. Этап только добавляет: обратно — правкой .env вручную.
+# (иначе сохраняются из .env) плюс gateway и portal, если они уже включены или их
+# включает --stage. Этап только добавляет: обратно — правкой .env вручную.
 resolve_stage() {
   local current extras
   current="$(env_file_value COMPOSE_PROFILES)"
@@ -183,19 +204,34 @@ resolve_stage() {
   gateway_enabled=0
   [[ ",${current}," == *",${GATEWAY_PROFILE},"* ]] && gateway_enabled=1
   [[ "$arg_stage" == "gateway" ]] && gateway_enabled=1
+  portal_enabled=0
+  [[ ",${current}," == *",${PORTAL_PROFILE},"* ]] && portal_enabled=1
+  [[ "$arg_stage" == "portal" ]] && portal_enabled=1
 
   if [[ "$profiles_given" -eq 1 ]]; then
     extras="$arg_profiles"
   else
-    extras="$(without_gateway "$current")"
+    extras="$(without_stage_profiles "$current")"
   fi
   [[ "$extras" =~ $PROFILES_RE ]] ||
     die "--profiles «${extras}»: допустимы пусто, embeddings, monitoring, embeddings,monitoring" \
-      "внешний доступ включается не здесь, а через --stage gateway"
+      "внешний доступ включается не здесь, а через --stage gateway, портал — через --stage portal"
+
+  if [[ "$portal_enabled" -eq 1 ]]; then
+    [[ "$gateway_enabled" -eq 1 ]] ||
+      die "портал требует профиль gateway, а внешний доступ ещё не включён" \
+        "сначала этап 2: make gateway LLM_HOSTNAME=<имя или IP> TLS_MODE=corp|internal PROFILES=embeddings"
+    [[ ",${extras}," == *",embeddings,"* ]] ||
+      die "портал требует профиль embeddings (база знаний), а в наборе профилей «${extras}» его нет" \
+        "добавить профиль: make portal PROFILES=embeddings (с мониторингом — PROFILES=embeddings,monitoring)"
+  fi
 
   profiles="$extras"
   [[ "$gateway_enabled" -eq 0 ]] || profiles="${GATEWAY_PROFILE}${extras:+,${extras}}"
-  if [[ "$gateway_enabled" -eq 1 ]]; then
+  [[ "$portal_enabled" -eq 0 ]] || profiles="${profiles},${PORTAL_PROFILE}"
+  if [[ "$portal_enabled" -eq 1 ]]; then
+    log "этап portal: модель + внешний доступ + портал сотрудников"
+  elif [[ "$gateway_enabled" -eq 1 ]]; then
     log "этап gateway: модель + внешний доступ (Caddy, Bifrost)"
   else
     log "этап model: только модель на ${VLLM_LOCAL_URL}, без внешнего доступа"
@@ -218,14 +254,21 @@ prepare_env() {
   # DNS-имя и режим TLS нужны только Caddy, то есть на этапе gateway.
   if [[ "$gateway_enabled" -eq 1 ]]; then
     [[ "$hostname" =~ $HOSTNAME_RE ]] ||
-      die "LLM_HOSTNAME «${hostname}» не задан или не похож на DNS-имя" "указать --hostname llm.<корп.домен>"
+      die "LLM_HOSTNAME «${hostname}» не задан или не похож на DNS-имя либо IP-адрес" \
+        "указать --hostname llm.<корп.домен> (до привязки домена — IP-адрес ВМ)"
     [[ "$tls_mode" == "corp" || "$tls_mode" == "internal" ]] ||
       die "TLS_MODE «${tls_mode}»: ожидается corp или internal" \
         "указать --tls corp (есть сертификат корпоративного CA) или --tls internal (docs/design.md §3.4)"
   fi
+  # Ключ выдаёт Bifrost, сгенерировать его нельзя; без него портал не обратится к модели.
+  if [[ "$portal_enabled" -eq 1 && -z "$(env_file_value PORTAL_LLM_API_KEY)" ]]; then
+    die "PORTAL_LLM_API_KEY в ${ENV_FILE} пуст" \
+      "выдать ключ: make key NAME=portal; вписать его (sk-bf-...) в PORTAL_LLM_API_KEY в ${ENV_FILE} и повторить"
+  fi
   set_env_value LLM_HOSTNAME "$hostname"
   set_env_value TLS_MODE "$tls_mode"
   set_env_value COMPOSE_PROFILES "$profiles"
+  [[ "$portal_enabled" -eq 0 ]] || set_env_value SITE_MODE portal
 
   if [[ -z "$(env_file_value BIFROST_ADMIN_USERNAME)" ]]; then
     set_env_value BIFROST_ADMIN_USERNAME "$DEFAULT_ADMIN_USERNAME"
@@ -234,6 +277,10 @@ prepare_env() {
   ensure_secret BIFROST_ADMIN_PASSWORD random_hex
   ensure_secret BIFROST_ENCRYPTION_KEY random_base64
   ensure_secret GRAFANA_ADMIN_PASSWORD random_hex
+  # На любом этапе: compose требует эти переменные и при выключенном профиле portal.
+  ensure_secret PORTAL_DB_PASSWORD random_hex
+  ensure_secret QDRANT_API_KEY random_hex
+  ensure_secret PORTAL_SECRET_KEY random_base64
 }
 
 check_corp_certificate() {
@@ -272,6 +319,14 @@ pull_images() {
   compose config -q
   log "загрузка образов"
   compose pull
+}
+
+build_portal_images() {
+  [[ "$portal_enabled" -eq 1 ]] || return 0
+  log "сборка образов портала: ${PORTAL_BUILD_SERVICES[*]} (первая сборка — несколько минут)"
+  compose build "${PORTAL_BUILD_SERVICES[@]}" ||
+    die "не удалось собрать образы портала" \
+      "проверить доступ к Docker Hub, PyPI и npm; повторить: cd ${DEPLOY_DIR} && docker compose build ${PORTAL_BUILD_SERVICES[*]}"
 }
 
 preload_model() {
@@ -335,6 +390,19 @@ verify_model() {
     < <(printf 'header = "Authorization: Bearer %s"\n' "$(env_file_value VLLM_API_KEY)")
 }
 
+# Этап portal: кроме /v1/* сайт отдаёт портал; админ-API Bifrost и /metrics по-прежнему
+# закрыты (docs/portal-design.md §3). Аргументы — общие параметры curl.
+verify_portal() {
+  local hint="docs/runbook.md §5; cd ${DEPLOY_DIR} && docker compose logs caddy portal-web portal-api"
+  local root="https://${hostname}"
+
+  expect_http "страница входа портала открывается" "200" "${root}/" "$hint" "$@" </dev/null
+  expect_http "портал без сессии отвечает 401" "401" "${root}/api/auth/session" "$hint" "$@" </dev/null
+  expect_http "админ-API Bifrost через 443 закрыт" "404" \
+    "${root}/api/governance/virtual-keys" "$hint" "$@" </dev/null
+  expect_http "/metrics через 443 закрыт" "404" "${root}/metrics" "$hint" "$@" </dev/null
+}
+
 # Этап gateway: наружу через 443 видны только /v1/* и только с ключом Bifrost.
 verify_gateway() {
   local hint="docs/runbook.md §5; cd ${DEPLOY_DIR} && docker compose logs caddy bifrost"
@@ -347,7 +415,11 @@ verify_gateway() {
   expect_http "запрос к модели без ключа отклоняется" "401|403" \
     "https://${hostname}/v1/chat/completions" "$hint" "${common[@]}" \
     -X POST -H "Content-Type: application/json" -d "$MINIMAL_CHAT_BODY" </dev/null
-  expect_http "/ через 443 закрыт" "404" "https://${hostname}/" "$hint" "${common[@]}" </dev/null
+  if [[ "$portal_enabled" -eq 1 ]]; then
+    verify_portal "${common[@]}"
+  else
+    expect_http "/ через 443 закрыт" "404" "https://${hostname}/" "$hint" "${common[@]}" </dev/null
+  fi
 }
 
 verify_endpoint() {
@@ -406,8 +478,43 @@ EOF
 EOF
 }
 
+print_portal_summary() {
+  local ca_arg=" CA=<PEM корневого CA, если он не публичный>"
+  [[ "$tls_mode" == "corp" ]] || ca_arg=" CA=${ROOT_CERT_FILE}"
+  cat <<EOF
+
+===== Этап 3 завершён: портал развёрнут =====
+Портал:            https://${hostname}/
+API для клиентов:  https://${hostname}/v1   model="default"
+Секреты:           ${ENV_FILE} (root, 600)
+
+ВАЖНО: сохраните копию PORTAL_SECRET_KEY из ${ENV_FILE} вне ВМ, в хранилище секретов
+(вместе с BIFROST_ENCRYPTION_KEY). Им зашифрованы секреты второго фактора: без него
+после восстановления из бэкапа второй фактор всем придётся настраивать заново.
+EOF
+  if [[ "$tls_mode" == "internal" ]]; then
+    cat <<EOF
+
+TLS: собственный CA Caddy. Чтобы браузер не предупреждал о сертификате, установите
+${ROOT_CERT_FILE} как доверенный корневой на ПК сотрудников (docs/vpn-launch.md).
+EOF
+  fi
+  cat <<EOF
+
+Дальше (docs/vpn-launch.md):
+  1. Первый администратор (временный пароль выводится один раз — сохраните его):
+       make portal-admin LOGIN=<логин> NAME="<ФИО>"
+  2. Проверка портала и закрытых маршрутов через 443:
+       make smoke-portal${ca_arg}
+  3. Резервная копия (база, файлы, векторы, ключи Bifrost):
+       make backup DIR=<каталог вне репозитория>
+EOF
+}
+
 print_summary() {
-  if [[ "$gateway_enabled" -eq 1 ]]; then
+  if [[ "$portal_enabled" -eq 1 ]]; then
+    print_portal_summary
+  elif [[ "$gateway_enabled" -eq 1 ]]; then
     print_gateway_summary
   else
     print_model_summary
@@ -421,6 +528,7 @@ main() {
   prepare_env
   prepare_tls
   pull_images
+  build_portal_images
   preload_models
   start_stack
   export_root_certificate
@@ -428,4 +536,7 @@ main() {
   print_summary
 }
 
-main "$@"
+# При source (тесты) функции только определяются.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

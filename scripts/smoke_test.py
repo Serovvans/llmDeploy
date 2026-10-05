@@ -11,6 +11,17 @@
 и с неверным ключом получает 401/403; ``/api/governance/virtual-keys``, ``/metrics`` и ``/``
 через 443 отдают 404 (Caddy проксирует только ``/v1/*``).
 
+При ``SITE_MODE=portal`` (третий этап, docs/portal-design.md §3, §3.2) вместо «всё, кроме
+``/v1/*``, — 404» проверяется портал: ``/`` и ``/login`` отдают страницу с заголовками
+безопасности; ``/api/governance/virtual-keys`` — 404 от бэкенда портала; ``/metrics``,
+``/healthz``, ``/docs``, ``/redoc``, ``/openapi.json`` — 404; ``GET /api/auth/session`` без
+cookie — 401; ``POST`` без ``X-Portal-Csrf`` — 403.
+
+С флагом ``--site-only`` выполняются только проверки обвязки (запрос без ключа и то, что
+отдаёт сайт): ключ не нужен, к модели запросов нет. С ``--compose-file ФАЙЛ`` добавляется
+проверка, что все сервисы включённых профилей запущены и здоровы (``docker compose ps``;
+только на машине, где работает стек).
+
 С флагом ``--check-rate-limit N`` выполняется только проверка лимита: до N запросов подряд,
 ожидается HTTP 429 от Bifrost. Для неё нужен отдельный ключ с малым лимитом запросов
 (например, ``keys.py create --name smoke-limit --requests 3``).
@@ -22,10 +33,15 @@ Qwen3.8 (§3.1): мышление включено по умолчанию с ``
     LLM_BASE_URL  проверяемый эндпоинт; по умолчанию ``https://${LLM_HOSTNAME}/v1``,
                   а с ``--direct`` — ``http://127.0.0.1:8000/v1``.
     LLM_HOSTNAME  DNS-имя сервиса, если LLM_BASE_URL не задан.
-    LLM_API_KEY   ключ Bifrost ``sk-bf-...``; с ``--direct`` — VLLM_API_KEY (обязателен).
+    LLM_API_KEY   ключ Bifrost ``sk-bf-...``; с ``--direct`` — VLLM_API_KEY (обязателен,
+                  кроме ``--site-only``).
+    SITE_MODE     что сайт отдаёт помимо ``/v1/*``: ``api`` (по умолчанию) или ``portal``;
+                  та же переменная, что в ``deploy/.env``.
     LLM_CA_CERT   путь к PEM корпоративного CA для проверки TLS. Для сертификата
                   корпоративного CA фактически обязателен: httpx доверяет только набору
                   certifi, а не системному хранилищу ОС. Альтернатива — SSL_CERT_FILE.
+                  При ``TLS_MODE=internal`` — ``deploy/caddy-root.crt``; адресом может быть
+                  и IP (``LLM_HOSTNAME=192.168.25.8``).
 
 Код выхода: 0 — все проверки прошли, 1 — хотя бы одна не прошла или ошибка конфигурации.
 """
@@ -37,6 +53,7 @@ import logging
 import os
 import ssl
 import struct
+import subprocess
 import sys
 import zlib
 from collections.abc import Callable, Mapping, Sequence
@@ -62,6 +79,16 @@ INVALID_API_KEY = "sk-bf-invalid-smoke-test"
 DIRECT_BASE_URL = "http://127.0.0.1:8000/v1"
 # Через 443 Caddy отдаёт только /v1/*; остальное, включая API управления Bifrost, — 404.
 CLOSED_PATHS = ("/api/governance/virtual-keys", "/metrics", "/")
+SITE_MODES = ("api", "portal")
+# Не /api/*: уходят в статику портала, а не в бэкенд и не в Bifrost (docs/portal-api.md §1.1).
+PORTAL_CLOSED_PATHS = ("/metrics", "/healthz", "/docs", "/redoc", "/openapi.json")
+# /api/* принадлежит порталу: админ-API Bifrost и документации там нет — 404 от бэкенда.
+PORTAL_UNKNOWN_API_PATHS = ("/api/governance/virtual-keys", "/api/docs", "/api/openapi.json")
+PORTAL_PAGE_PATHS = ("/", "/login")
+PORTAL_SESSION_PATH = "/api/auth/session"
+# Любой POST /api/*: без заголовка X-Portal-Csrf бэкенд отказывает раньше, чем смотрит сессию.
+PORTAL_CSRF_PROBE_PATH = "/api/auth/logout"
+COMPOSE_TIMEOUT_S = 60
 # vLLM отдаёт рассуждения в reasoning_content (старые версии) или reasoning (новые).
 REASONING_FIELDS = ("reasoning_content", "reasoning")
 TLS_HINT = (
@@ -110,10 +137,16 @@ class Settings:
     base_url: str
     api_key: str
     ca_cert: str | None
+    site_mode: str = "api"
 
 
-def load_settings(env: Mapping[str, str], *, direct: bool = False) -> Settings:
-    """Прочитать настройки из переменных окружения; ``direct`` — проверка vLLM напрямую."""
+def load_settings(
+    env: Mapping[str, str], *, direct: bool = False, site_only: bool = False
+) -> Settings:
+    """Прочитать настройки из переменных окружения.
+
+    ``direct`` — проверка vLLM напрямую; ``site_only`` — без запросов к модели, ключ не нужен.
+    """
     base_url = env.get("LLM_BASE_URL", "").strip()
     if not base_url:
         hostname = env.get("LLM_HOSTNAME", "").strip()
@@ -124,14 +157,19 @@ def load_settings(env: Mapping[str, str], *, direct: bool = False) -> Settings:
         else:
             raise SmokeTestError("задайте LLM_BASE_URL или LLM_HOSTNAME")
     api_key = env.get("LLM_API_KEY", "").strip()
-    if not api_key:
+    if not api_key and not site_only:
         raise SmokeTestError(
             "задайте LLM_API_KEY (ключ Bifrost sk-bf-..., с --direct — VLLM_API_KEY)"
         )
     ca_cert = env.get("LLM_CA_CERT", "").strip() or None
     if ca_cert and not os.path.isfile(ca_cert):
         raise SmokeTestError(f"LLM_CA_CERT указывает на несуществующий файл: {ca_cert}")
-    return Settings(base_url=base_url.rstrip("/"), api_key=api_key, ca_cert=ca_cert)
+    site_mode = env.get("SITE_MODE", "").strip() or "api"
+    if site_mode not in SITE_MODES:
+        raise SmokeTestError(f"SITE_MODE={site_mode!r}: ожидается api или portal")
+    return Settings(
+        base_url=base_url.rstrip("/"), api_key=api_key, ca_cert=ca_cert, site_mode=site_mode
+    )
 
 
 def site_root(base_url: str) -> str:
@@ -410,6 +448,159 @@ def check_closed_paths(client: httpx.Client, root: str) -> str:
     return "404: " + ", ".join(CLOSED_PATHS)
 
 
+def _get_without_key(client: httpx.Client, url: str) -> httpx.Response:
+    return send_with_key(client, "GET", url, api_key=None)
+
+
+def portal_error_code(response: httpx.Response) -> str | None:
+    """Вернуть ``error.code`` из ответа бэкенда портала (docs/portal-api.md §1.3) или ``None``."""
+    try:
+        body = response.json()
+    except json.JSONDecodeError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def _describe_portal(response: httpx.Response) -> str:
+    code = portal_error_code(response)
+    return f"HTTP {response.status_code}" + (f" {code}" if code else "")
+
+
+def missing_security_headers(headers: Mapping[str, str]) -> list[str]:
+    """Вернуть, каких заголовков безопасности из docs/portal-design.md §3.2 нет в ответе."""
+    csp = headers.get("Content-Security-Policy", "")
+    frames_denied = "frame-ancestors 'none'" in csp or headers.get("X-Frame-Options") == "DENY"
+    present = {
+        "Strict-Transport-Security": "max-age=" in headers.get("Strict-Transport-Security", ""),
+        "Content-Security-Policy (default-src 'self')": "default-src 'self'" in csp,
+        "запрет встраивания во фреймы": frames_denied,
+        "X-Content-Type-Options: nosniff": headers.get("X-Content-Type-Options") == "nosniff",
+        "Referrer-Policy": bool(headers.get("Referrer-Policy")),
+    }
+    return [name for name, ok in present.items() if not ok]
+
+
+def check_portal_page(client: httpx.Client, root: str) -> str:
+    """Портал: ``/`` и страница входа отдают HTML с заголовками безопасности (ПД §3.2)."""
+    problems = []
+    for path in PORTAL_PAGE_PATHS:
+        response = _get_without_key(client, root + path)
+        if response.status_code != httpx.codes.OK:
+            problems.append(f"{path} → HTTP {response.status_code}")
+        elif "text/html" not in response.headers.get("Content-Type", ""):
+            problems.append(f"{path} → не HTML: {response.headers.get('Content-Type')!r}")
+        elif missing := missing_security_headers(response.headers):
+            problems.append(f"{path} → нет заголовков: {', '.join(missing)}")
+    if problems:
+        raise SmokeTestError(
+            "ожидалась страница портала (SITE_MODE=portal в deploy/.env, сервис portal-web): "
+            + "; ".join(problems)
+        )
+    return "200 и заголовки безопасности: " + ", ".join(PORTAL_PAGE_PATHS)
+
+
+def check_portal_closed_paths(client: httpx.Client, root: str) -> str:
+    """Портал: админ-API Bifrost, ``/metrics``, документация и служебные маршруты — 404."""
+    unexpected = []
+    for path in PORTAL_CLOSED_PATHS:
+        response = _get_without_key(client, root + path)
+        if response.status_code != httpx.codes.NOT_FOUND:
+            unexpected.append(f"{path} → HTTP {response.status_code}")
+    for path in PORTAL_UNKNOWN_API_PATHS:
+        response = _get_without_key(client, root + path)
+        # Код ошибки в формате бэкенда отличает ответ портала от ответа Bifrost.
+        if (
+            response.status_code != httpx.codes.NOT_FOUND
+            or portal_error_code(response) != "not_found"
+        ):
+            unexpected.append(f"{path} → {_describe_portal(response)}, ожидался 404 not_found")
+    if unexpected:
+        raise SmokeTestError("через 443 доступно лишнее: " + ", ".join(unexpected))
+    return "404: " + ", ".join(PORTAL_CLOSED_PATHS + PORTAL_UNKNOWN_API_PATHS)
+
+
+def check_portal_session_required(client: httpx.Client, root: str) -> str:
+    """Портал: без cookie сессии ``GET /api/auth/session`` — 401."""
+    response = _get_without_key(client, root + PORTAL_SESSION_PATH)
+    if response.status_code != httpx.codes.UNAUTHORIZED:
+        raise SmokeTestError(
+            f"{PORTAL_SESSION_PATH} без cookie: ожидался 401, получено {_describe_portal(response)}"
+        )
+    return _describe_portal(response)
+
+
+def check_portal_csrf_required(client: httpx.Client, root: str) -> str:
+    """Портал: ``POST /api/*`` без заголовка ``X-Portal-Csrf`` — 403 (docs/portal-api.md §2.2)."""
+    response = send_with_key(client, "POST", root + PORTAL_CSRF_PROBE_PATH, api_key=None)
+    if (
+        response.status_code != httpx.codes.FORBIDDEN
+        or portal_error_code(response) != "csrf_check_failed"
+    ):
+        raise SmokeTestError(
+            f"POST {PORTAL_CSRF_PROBE_PATH} без X-Portal-Csrf: ожидался 403 csrf_check_failed, "
+            f"получено {_describe_portal(response)}"
+        )
+    return _describe_portal(response)
+
+
+ComposeRunner = Callable[[str, Sequence[str]], str]
+
+
+def run_compose(compose_file: str, args: Sequence[str]) -> str:
+    """Выполнить ``docker compose -f ФАЙЛ ...`` и вернуть stdout; ошибка — SmokeTestError."""
+    command = ["docker", "compose", "-f", compose_file, *args]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=COMPOSE_TIMEOUT_S, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SmokeTestError(f"не удалось выполнить {' '.join(command)}: {exc}") from exc
+    if result.returncode != 0:
+        raise SmokeTestError(f"{' '.join(command)}: {result.stderr.strip()[:300]}")
+    return result.stdout
+
+
+def parse_compose_ps(output: str) -> dict[str, tuple[str, str]]:
+    """Разобрать ``docker compose ps --format json``: сервис → (состояние, здоровье).
+
+    Compose до 2.21 печатает один JSON-массив, новее — по объекту на строку.
+    """
+    text = output.strip()
+    try:
+        rows = (
+            json.loads(text)
+            if text.startswith("[")
+            else [json.loads(line) for line in text.splitlines()]
+        )
+    except json.JSONDecodeError as exc:
+        raise SmokeTestError(f"неожиданный вывод docker compose ps: {text[:200]}") from exc
+    return {row["Service"]: (row["State"], row["Health"]) for row in rows} if text else {}
+
+
+def unhealthy_services(expected: Sequence[str], ps_output: str) -> list[str]:
+    """Вернуть описания сервисов из ``expected``, которые не запущены или не здоровы."""
+    states = parse_compose_ps(ps_output)
+    problems = []
+    for service in expected:
+        state, health = states.get(service, ("не запущен", ""))
+        if (state, health) != ("running", "healthy"):
+            problems.append(f"{service}: {state} {health}".rstrip())
+    return problems
+
+
+def check_services(compose_file: str, runner: ComposeRunner = run_compose) -> str:
+    """Все сервисы включённых профилей запущены и здоровы; ``runner`` подменяется в тестах."""
+    expected = sorted(runner(compose_file, ["config", "--services"]).split())
+    problems = unhealthy_services(expected, runner(compose_file, ["ps", "--format", "json"]))
+    if problems:
+        raise SmokeTestError(
+            "не все сервисы здоровы (docker compose ps, logs <сервис>): " + "; ".join(problems)
+        )
+    return "healthy: " + ", ".join(expected)
+
+
 def _is_tls_error(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while current is not None:
@@ -439,21 +630,51 @@ def run_checks(checks: Sequence[tuple[str, Callable[[], str]]]) -> bool:
     return ok
 
 
-def build_checks(
-    client: httpx.Client, root: str, *, direct: bool
-) -> list[tuple[str, Callable[[], str]]]:
-    """Собрать список проверок; с ``direct`` — без проверки путей, закрытых Caddy."""
-    checks: list[tuple[str, Callable[[], str]]] = [
-        ("text", lambda: check_text(client)),
-        ("thinking_disabled", lambda: check_thinking_disabled(client)),
-        ("image", lambda: check_image(client)),
-        ("json_schema", lambda: check_json_schema(client)),
-        ("tool_call", lambda: check_tool_call(client)),
-        ("no_key", lambda: check_key_rejected(client, None)),
-        ("invalid_key", lambda: check_key_rejected(client, INVALID_API_KEY)),
+Check = tuple[str, Callable[[], str]]
+
+
+def build_site_checks(client: httpx.Client, root: str, site_mode: str) -> list[Check]:
+    """Проверки того, что сайт отдаёт помимо ``/v1/*``: всё закрыто (``api``) или портал."""
+    if site_mode != "portal":
+        return [("closed_paths", lambda: check_closed_paths(client, root))]
+    return [
+        ("portal_page", lambda: check_portal_page(client, root)),
+        ("portal_closed_paths", lambda: check_portal_closed_paths(client, root)),
+        ("portal_session_required", lambda: check_portal_session_required(client, root)),
+        ("portal_csrf_required", lambda: check_portal_csrf_required(client, root)),
     ]
+
+
+def build_checks(
+    client: httpx.Client,
+    root: str,
+    *,
+    direct: bool,
+    site_mode: str = "api",
+    site_only: bool = False,
+    compose_file: str | None = None,
+) -> list[Check]:
+    """Собрать список проверок.
+
+    ``direct`` — без проверок сайта (их обеспечивает Caddy); ``site_only`` — без запросов к
+    модели; ``compose_file`` — добавить проверку здоровья сервисов.
+    """
+    checks: list[Check] = []
+    if not site_only:
+        checks += [
+            ("text", lambda: check_text(client)),
+            ("thinking_disabled", lambda: check_thinking_disabled(client)),
+            ("image", lambda: check_image(client)),
+            ("json_schema", lambda: check_json_schema(client)),
+            ("tool_call", lambda: check_tool_call(client)),
+        ]
+    checks.append(("no_key", lambda: check_key_rejected(client, None)))
+    if not site_only:
+        checks.append(("invalid_key", lambda: check_key_rejected(client, INVALID_API_KEY)))
     if not direct:
-        checks.append(("closed_paths", lambda: check_closed_paths(client, root)))
+        checks += build_site_checks(client, root, site_mode)
+    if compose_file is not None:
+        checks.append(("services", lambda: check_services(compose_file)))
     return checks
 
 
@@ -474,9 +695,22 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         metavar="N",
         help="выполнить только проверку лимита: до N запросов, ожидается HTTP 429",
     )
+    parser.add_argument(
+        "--site-only",
+        action="store_true",
+        help="только обвязка, без запросов к модели: запрос без ключа и то, что отдаёт сайт "
+        "(по SITE_MODE); LLM_API_KEY не нужен",
+    )
+    parser.add_argument(
+        "--compose-file",
+        metavar="ФАЙЛ",
+        help="проверить ещё, что все сервисы включённых профилей этого compose-файла здоровы",
+    )
     args = parser.parse_args(argv)
     if args.check_rate_limit is not None and args.check_rate_limit < 1:
         parser.error("--check-rate-limit должен быть >= 1")
+    if args.site_only and (args.direct or args.check_rate_limit is not None):
+        parser.error("--site-only не сочетается с --direct и --check-rate-limit")
     return args
 
 
@@ -485,13 +719,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
     try:
-        settings = load_settings(os.environ, direct=args.direct)
+        settings = load_settings(os.environ, direct=args.direct, site_only=args.site_only)
     except SmokeTestError as exc:
         logger.error("конфигурация: %s", exc)
         return 1
 
     mode = "vLLM напрямую" if args.direct else "через Caddy и Bifrost"
-    logger.info("эндпоинт: %s (%s), модель: %s", settings.base_url, mode, MODEL)
+    logger.info(
+        "эндпоинт: %s (%s), модель: %s, сайт: %s",
+        settings.base_url,
+        mode,
+        MODEL,
+        settings.site_mode,
+    )
     try:
         client = build_client(settings)
     except ssl.SSLError as exc:
@@ -499,12 +739,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     root = site_root(settings.base_url)
     with client:
-        checks: list[tuple[str, Callable[[], str]]]
+        checks: list[Check]
         if args.check_rate_limit is not None:
             attempts: int = args.check_rate_limit
             checks = [("rate-limit", lambda: check_rate_limit(client, attempts))]
         else:
-            checks = build_checks(client, root, direct=args.direct)
+            checks = build_checks(
+                client,
+                root,
+                direct=args.direct,
+                site_mode=settings.site_mode,
+                site_only=args.site_only,
+                compose_file=args.compose_file,
+            )
         ok = run_checks(checks)
     print("ИТОГ: PASS" if ok else "ИТОГ: FAIL")
     return 0 if ok else 1

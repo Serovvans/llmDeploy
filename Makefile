@@ -1,10 +1,11 @@
 # Однострочные команды развёртывания и эксплуатации LLM-сервиса (docs/design.md §9).
 # Обёртки над scripts/ и docker compose: своей логики здесь нет.
 #
-# Развёртывание идёт двумя этапами (docs/design.md §3.7):
+# Развёртывание идёт этапами (docs/design.md §3.7, §3.8):
 #   sudo make host && sudo reboot                          подготовка ВМ
 #   make model                                             этап 1: модель (vLLM)
 #   make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=corp    этап 2: внешний доступ
+#   make portal                                            этап 3: портал сотрудников
 #
 # `make help` — список целей. Цели работают с docker, systemd и deploy/.env, поэтому
 # сами подставляют sudo, если Makefile запущен не от root.
@@ -39,17 +40,32 @@ SERVICE ?=
 CONCURRENCY ?=
 # Дополнительные аргументы smoke_test.py, например ARGS="--check-rate-limit 5".
 ARGS ?=
+# Портал: логин пользователя и отбор журнала аудита (make portal-audit SINCE=2026-10-01).
+LOGIN ?=
+SINCE ?=
+EVENT ?=
+LIMIT ?=
+ONLY_ERRORS ?=
+# Резервная копия: куда писать (make backup DIR=...) и откуда восстанавливать (FROM=...).
+DIR ?=
+FROM ?=
+# Эти значения попадают в команды только через окружение ("$$NAME"), а не подстановкой
+# в текст рецепта: апостроф или пробел в ФИО и пути не ломают команду.
+export LOGIN NAME SINCE EVENT LIMIT DIR FROM
 
 .PHONY: help host preflight model gateway smoke-model smoke bench key keys revoke \
+        portal smoke-portal portal-admin portal-reset-2fa portal-audit portal-reindex \
+        portal-reindex-recreate portal-eval-search backup restore \
         up down restart ps logs preload check
 
 help: ## Показать список целей
 	@echo "Развёртывание LLM-сервиса. Использование: make <цель> [ПАРАМЕТР=значение]"
 	@echo
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN { FS = ":.*?## " } { printf "  %-14s %s\n", $$1, $$2 }'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN { FS = ":.*?## " } { printf "  %-24s %s\n", $$1, $$2 }'
 	@echo
 	@echo "Этап 1 (модель):  make preflight && make model [PROFILES=monitoring]"
 	@echo "Этап 2 (доступ):  make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=corp|internal"
+	@echo "Этап 3 (портал):  make key NAME=portal, ключ — в PORTAL_LLM_API_KEY в deploy/.env, затем make portal"
 
 # --- подготовка ВМ ---
 
@@ -94,7 +110,52 @@ revoke: ## Отозвать ключ (ID=<id из make keys>)
 	@[[ -n "$(ID)" ]] || { echo "укажите ID=<id ключа> (список: make keys)" >&2; exit 1; }
 	$(WITH_ENV) uv run keys.py revoke '$(ID)'
 
+# --- этап 3: портал сотрудников ---
+
+portal: ## Этап 3: добавить портал (нужны gateway, embeddings и PORTAL_LLM_API_KEY в deploy/.env)
+	$(INSTALL) --stage portal --skip-preflight $(if $(PROFILES),--profiles $(PROFILES))
+
+smoke-portal: ## Этап 3: что отдаёт сайт через 443 и здоровы ли сервисы; без запросов к модели ([CA=...])
+	$(WITH_ENV) env $(if $(CA),LLM_CA_CERT='$(CA)') uv run smoke_test.py --site-only --compose-file $(COMPOSE_FILE)
+
+# Временный пароль печатается один раз и только на экран: команда не выводится (@) и
+# ничего не пишет в файлы.
+portal-admin: ## Создать администратора портала (LOGIN=ivanov NAME="Иванов И. И."); пароль выводится один раз
+	@[[ -n "$$LOGIN" && -n "$$NAME" ]] || { echo 'укажите LOGIN=<логин> NAME="<ФИО>"' >&2; exit 1; }
+	@$(COMPOSE) exec portal-api portal create-admin --login "$$LOGIN" --full-name "$$NAME"
+
+portal-reset-2fa: ## Сбросить второй фактор пользователя портала (LOGIN=ivanov)
+	@[[ -n "$$LOGIN" ]] || { echo "укажите LOGIN=<логин>" >&2; exit 1; }
+	$(COMPOSE) exec portal-api portal reset-second-factor --login "$$LOGIN"
+
+# Вывод — только строки журнала (поля через табуляцию), чтобы его можно было передать
+# в cut/grep: время, событие, кто, над кем, адрес, details в JSON.
+portal-audit: ## Журнал аудита портала ([SINCE=2026-10-01] [EVENT=login_failed] [LIMIT=100])
+	@$(COMPOSE) exec -T portal-api portal audit $(if $(SINCE),--since "$$SINCE") \
+		$(if $(EVENT),--event "$$EVENT") $(if $(LIMIT),--limit "$$LIMIT")
+
+portal-reindex: ## Вернуть документы базы знаний в очередь ([ONLY_ERRORS=1] — только с ошибкой)
+	$(COMPOSE) exec -T portal-worker portal reindex $(if $(ONLY_ERRORS),--only-errors)
+
+# Пересоздание коллекции допустимо только при остановленном воркере (docs/portal-api.md
+# §13.4); воркер запускается обратно и при отказе команды, и при Ctrl-C.
+portal-reindex-recreate: ## Пересоздать коллекцию Qdrant и переиндексировать всё (смена модели эмбеддингов)
+	@trap '$(COMPOSE) up -d portal-worker' EXIT; set -x; \
+		$(COMPOSE) stop portal-worker && \
+		$(COMPOSE) run --rm portal-worker portal reindex --recreate-collection
+
+portal-eval-search: ## Оценить поиск базы знаний на контрольном наборе
+	$(COMPOSE) exec -T portal-worker portal eval-search
+
 # --- эксплуатация ---
+
+backup: ## Резервная копия: база и файлы портала, векторы, данные Bifrost (DIR=<каталог>)
+	@[[ -n "$$DIR" ]] || { echo "укажите DIR=<каталог для копий, вне репозитория>" >&2; exit 1; }
+	$(SUDO) bash $(SCRIPTS_DIR)/backup.sh create "$$DIR"
+
+restore: ## Восстановить данные из копии, заменив текущие (FROM=<каталог копии>)
+	@[[ -n "$$FROM" ]] || { echo "укажите FROM=<каталог копии llm-backup-...>" >&2; exit 1; }
+	$(SUDO) bash $(SCRIPTS_DIR)/backup.sh restore "$$FROM"
 
 up: ## Запустить стек и дождаться healthy
 	$(SUDO) systemctl start llm-stack
@@ -109,7 +170,7 @@ restart: ## Перезапустить стек
 ps: ## Состояние контейнеров
 	$(COMPOSE) ps
 
-logs: ## Логи (SERVICE=vllm|bifrost|caddy; по умолчанию все)
+logs: ## Логи (SERVICE=vllm|bifrost|caddy|portal-api|...; по умолчанию все)
 	$(COMPOSE) logs -f --tail=200 $(SERVICE)
 
 preload: ## Докачать веса MODEL_ID в volume hf-cache (после смены модели)

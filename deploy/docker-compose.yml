@@ -10,6 +10,14 @@
 # имени каталога — на них ссылаются бэкап и runbook.
 name: llm
 
+# Ротация журналов контейнеров (docs/portal-design.md §8): без неё json-журналы Docker
+# растут без предела и заполняют диск ВМ. До 250 МБ на сервис.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 50m
+    max-file: "5"
+
 x-gpu: &gpu
   deploy:
     resources:
@@ -25,6 +33,7 @@ x-vllm: &vllm
   <<: *gpu
   image: vllm/vllm-openai:v0.29.0
   restart: unless-stopped
+  logging: *logging
   # PyTorch обменивается тензорами через shared memory; дефолтных 64 МБ /dev/shm мало.
   ipc: host
   environment:
@@ -43,6 +52,7 @@ services:
     # Второй этап развёртывания: внешний доступ (§3.7).
     profiles: [gateway]
     restart: unless-stopped
+    logging: *logging
     depends_on:
       bifrost:
         condition: service_healthy
@@ -76,6 +86,7 @@ services:
     image: maximhq/bifrost:v2.2.0
     profiles: [gateway]
     restart: unless-stopped
+    logging: *logging
     depends_on:
       vllm:
         condition: service_healthy
@@ -176,6 +187,7 @@ services:
     image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
     profiles: [monitoring]
     restart: unless-stopped
+    logging: *logging
     networks:
       - inference
     healthcheck:
@@ -194,6 +206,7 @@ services:
     image: prom/prometheus:v3.14.0
     profiles: [monitoring]
     restart: unless-stopped
+    logging: *logging
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -211,6 +224,7 @@ services:
     image: grafana/grafana:13.2.2
     profiles: [monitoring]
     restart: unless-stopped
+    logging: *logging
     depends_on:
       prometheus:
         condition: service_healthy
@@ -236,6 +250,7 @@ services:
     build: ../portal/frontend
     profiles: [portal]
     restart: unless-stopped
+    logging: *logging
     networks:
       - edge
     healthcheck:
@@ -249,6 +264,7 @@ services:
     build: ../portal/backend
     profiles: [portal]
     restart: unless-stopped
+    logging: *logging
     depends_on:
       portal-db:
         condition: service_healthy
@@ -282,6 +298,7 @@ services:
     build: ../portal/backend
     profiles: [portal]
     restart: unless-stopped
+    logging: *logging
     command: ["portal", "worker"]
     # По SIGTERM воркер возвращает взятые задания в очередь; разбор PDF в потоке
     # прервать нельзя, и стандартных 10 с на это не хватает.
@@ -297,7 +314,6 @@ services:
       PORTAL_DB_PASSWORD: ${PORTAL_DB_PASSWORD:?}
       PORTAL_LLM_API_KEY: ${PORTAL_LLM_API_KEY:-}
       QDRANT_API_KEY: ${QDRANT_API_KEY:?}
-      MAX_MODEL_LEN: ${MAX_MODEL_LEN:?}
     volumes:
       - portal-files:/data/files
       - ./portal:/etc/portal:ro
@@ -316,6 +332,7 @@ services:
     image: postgres:16.15-bookworm
     profiles: [portal]
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: portal
       POSTGRES_DB: portal
@@ -337,6 +354,7 @@ services:
     image: qdrant/qdrant:v1.19.1
     profiles: [portal]
     restart: unless-stopped
+    logging: *logging
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?}
     volumes:

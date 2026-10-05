@@ -5,7 +5,7 @@ import json
 import ssl
 import struct
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -477,9 +477,10 @@ def test_parse_args_rejects_non_positive_attempts() -> None:
         st.parse_args(["--check-rate-limit", "0"])
 
 
-def _check_names(*, direct: bool) -> list[str]:
+def _check_names(*, direct: bool, **options: Any) -> list[str]:
     with Recorder([]).client() as client:
-        return [name for name, _ in st.build_checks(client, "https://llm.example", direct=direct)]
+        checks = st.build_checks(client, "https://llm.example", direct=direct, **options)
+        return [name for name, _ in checks]
 
 
 def test_build_checks_includes_closed_paths_through_gateway() -> None:
@@ -490,3 +491,303 @@ def test_build_checks_skips_caddy_only_check_in_direct_mode() -> None:
     names = _check_names(direct=True)
     assert "closed_paths" not in names
     assert names == [name for name in _check_names(direct=False) if name != "closed_paths"]
+
+
+# --- портал (SITE_MODE=portal) ------------------------------------------------
+
+ROOT = "https://llm.example"
+SECURITY_HEADERS = {
+    "Strict-Transport-Security": "max-age=31536000",
+    "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def page_response(**overrides: str) -> httpx.Response:
+    headers = {"Content-Type": "text/html; charset=utf-8", **SECURITY_HEADERS, **overrides}
+    return httpx.Response(200, headers=headers, text="<!doctype html>")
+
+
+def portal_error(status: int, code: str) -> httpx.Response:
+    return httpx.Response(status, json={"error": {"code": code, "message": "текст"}})
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, "api"), ("", "api"), ("portal", "portal")])
+def test_settings_site_mode(value: str | None, expected: str) -> None:
+    env = {"LLM_BASE_URL": "https://llm.example/v1", "LLM_API_KEY": "sk-bf-test"}
+    if value is not None:
+        env["SITE_MODE"] = value
+    assert st.load_settings(env).site_mode == expected
+
+
+def test_settings_rejects_unknown_site_mode() -> None:
+    env = {"LLM_BASE_URL": "https://llm.example/v1", "LLM_API_KEY": "k", "SITE_MODE": "both"}
+    with pytest.raises(st.SmokeTestError, match="SITE_MODE"):
+        st.load_settings(env)
+
+
+def test_settings_site_only_needs_no_key_and_accepts_ip_hostname() -> None:
+    settings = st.load_settings({"LLM_HOSTNAME": "192.168.25.8"}, site_only=True)
+    assert settings.base_url == "https://192.168.25.8/v1"
+    assert settings.api_key == ""
+
+
+def test_missing_security_headers_accepts_full_set_and_csp_frame_ban() -> None:
+    assert st.missing_security_headers(SECURITY_HEADERS) == []
+    csp_only = {
+        **SECURITY_HEADERS,
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+    }
+    del csp_only["X-Frame-Options"]
+    assert st.missing_security_headers(csp_only) == []
+
+
+@pytest.mark.parametrize(
+    ("header", "value", "fragment"),
+    [
+        ("Strict-Transport-Security", "", "Strict-Transport-Security"),
+        ("Content-Security-Policy", "default-src *", "Content-Security-Policy"),
+        ("X-Frame-Options", "SAMEORIGIN", "фреймы"),
+        ("X-Content-Type-Options", "", "nosniff"),
+        ("Referrer-Policy", "", "Referrer-Policy"),
+    ],
+)
+def test_missing_security_headers_reports_each(header: str, value: str, fragment: str) -> None:
+    missing = st.missing_security_headers({**SECURITY_HEADERS, header: value})
+    assert len(missing) == 1
+    assert fragment in missing[0]
+
+
+def test_check_portal_page_requests_root_and_login_without_key() -> None:
+    recorder = run_check(
+        lambda client: st.check_portal_page(client, ROOT), page_response(), page_response()
+    )
+    assert [request.url.path for request in recorder.requests] == ["/", "/login"]
+    assert all("Authorization" not in request.headers for request in recorder.requests)
+
+
+@pytest.mark.parametrize(
+    ("response", "fragment"),
+    [
+        (httpx.Response(404), "/ → HTTP 404"),
+        (httpx.Response(200, json={}), "не HTML"),
+        (page_response(**{"Referrer-Policy": ""}), "нет заголовков: Referrer-Policy"),
+    ],
+)
+def test_check_portal_page_failures(response: httpx.Response, fragment: str) -> None:
+    with (
+        Recorder([response, page_response()]).client() as client,
+        pytest.raises(st.SmokeTestError, match=fragment),
+    ):
+        st.check_portal_page(client, ROOT)
+
+
+def closed_path_responses() -> list[httpx.Response]:
+    static = [httpx.Response(404, text="<!doctype html>") for _ in st.PORTAL_CLOSED_PATHS]
+    api = [portal_error(404, "not_found") for _ in st.PORTAL_UNKNOWN_API_PATHS]
+    return static + api
+
+
+def test_check_portal_closed_paths_passes() -> None:
+    recorder = run_check(
+        lambda client: st.check_portal_closed_paths(client, ROOT), *closed_path_responses()
+    )
+    paths = [request.url.path for request in recorder.requests]
+    assert paths == [*st.PORTAL_CLOSED_PATHS, *st.PORTAL_UNKNOWN_API_PATHS]
+    assert {"/metrics", "/healthz", "/docs", "/openapi.json"} <= set(paths)
+    assert "/api/governance/virtual-keys" in paths
+    assert all("Authorization" not in request.headers for request in recorder.requests)
+
+
+def test_check_portal_closed_paths_reports_open_static_path() -> None:
+    responses = closed_path_responses()
+    responses[0] = httpx.Response(200, text="# HELP")
+    with (
+        Recorder(responses).client() as client,
+        pytest.raises(st.SmokeTestError, match="/metrics → HTTP 200"),
+    ):
+        st.check_portal_closed_paths(client, ROOT)
+
+
+@pytest.mark.parametrize(
+    "bifrost_response",
+    [
+        httpx.Response(200, json={"virtual_keys": []}),
+        # 404 не от портала: формат ошибки Bifrost, а не бэкенда.
+        httpx.Response(404, json={"error": {"message": "not found"}}),
+        httpx.Response(404, text="404 page not found"),
+    ],
+)
+def test_check_portal_closed_paths_requires_backend_404(bifrost_response: httpx.Response) -> None:
+    responses = closed_path_responses()
+    responses[len(st.PORTAL_CLOSED_PATHS)] = bifrost_response
+    with (
+        Recorder(responses).client() as client,
+        pytest.raises(st.SmokeTestError, match="/api/governance/virtual-keys"),
+    ):
+        st.check_portal_closed_paths(client, ROOT)
+
+
+def test_check_portal_session_required() -> None:
+    recorder = run_check(
+        lambda client: st.check_portal_session_required(client, ROOT),
+        portal_error(401, "unauthenticated"),
+    )
+    request = recorder.requests[0]
+    assert (request.method, request.url.path) == ("GET", "/api/auth/session")
+    assert "Cookie" not in request.headers
+    with (
+        Recorder([httpx.Response(200, json={"step": "done"})]).client() as client,
+        pytest.raises(st.SmokeTestError, match="ожидался 401"),
+    ):
+        st.check_portal_session_required(client, ROOT)
+
+
+def test_check_portal_csrf_required_sends_post_without_header() -> None:
+    recorder = run_check(
+        lambda client: st.check_portal_csrf_required(client, ROOT),
+        portal_error(403, "csrf_check_failed"),
+    )
+    request = recorder.requests[0]
+    assert request.method == "POST"
+    assert request.url.path.startswith("/api/")
+    assert "X-Portal-Csrf" not in request.headers
+    assert "Authorization" not in request.headers
+
+
+@pytest.mark.parametrize(
+    "response",
+    [httpx.Response(204), portal_error(401, "unauthenticated"), portal_error(403, "forbidden")],
+)
+def test_check_portal_csrf_required_failures(response: httpx.Response) -> None:
+    with (
+        Recorder([response]).client() as client,
+        pytest.raises(st.SmokeTestError, match="csrf_check_failed"),
+    ):
+        st.check_portal_csrf_required(client, ROOT)
+
+
+# --- здоровье сервисов --------------------------------------------------------
+
+
+def ps_row(service: str, state: str = "running", health: str = "healthy") -> str:
+    return json.dumps({"Service": service, "State": state, "Health": health, "Name": "x"})
+
+
+def test_parse_compose_ps_reads_lines_and_legacy_array() -> None:
+    lines = "\n".join([ps_row("caddy"), ps_row("portal-worker", health="starting")])
+    expected = {"caddy": ("running", "healthy"), "portal-worker": ("running", "starting")}
+    assert st.parse_compose_ps(lines + "\n") == expected
+    assert st.parse_compose_ps("[" + lines.replace("\n", ",") + "]") == expected
+    assert st.parse_compose_ps("") == {}
+
+
+def test_parse_compose_ps_rejects_garbage() -> None:
+    with pytest.raises(st.SmokeTestError, match="неожиданный вывод"):
+        st.parse_compose_ps("no configuration file provided")
+
+
+def test_unhealthy_services_reports_missing_stopped_and_unhealthy() -> None:
+    output = "\n".join(
+        [
+            ps_row("caddy"),
+            ps_row("portal-api", health="unhealthy"),
+            ps_row("portal-db", state="exited", health=""),
+        ]
+    )
+    problems = st.unhealthy_services(["caddy", "portal-api", "portal-db", "portal-worker"], output)
+    assert problems == [
+        "portal-api: running unhealthy",
+        "portal-db: exited",
+        "portal-worker: не запущен",
+    ]
+
+
+def test_check_services_asks_compose_for_enabled_services() -> None:
+    calls: list[tuple[str, list[str]]] = []
+
+    def runner(compose_file: str, args: Sequence[str]) -> str:
+        calls.append((compose_file, list(args)))
+        if args[0] == "config":
+            return "portal-worker\ncaddy\n"
+        return "\n".join([ps_row("caddy"), ps_row("portal-worker")])
+
+    assert st.check_services("compose.yml", runner) == "healthy: caddy, portal-worker"
+    assert calls == [
+        ("compose.yml", ["config", "--services"]),
+        ("compose.yml", ["ps", "--format", "json"]),
+    ]
+
+
+def test_check_services_fails_when_worker_is_down() -> None:
+    def runner(compose_file: str, args: Sequence[str]) -> str:
+        return "caddy\nportal-worker\n" if args[0] == "config" else ps_row("caddy")
+
+    with pytest.raises(st.SmokeTestError, match="portal-worker: не запущен"):
+        st.check_services("compose.yml", runner)
+
+
+def test_run_compose_reports_missing_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PATH", "")
+    with pytest.raises(st.SmokeTestError, match="не удалось выполнить docker compose"):
+        st.run_compose("compose.yml", ["ps"])
+
+
+# --- состав проверок ----------------------------------------------------------
+
+MODEL_CHECKS = ["text", "thinking_disabled", "image", "json_schema", "tool_call"]
+PORTAL_CHECKS = [
+    "portal_page",
+    "portal_closed_paths",
+    "portal_session_required",
+    "portal_csrf_required",
+]
+
+
+def test_build_checks_api_mode_is_unchanged() -> None:
+    assert _check_names(direct=False) == [*MODEL_CHECKS, "no_key", "invalid_key", "closed_paths"]
+
+
+def test_build_checks_portal_mode_replaces_closed_paths() -> None:
+    names = _check_names(direct=False, site_mode="portal")
+    assert names == [*MODEL_CHECKS, "no_key", "invalid_key", *PORTAL_CHECKS]
+
+
+def test_build_checks_site_only_makes_no_model_requests() -> None:
+    assert _check_names(direct=False, site_only=True) == ["no_key", "closed_paths"]
+    names = _check_names(direct=False, site_only=True, site_mode="portal", compose_file="c.yml")
+    assert names == ["no_key", *PORTAL_CHECKS, "services"]
+
+
+def test_build_checks_direct_mode_ignores_site_mode() -> None:
+    assert _check_names(direct=True, site_mode="portal") == _check_names(direct=True)
+
+
+@pytest.mark.parametrize("extra", [["--direct"], ["--check-rate-limit", "3"]])
+def test_parse_args_rejects_site_only_combinations(extra: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        st.parse_args(["--site-only", *extra])
+
+
+def test_main_site_only_runs_without_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name in ("LLM_HOSTNAME", "LLM_API_KEY", "LLM_CA_CERT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("SITE_MODE", "portal")
+    responses = [
+        httpx.Response(401, json={"error": {"message": "vk"}}),
+        page_response(),
+        page_response(),
+        *closed_path_responses(),
+        portal_error(401, "unauthenticated"),
+        portal_error(403, "csrf_check_failed"),
+    ]
+    transport = httpx.MockTransport(Recorder(responses))
+    real_build_client = st.build_client
+    monkeypatch.setattr(st, "build_client", lambda settings: real_build_client(settings, transport))
+    assert st.main(["--site-only"]) == 0
+    assert "ИТОГ: PASS" in capsys.readouterr().out

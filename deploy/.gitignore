@@ -1,3 +1,3 @@
 # Необязательная накладка конфигурации портала (portal/config.override.yaml) — локальная
-# настройка ВМ; каталог монтируется в portal-api как /etc/portal.
+# настройка ВМ; каталог монтируется в portal-api и portal-worker как /etc/portal.
 portal/
