@@ -322,8 +322,10 @@ make keys
   `POST /v1/async/chat/completions`, `GET /v1/skills`, `/v1/responses`,
   `/v1/models/<id>`; в заголовках ответов нет `alt-svc`; `POST /v1/completions` с ключом
   отвечает 200;
-- запросы с моделью `default` и `embeddings` без префикса `vllm/` проходят. Если ответ —
-  400 «could not auto resolve a provider», нужно решение владельца (`design.md` §13).
+- запросы с моделью `default` и `embeddings` без префикса `vllm/` проходят. Для этого
+  ключ должен быть привязан к провайдеру `vllm` — `make key` делает это сам. Ответ
+  400 «could not auto resolve a provider» означает ключ без привязки (создан до
+  2026-10-07 или вручную в UI): выдать новый через `make key` и отозвать прежний.
 
 С рабочей станции администратора UI Bifrost и Grafana открываются через туннель:
 

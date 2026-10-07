@@ -73,6 +73,14 @@ def test_build_create_payload_with_both_limits() -> None:
         "description": "ERP",
         "is_active": True,
         "allow_all_providers": True,
+        "provider_configs": [
+            {
+                "provider": "vllm",
+                "weight": 1.0,
+                "key_ids": ["*"],
+                "allowed_models": ["default", "embeddings"],
+            }
+        ],
         "rate_limit": {
             "request_max_limit": 100,
             "request_reset_duration": "1h",

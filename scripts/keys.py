@@ -16,8 +16,9 @@ API reference ``/api-reference/governance/*`` на 2026-09-15; перепров�
     POST /api/governance/virtual-keys        -> {"message", "virtual_key": VirtualKey}
     GET  /api/governance/virtual-keys        -> {"virtual_keys", "count", "total_count", ...}
     PUT  /api/governance/virtual-keys/{id}   -> {"message", "virtual_key": VirtualKey}
-Ключ создаётся с ``allow_all_providers: true``: провайдер в конфигурации один (vLLM),
-и ключ не привязывается к его имени.
+Ключ создаётся с привязкой к провайдеру ``vllm`` (``provider_configs``): без неё
+Bifrost v2.2.0 не определяет провайдера по имени модели без префикса ``vllm/`` и
+отвечает 400 «could not auto resolve a provider» (проверено на ВМ 2026-10-07).
 
 Окружение:
     BIFROST_ADMIN_URL       адрес API управления; по умолчанию http://127.0.0.1:8081
@@ -51,6 +52,14 @@ DEFAULT_ADMIN_URL = f"http://127.0.0.1:{ADMIN_PORT}"
 VIRTUAL_KEYS_PATH = "/api/governance/virtual-keys"
 REQUEST_TIMEOUT_S = 30.0
 LIST_PAGE_SIZE = 100
+# Провайдер и алиасы моделей из deploy/bifrost/config.json; ``key_ids: ["*"]`` — любой
+# ключ провайдера, иначе ответ 400 «no keys found for provider».
+PROVIDER_CONFIG: dict[str, Any] = {
+    "provider": "vllm",
+    "weight": 1.0,
+    "key_ids": ["*"],
+    "allowed_models": ["default", "embeddings"],
+}
 
 JsonObject = dict[str, Any]
 
@@ -99,7 +108,12 @@ def build_create_payload(
     period: str,
 ) -> JsonObject:
     """Собрать тело POST /api/governance/virtual-keys."""
-    payload: JsonObject = {"name": name, "is_active": True, "allow_all_providers": True}
+    payload: JsonObject = {
+        "name": name,
+        "is_active": True,
+        "allow_all_providers": True,
+        "provider_configs": [PROVIDER_CONFIG],
+    }
     if description:
         payload["description"] = description
     rate_limit: JsonObject = {}
