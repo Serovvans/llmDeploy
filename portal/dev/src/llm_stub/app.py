@@ -22,7 +22,13 @@ from llm_stub import replies
 _CHAT_FIELDS = frozenset(
     {"model", "messages", "stream", "reasoning_effort", "max_tokens", "response_format"}
 )
-_REASONING_EFFORTS = frozenset({"low", "medium", "xhigh"})
+_REASONING_EFFORTS = frozenset({"low", "medium"})
+# Заглушка стоит на месте Bifrost, а он переписывает `xhigh` в `high`: шаблон модели
+# отвергает оба значения одним текстом. Уровень `xhigh` задаётся отсутствием поля.
+_GATEWAY_HIGH_EFFORTS = frozenset({"high", "xhigh"})
+_HIGH_EFFORT_MESSAGE = (
+    "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low."
+)
 _SLOW_DELAY_SECONDS = 0.2
 _CONTEXT_OVERFLOW = {
     "error": {
@@ -104,8 +110,8 @@ def _chat_refusal(body: dict[str, Any]) -> Response | None:
     if body.get("model") != "default":
         return _error(404, "model not found")
     effort = body.get("reasoning_effort")
-    if effort == "high":
-        return _error(500, "reasoning_effort high is not supported")
+    if effort in _GATEWAY_HIGH_EFFORTS:
+        return _error(400, _HIGH_EFFORT_MESSAGE)
     if effort is not None and effort not in _REASONING_EFFORTS:
         return _error(400, "invalid reasoning_effort")
     messages = body.get("messages")

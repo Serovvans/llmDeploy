@@ -197,7 +197,7 @@ def test_validate_schema_checks_array_items() -> None:
 )
 def test_payloads_use_default_model_and_low_reasoning(payload: dict[str, Any]) -> None:
     assert payload["model"] == "default"
-    # §3.1: high у Qwen3.8 даёт HTTP 500, xhigh (по умолчанию) слишком долог для смоук-теста.
+    # §3.1: high у Qwen3.8 даёт HTTP 400, xhigh (по умолчанию) слишком долог для смоук-теста.
     assert payload["reasoning_effort"] == "low"
 
 
@@ -255,6 +255,52 @@ def test_check_thinking_disabled_fails_when_reasoning_present(field: str) -> Non
         pytest.raises(st.SmokeTestError, match=f"{field}.*chat_template_kwargs"),
     ):
         st.check_thinking_disabled(client)
+
+
+# --- без reasoning_effort («Вдумчиво») ---------------------------------------
+
+
+def test_thinking_default_payload_omits_reasoning_effort() -> None:
+    # Bifrost превращает xhigh в high, а шаблон на high отвечает 400: поле не передаётся.
+    payload = st.thinking_default_payload()
+    assert payload["model"] == "default"
+    assert "reasoning_effort" not in payload
+    assert "chat_template_kwargs" not in payload
+
+
+@pytest.mark.parametrize(
+    ("message", "detail"),
+    [
+        ({"content": None, "reasoning": " Считаю: 2+2... "}, "reasoning: Считаю: 2+2..."),
+        ({"content": None, "reasoning_content": "Считаю"}, "reasoning_content: Считаю"),
+        ({"content": "4", "reasoning": None}, "content: 4"),
+    ],
+)
+def test_check_thinking_default_accepts_truncated_reasoning_or_answer(
+    message: dict[str, Any], detail: str
+) -> None:
+    recorder = Recorder([chat_response(message, finish_reason="length")])
+    with recorder.client() as client:
+        assert st.check_thinking_default(client) == detail
+    assert "reasoning_effort" not in recorder.payload()
+
+
+@pytest.mark.parametrize(
+    ("response", "fragment"),
+    [
+        (chat_response({"content": "", "reasoning": None}), "нет ни рассуждения, ни content"),
+        (
+            httpx.Response(400, json={"error": {"message": "high is not supported"}}),
+            "HTTP 400 high is not supported",
+        ),
+    ],
+)
+def test_check_thinking_default_failures(response: httpx.Response, fragment: str) -> None:
+    with (
+        Recorder([response]).client() as client,
+        pytest.raises(st.SmokeTestError, match=fragment),
+    ):
+        st.check_thinking_default(client)
 
 
 # --- изображение -------------------------------------------------------------
@@ -800,7 +846,14 @@ def test_run_compose_reports_missing_docker(monkeypatch: pytest.MonkeyPatch) -> 
 
 # --- состав проверок ----------------------------------------------------------
 
-MODEL_CHECKS = ["text", "thinking_disabled", "image", "json_schema", "tool_call"]
+MODEL_CHECKS = [
+    "text",
+    "thinking_disabled",
+    "thinking_default",
+    "image",
+    "json_schema",
+    "tool_call",
+]
 PORTAL_CHECKS = [
     "v1_closed_routes",
     "portal_page",

@@ -19,3 +19,6 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# ключ разработчика для прямого доступа к моделям
+scripts/.env.dev

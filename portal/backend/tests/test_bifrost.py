@@ -1,7 +1,9 @@
 """Клиент модели через Bifrost — против заглушки стенда `portal/dev` (§12.1, §12.2)."""
 
 import io
+import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -21,6 +23,7 @@ from portal.llm.ports import (
     ModelOverloadedError,
     ModelUnavailableError,
     ReasoningDelta,
+    ReasoningEffort,
     TextPart,
 )
 from tests import samples
@@ -127,14 +130,40 @@ async def test_key_goes_in_authorization_header(settings: Settings) -> None:
     assert await model.complete(_request("вопрос")) == "ок"
     assert str(seen[0].url) == "http://bifrost:8080/v1/chat/completions"
     assert seen[0].headers["authorization"] == "Bearer sk-bf-secret"
-    import json
-
     payload = json.loads(seen[0].content)
     assert set(payload) == {"model", "messages", "stream", "reasoning_effort", "max_tokens"}
     assert (payload["model"], payload["stream"], payload["reasoning_effort"]) == (
         "default", False, "low",
     )  # fmt: skip
     assert payload["messages"][0] == {"role": "system", "content": "Правила."}
+
+
+@pytest.mark.parametrize(
+    ("effort", "sent"), [("low", "low"), ("medium", "medium"), ("xhigh", None)]
+)
+async def test_xhigh_effort_is_left_to_model_default(
+    settings: Settings, effort: ReasoningEffort, sent: str | None
+) -> None:
+    """Bifrost переписывает `xhigh` в `high` (модель отвечает 400): поле не передаётся."""
+    payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        if payloads[-1]["stream"]:
+            line = 'data: {"choices":[{"delta":{"content":"ок"},"finish_reason":"stop"}]}\n\n'
+            return httpx.Response(200, text=line)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
+
+    model = _mock_model(settings.llm, handler)
+    request = replace(_request("вопрос"), reasoning_effort=effort)
+    await _collect(model, request)
+    await model.complete(request)
+    assert [payload["stream"] for payload in payloads] == [True, False]
+    for payload in payloads:
+        if sent is None:
+            assert "reasoning_effort" not in payload
+        else:
+            assert payload["reasoning_effort"] == sent
 
 
 async def test_connection_failures_and_timeouts(settings: Settings) -> None:

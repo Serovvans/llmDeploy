@@ -6,8 +6,9 @@
 
 Проверки через клиентский эндпоинт с ключом Bifrost, модель ``default``:
 текст; ``chat_template_kwargs: {"enable_thinking": false}`` доходит до vLLM через Bifrost
-(в ответе нет рассуждений); изображение; ``response_format: json_schema`` (ответ валидируется
-по схеме); tool call. Отрицательные проверки (лимит ключа не расходуют): запрос без ключа
+(в ответе нет рассуждений); запрос без ``reasoning_effort`` — так портал шлёт режим
+«Вдумчиво»; изображение; ``response_format: json_schema`` (ответ валидируется по схеме);
+tool call. Отрицательные проверки (лимит ключа не расходуют): запрос без ключа
 и с неверным ключом получает 401/403; ``/api/governance/virtual-keys``, ``/metrics`` и ``/``
 через 443 отдают 404. Caddy проксирует в Bifrost только четыре пути —
 ``/v1/chat/completions``, ``/v1/completions``, ``/v1/embeddings``, ``/v1/models``
@@ -29,7 +30,10 @@ cookie — 401; ``POST`` без ``X-Portal-Csrf`` — 403.
 (например, ``keys.py create --name smoke-limit --requests 3``).
 
 Qwen3.8 (§3.1): мышление включено по умолчанию с ``reasoning_effort=xhigh``, значение
-``high`` даёт HTTP 500. Поэтому все запросы явно отправляются с ``reasoning_effort=low``.
+``high`` даёт HTTP 400. Bifrost превращает ``xhigh`` в ``high``, поэтому через шлюз ``xhigh``
+явно передать нельзя: портал в режиме «Вдумчиво» поле не передаёт, и проверка
+``thinking_default`` повторяет такой запрос. Остальные запросы явно отправляются с
+``reasoning_effort=low``.
 
 Окружение:
     LLM_BASE_URL  проверяемый эндпоинт; по умолчанию ``https://${LLM_HOSTNAME}/v1``,
@@ -82,6 +86,9 @@ CHAT_PATH = "chat/completions"
 # Первый запрос после старта vLLM (компиляция, прогрев) бывает долгим.
 REQUEST_TIMEOUT_S = 300.0
 MAX_TOKENS = 2048
+# Запрос без reasoning_effort думает на xhigh: бюджета хватает на начало рассуждения,
+# обрыв по длине для этой проверки не ошибка.
+THINKING_DEFAULT_MAX_TOKENS = 256
 TEXT_PROMPT = "Сколько будет 2+2? Ответь только числом."
 INVALID_API_KEY = "sk-bf-invalid-smoke-test"
 # Порт vLLM на ВМ открыт только на loopback (§3.7, §8).
@@ -286,6 +293,15 @@ def thinking_disabled_payload() -> JsonObject:
     )
 
 
+def thinking_default_payload() -> JsonObject:
+    """Текстовый запрос без ``reasoning_effort`` — как у портала в режиме «Вдумчиво»."""
+    return {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": TEXT_PROMPT}],
+        "max_tokens": THINKING_DEFAULT_MAX_TOKENS,
+    }
+
+
 def image_payload(png: bytes) -> JsonObject:
     """Запрос для проверки зрения: изображение как data URL."""
     data_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
@@ -329,8 +345,13 @@ def minimal_payload() -> JsonObject:
     return chat_payload([{"role": "user", "content": "ok"}], max_tokens=1)
 
 
-def complete(client: httpx.Client, payload: JsonObject) -> JsonObject:
-    """Отправить chat/completions и вернуть ``choices[0].message``; ошибки — SmokeTestError."""
+def complete(
+    client: httpx.Client, payload: JsonObject, *, allow_truncated: bool = False
+) -> JsonObject:
+    """Отправить chat/completions и вернуть ``choices[0].message``; ошибки — SmokeTestError.
+
+    ``allow_truncated`` — не считать ошибкой обрыв ответа по ``max_tokens``.
+    """
     response = client.post(CHAT_PATH, json=payload)
     if response.status_code != httpx.codes.OK:
         raise SmokeTestError(describe_error(response))
@@ -339,7 +360,7 @@ def complete(client: httpx.Client, payload: JsonObject) -> JsonObject:
         message: JsonObject = choice["message"]
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
         raise SmokeTestError(f"неожиданная форма ответа: {response.text[:500]}") from exc
-    if choice.get("finish_reason") == "length":
+    if choice.get("finish_reason") == "length" and not allow_truncated:
         raise SmokeTestError(
             f"ответ обрезан по max_tokens={payload['max_tokens']} (мышление съело бюджет токенов?)"
         )
@@ -374,6 +395,16 @@ def check_thinking_disabled(client: httpx.Client) -> str:
             "отбрасывает chat_template_kwargs; клиентам рекомендовать reasoning_effort=low"
         )
     return _expect_four(_content(message))
+
+
+def check_thinking_default(client: httpx.Client) -> str:
+    """Запрос без ``reasoning_effort`` (режим «Вдумчиво» портала) принят: есть рассуждение."""
+    message = complete(client, thinking_default_payload(), allow_truncated=True)
+    for field in (*REASONING_FIELDS, "content"):
+        value = message.get(field)
+        if isinstance(value, str) and value.strip():
+            return f"{field}: {value.strip()}"
+    raise SmokeTestError(f"в ответе нет ни рассуждения, ни content: {message}")
 
 
 def check_image(client: httpx.Client) -> str:
@@ -709,6 +740,7 @@ def build_checks(
         checks += [
             ("text", lambda: check_text(client)),
             ("thinking_disabled", lambda: check_thinking_disabled(client)),
+            ("thinking_default", lambda: check_thinking_default(client)),
             ("image", lambda: check_image(client)),
             ("json_schema", lambda: check_json_schema(client)),
             ("tool_call", lambda: check_tool_call(client)),

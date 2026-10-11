@@ -108,7 +108,6 @@ async def test_unknown_field_model_effort_and_images_are_refused(client: httpx.A
         (_chat("x", chat_template_kwargs={"enable_thinking": False}), 400),
         (_chat("x", temperature=0.1), 400),
         ({**_chat("x"), "model": "qwen"}, 404),
-        (_chat("x", reasoning_effort="high"), 500),
         (_chat("x", reasoning_effort="minimal"), 400),
         (_chat("x", *[_image(bytes([n])) for n in range(9)]), 400),
         ({"model": "default", "messages": [{"role": "system", "content": "x"}]}, 400),
@@ -118,13 +117,29 @@ async def test_unknown_field_model_effort_and_images_are_refused(client: httpx.A
         response = await client.post(CHAT, json=body)
         assert response.status_code == status, body
         assert "error" in response.json()
-    for effort in ("low", "medium", "xhigh"):
+    for effort in ("low", "medium"):
         assert (
             await client.post(CHAT, json=_chat("x", reasoning_effort=effort))
         ).status_code == 200
     eight = _chat("x", *[_image(bytes([n])) for n in range(8)])
     assert (await _answer(client, eight)).endswith("Изображений: 8.")
     assert (await client.post(CHAT, content=b"{oops")).status_code == 400
+
+
+async def test_high_efforts_are_refused_like_template_behind_gateway(
+    client: httpx.AsyncClient,
+) -> None:
+    """Шлюз переписывает `xhigh` в `high`, шаблон отвечает 400; без поля — размышления."""
+    for effort in ("high", "xhigh"):
+        response = await client.post(CHAT, json=_chat("x", reasoning_effort=effort))
+        assert response.status_code == 400, effort
+        assert response.json()["error"]["message"] == (
+            "Unexpected reasoning effort high. "
+            "Supported types are xhigh (default), medium, and low."
+        )
+    default = await client.post(CHAT, json=_chat("x"))
+    assert default.status_code == 200
+    assert default.json()["choices"][0]["message"]["reasoning"] == "Размышление заглушки."
 
 
 async def test_reply_marks_win_over_json_schema(client: httpx.AsyncClient) -> None:
