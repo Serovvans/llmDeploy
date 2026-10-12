@@ -4,6 +4,7 @@ import {
   Hint,
   Input,
   Kebab,
+  Link,
   Loader,
   MenuItem,
   Paging,
@@ -11,6 +12,8 @@ import {
   SingleToast,
   Spinner,
   Tabs,
+  TokenInput,
+  TokenInputType,
 } from '@skbkontur/react-ui';
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -22,13 +25,15 @@ import { DataTable, SortableHeader } from '../components/DataTable';
 import { EmptyState } from '../components/EmptyState';
 import { AddDocumentsModal } from '../components/kb/AddDocumentsModal';
 import { useDocumentViewer } from '../components/kb/DocumentViewer';
+import { EditTagsModal } from '../components/kb/EditTagsModal';
 import { StatusBadge } from '../components/kb/StatusBadge';
+import { TagChips } from '../components/kb/TagChips';
 import { Notice } from '../components/Notice';
 import { PageHeader } from '../components/PageHeader';
 import { TitleHint } from '../components/TitleHint';
 import { useFocusReturn } from '../hooks/useFocusReturn';
 import { usePageTitle } from '../hooks/usePageTitle';
-import { canRetry, isInProgress } from '../kb/documents';
+import { canRetry, documentVolume, isInProgress, tagKey } from '../kb/documents';
 import { useSession } from '../session/SessionContext';
 import { errorText, formatDate, shortName, texts } from '../texts';
 import styles from './KnowledgeScreen.module.css';
@@ -36,13 +41,20 @@ import styles from './KnowledgeScreen.module.css';
 const t = texts.kb;
 const SEARCH_DELAY_MS = 300;
 const REFRESH_MS = 5000;
-const DEFAULT_QUERY: KbListQuery = { scope: 'shared', page: 1, q: '', sort: 'created_at', order: 'desc' };
+const DEFAULT_QUERY: KbListQuery = { scope: 'shared', page: 1, q: '', tags: [], sort: 'created_at', order: 'desc' };
+
+const REMOVE_TITLES = {
+  shared: t.remove.titleShared,
+  personal: t.remove.titlePersonal,
+  ministries: t.remove.titleMinistries,
+} satisfies Record<KbScope, (title: string) => string>;
 
 type Loaded = { key: string; page: Page<KbDocument> } | { key: string; error: unknown };
 
 export function KnowledgeScreen() {
   usePageTitle(t.title);
-  const { config } = useSession();
+  const { config, session } = useSession();
+  const admin = session?.user?.role === 'admin';
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState(DEFAULT_QUERY);
   const [reloads, setReloads] = useState(0);
@@ -61,7 +73,9 @@ export function KnowledgeScreen() {
   }, [fromCogis, navigate]);
   const [removing, setRemoving] = useState<KbDocument | null>(null);
   const [removePending, setRemovePending] = useState(false);
-  const rememberOpener = useFocusReturn(adding || removing !== null);
+  const [editingTags, setEditingTags] = useState<KbDocument | null>(null);
+  const [tagHintsFailed, setTagHintsFailed] = useState(false);
+  const rememberOpener = useFocusReturn(adding || removing !== null || editingTags !== null);
   const viewer = useDocumentViewer();
 
   const requestKey = JSON.stringify([query, reloads]);
@@ -96,7 +110,8 @@ export function KnowledgeScreen() {
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  // Пока есть документы в очереди или в обработке, список обновляется сам — на месте, без индикатора.
+  // Пока есть документы в очереди, в обработке или с обновляемой обработкой, список обновляется сам — на месте,
+  // без индикатора.
   const documents = page?.scope === query.scope ? page.data.items : null;
   const inProgress = documents?.some(isInProgress) ?? false;
   useEffect(() => {
@@ -133,13 +148,62 @@ export function KnowledgeScreen() {
       order: current.sort === sort ? (current.order === 'asc' ? 'desc' : 'asc') : sort === 'title' ? 'asc' : 'desc',
     }));
 
+  /** Правит строки открытой страницы на месте: `change` возвращает новую строку или `null` — убрать её. */
+  const updateRow = (id: string, change: (document: KbDocument) => KbDocument | null) =>
+    setPage(
+      (current) =>
+        current && {
+          ...current,
+          data: {
+            ...current.data,
+            items: current.data.items.flatMap((item) => (item.id === id ? (change(item) ?? []) : item)),
+          },
+        },
+    );
+
+  const maxFilterTags = config?.kb.tags.max_selected ?? null;
+  const filterFull = maxFilterTags !== null && query.tags.length >= maxFilterTags;
+
+  /** Отбор по тегам складывается с поиском и возвращает список на первую страницу. */
+  const filterByTags = (tags: string[]) => setQuery((current) => ({ ...current, tags, page: 1 }));
+
+  /** Тег из строки добавляется в отбор; при достигнутом пределе и повторно — нет. */
+  const pickTag = (tag: string) => {
+    if (!filterFull && !query.tags.some((item) => tagKey(item) === tagKey(tag))) {
+      filterByTags([...query.tags, tag]);
+    }
+  };
+
+  const suggestTags = async (text: string): Promise<string[]> => {
+    if (filterFull) {
+      return [];
+    }
+    try {
+      const { items } = await api.listKbTags([], text.trim());
+      setTagHintsFailed(false);
+      return items;
+    } catch {
+      // Подсказки не загрузились: «Такого тега нет» было бы неправдой, список просто не открывается.
+      setTagHintsFailed(true);
+      return [];
+    }
+  };
+
   const retry = async (document: KbDocument) => {
     try {
-      await api.retryKbDocument(document.id);
-      SingleToast.push(t.retried);
+      // Строка перерисовывается по ответу сервера: что под «Готов», решают только поля документа.
+      const updated = await api.retryKbDocument(document.id);
+      updateRow(document.id, () => updated);
+      SingleToast.push(document.status === 'ready' ? t.reprocessRetried : t.retried);
+      return;
     } catch (error) {
+      if (isApiError(error, 'source_unavailable')) {
+        // Исходный файл записи уже удалён: до следующего обновления списка строка показывает эту причину.
+        updateRow(document.id, (item) => ({ ...item, error_code: 'source_expired' }));
+        return;
+      }
       if (isApiError(error, 'forbidden')) {
-        SingleToast.push(t.retryForbidden, { use: 'error' });
+        SingleToast.push(document.scope === 'ministries' ? t.ministriesForbidden : t.retryForbidden, { use: 'error' });
       } else if (!isApiError(error, 'document_not_in_error') && !isApiError(error, 'unauthenticated')) {
         SingleToast.push(errorText(error), { use: 'error' });
       }
@@ -157,7 +221,8 @@ export function KnowledgeScreen() {
     } catch (error) {
       // Уже удалён в другой вкладке — то же самое, без сообщения об ошибке.
       if (!isApiError(error, 'not_found')) {
-        SingleToast.push(t.remove.failed, { use: 'error' });
+        const noRight = isApiError(error, 'forbidden') && removing.scope === 'ministries';
+        SingleToast.push(noRight ? t.ministriesForbidden : t.remove.failed, { use: 'error' });
         setRemovePending(false);
         setRemoving(null);
         return;
@@ -166,9 +231,7 @@ export function KnowledgeScreen() {
     SingleToast.push(t.remove.done);
     const lastOnPage = page?.data.items.length === 1 && query.page > 1;
     // Строка убирается сразу.
-    setPage((current) =>
-      current && { ...current, data: { ...current.data, items: current.data.items.filter((item) => item.id !== removing.id) } },
-    );
+    updateRow(removing.id, () => null);
     setRemovePending(false);
     setRemoving(null);
     if (lastOnPage) {
@@ -184,9 +247,20 @@ export function KnowledgeScreen() {
     setAdding(true);
   };
 
+  const openTags = (document: KbDocument, openerSelector: string) => {
+    rememberOpener(openerSelector);
+    setEditingTags(document);
+  };
+
+  const resetFilter = () => {
+    setSearch('');
+    setQuery((current) => ({ ...current, q: '', tags: [], page: 1 }));
+  };
+
   const failed = !loading && loaded && 'error' in loaded ? loaded.error : null;
   const pagesCount = documents && page ? Math.ceil(page.data.total / KB_PAGE_SIZE) : 0;
-  const shared = query.scope === 'shared';
+  const { scope } = query;
+  const withAuthor = scope !== 'personal';
   const empty = documents?.length === 0 && !loading && failed === null;
 
   return (
@@ -207,16 +281,40 @@ export function KnowledgeScreen() {
             >
               <Tabs.Tab id="shared">{t.tabs.shared}</Tabs.Tab>
               <Tabs.Tab id="personal">{t.tabs.personal}</Tabs.Tab>
+              <Tabs.Tab id="ministries">{t.tabs.ministries}</Tabs.Tab>
             </Tabs>
-            <Input
-              width={320}
-              leftIcon={<IconSearchLoupeRegular16 />}
-              placeholder={t.search}
-              aria-label={t.search}
-              value={search}
-              onValueChange={setSearch}
-            />
+            <div className={styles.filters}>
+              <div className={styles.tagFilter}>
+                <TokenInput<string>
+                  type={TokenInputType.WithReference}
+                  width="100%"
+                  placeholder={t.filter.placeholder}
+                  aria-label={t.filter.placeholder}
+                  aria-describedby={filterFull ? 'kb-filter-limit' : undefined}
+                  selectedItems={query.tags}
+                  getItems={suggestTags}
+                  // Без строки «не найдено» список подсказок не открывается: при сбое и при достигнутом пределе его нет.
+                  renderNotFound={() => (tagHintsFailed || filterFull ? null : t.filter.noTag)}
+                  // Достигнут предел — новый тег не принимается; убрать тег можно всегда.
+                  onValueChange={(next) => (next.length < query.tags.length || !filterFull) && filterByTags(next)}
+                />
+                {filterFull && (
+                  <p id="kb-filter-limit" className={styles.note}>
+                    {t.filter.limit(maxFilterTags)}
+                  </p>
+                )}
+              </div>
+              <Input
+                width={320}
+                leftIcon={<IconSearchLoupeRegular16 />}
+                placeholder={t.search}
+                aria-label={t.search}
+                value={search}
+                onValueChange={setSearch}
+              />
+            </div>
           </div>
+          {scope === 'ministries' && <p className={styles.note}>{admin ? t.ministriesNote.admin : t.ministriesNote.employee}</p>}
           {failed !== null && (
             <Notice kind="error" action={{ label: texts.common.retry, onClick: reload }}>
               {errorText(failed)}
@@ -230,7 +328,8 @@ export function KnowledgeScreen() {
                     <SortableHeader active={query.sort === 'title'} order={query.sort === 'title' ? query.order : 'asc'} onToggle={() => sortBy('title')}>
                       {t.columns.title}
                     </SortableHeader>
-                    {shared && <th scope="col">{t.columns.author}</th>}
+                    <th scope="col">{t.columns.tags}</th>
+                    {withAuthor && <th scope="col">{t.columns.author}</th>}
                     <SortableHeader
                       active={query.sort === 'created_at'}
                       order={query.sort === 'created_at' ? query.order : 'desc'}
@@ -238,7 +337,7 @@ export function KnowledgeScreen() {
                     >
                       {t.columns.added}
                     </SortableHeader>
-                    <th scope="col">{t.columns.pages}</th>
+                    <th scope="col">{t.columns.volume}</th>
                     <th scope="col">{t.columns.status}</th>
                     <th scope="col">
                       <span className="p-visually-hidden">{texts.users.actions}</span>
@@ -272,22 +371,36 @@ export function KnowledgeScreen() {
                             <Spinner type="mini" caption={null} />
                           </span>
                         )}
-                        {shared && document.is_cogis && <span className={styles.cogis}>{t.cogis}</span>}
+                        {scope === 'shared' && document.is_cogis && <span className={styles.cogis}>{t.cogis}</span>}
                       </td>
-                      {shared && (
+                      <td data-opener={`tags-${document.id}`}>
+                        {document.tags.length > 0 ? (
+                          <TagChips tags={document.tags} onPick={pickTag} />
+                        ) : (
+                          document.can_delete && (
+                            <Link component="button" onClick={() => openTags(document, `[data-opener="tags-${document.id}"] button`)}>
+                              {t.tags.add}
+                            </Link>
+                          )
+                        )}
+                      </td>
+                      {withAuthor && (
                         <td className={styles.nowrap}>
                           {document.author.is_me ? t.me : shortName(document.author.full_name)}
                         </td>
                       )}
                       <td className={styles.nowrap}>{formatDate(document.created_at)}</td>
-                      <td>{document.page_count ?? t.noPages}</td>
+                      <td className={styles.nowrap}>{documentVolume(document) ?? t.noVolume}</td>
                       <td>
-                        <StatusBadge document={document} />
+                        <StatusBadge document={document} media={config?.media ?? null} />
                       </td>
                       <td className={styles.kebab} data-opener={`menu-${document.id}`}>
                         {document.can_delete && (
                           <Hint text={texts.users.actions} pos="left">
                             <Kebab aria-label={`${texts.users.actions}: ${document.title}`}>
+                              <MenuItem onClick={() => openTags(document, `[data-opener="menu-${document.id}"] [tabindex="0"]`)}>
+                                {t.menu.tags}
+                              </MenuItem>
                               {canRetry(document) && (
                                 <MenuItem onClick={() => void retry(document)}>{t.menu.retry}</MenuItem>
                               )}
@@ -308,19 +421,29 @@ export function KnowledgeScreen() {
                 </tbody>
               </DataTable>
             )}
-            {empty && query.q && (
+            {empty && query.tags.length > 0 && (
+              <EmptyState
+                title={t.empty.tags.title}
+                text={t.empty.tags.text}
+                action={{ label: t.empty.tags.action, onClick: resetFilter }}
+              />
+            )}
+            {empty && query.tags.length === 0 && query.q && (
               <EmptyState
                 title={t.empty.search.title}
                 text={t.empty.search.text}
                 action={{ label: t.empty.search.action, onClick: () => setSearch('') }}
               />
             )}
-            {empty && !query.q && (
+            {empty && query.tags.length === 0 && !query.q && scope === 'ministries' && (
               <EmptyState
-                title={t.empty[query.scope].title}
-                text={t.empty[query.scope].text}
-                action={{ label: t.add, onClick: openAdd }}
+                title={t.empty.ministries.title}
+                text={admin ? t.empty.ministries.admin : t.empty.ministries.employee}
+                action={admin ? { label: t.add, onClick: openAdd } : undefined}
               />
+            )}
+            {empty && query.tags.length === 0 && !query.q && scope !== 'ministries' && (
+              <EmptyState title={t.empty[scope].title} text={t.empty[scope].text} action={{ label: t.add, onClick: openAdd }} />
             )}
             {!documents && <div className={styles.placeholder} />}
           </Loader>
@@ -337,8 +460,9 @@ export function KnowledgeScreen() {
       {viewer.element}
       {adding && (
         <AddDocumentsModal
-          limits={config?.kb ?? null}
-          scope={addingCogis ? 'shared' : query.scope}
+          config={config}
+          scope={addingCogis ? 'shared' : scope}
+          admin={admin}
           cogis={addingCogis}
           onUploaded={reload}
           onClose={() => {
@@ -347,10 +471,20 @@ export function KnowledgeScreen() {
           }}
         />
       )}
+      {editingTags && (
+        <EditTagsModal
+          document={editingTags}
+          limits={config?.kb.tags ?? null}
+          onSaved={(saved) => updateRow(saved.id, () => saved)}
+          onForbidden={reload}
+          onDeleted={() => updateRow(editingTags.id, () => null)}
+          onClose={() => setEditingTags(null)}
+        />
+      )}
       {removing && (
         <ConfirmModal
-          title={removing.scope === 'shared' ? t.remove.titleShared(removing.title) : t.remove.titlePersonal(removing.title)}
-          body={removing.scope === 'shared' ? t.remove.bodyShared : t.remove.bodyPersonal}
+          title={REMOVE_TITLES[removing.scope](removing.title)}
+          body={removing.scope === 'personal' ? t.remove.bodyPersonal : t.remove.bodyShared}
           action={t.remove.action}
           pending={removePending}
           onConfirm={() => void confirmRemove()}

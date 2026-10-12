@@ -1,0 +1,45 @@
+.chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Кнопка — прозрачная область нажатия 32 px (концепция §9); отрицательные поля сохраняют высоту строки. */
+.chip {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  margin: -6px 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.label {
+  max-width: 140px;
+  padding: 2px 6px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--p-surface-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Строка таблицы под указателем сама на `--p-surface-2`: тег на ней не должен пропадать. */
+tr:hover .label,
+.chip:hover .label,
+.chip:focus-visible .label {
+  background: var(--p-surface-3);
+}
+
+.chip:focus-visible {
+  outline: none;
+}
+
+.chip:focus-visible .label {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}

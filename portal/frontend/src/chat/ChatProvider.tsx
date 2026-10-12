@@ -3,10 +3,28 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useReducer,
 
 import { api, isAbort, isApiError, NetworkError, StreamBrokenError } from '../api/client';
 import type { StreamEvent } from '../api/stream';
-import type { AnswerMode, Dialog, DialogKind, Knowledge, Message, PortalConfig, QuestionParams } from '../api/types';
+import type { AnswerMode, Attachment, Dialog, DialogKind, KbScope, Message, PortalConfig, QuestionParams } from '../api/types';
 import { errorText, texts } from '../texts';
-import { checkFile, sendErrorText, uploadErrorText } from './files';
-import { chatReducer, EMPTY_DRAFT, INITIAL_STATE, newDialogKey, type ChatState, type Draft } from './state';
+import {
+  checkFile,
+  isMediaFile,
+  mediaUploadFailure,
+  sendErrorText,
+  transcriptionErrorText,
+  uploadErrorText,
+} from './files';
+import { readCollections, storeCollections } from './knowledge';
+import {
+  chatReducer,
+  EMPTY_DRAFT,
+  INITIAL_STATE,
+  isTranscribing,
+  newDialogKey,
+  type ChatState,
+  type Draft,
+  type DraftAttachment,
+} from './state';
+import { UploadQueue } from './uploadQueue';
 
 const MODE_STORAGE_KEY = 'portal.chat.mode';
 
@@ -19,16 +37,31 @@ function readMode(): AnswerMode {
   }
 }
 
-const KNOWLEDGE_STORAGE_KEY = 'portal.chat.knowledge';
+/** Как часто перезапрашивается вложение, пока запись расшифровывается (концепция §5.5). */
+const TRANSCRIPTION_POLL_MS = 5000;
 
-function readKnowledge(): Knowledge {
-  try {
-    const stored = window.localStorage.getItem(KNOWLEDGE_STORAGE_KEY);
-    return stored === 'shared' || stored === 'shared_and_personal' ? stored : 'none';
-  } catch {
-    // Хранилище недоступно — база знаний по умолчанию не используется.
-    return 'none';
-  }
+/** Записи панелей запроса, расшифровка которых ещё идёт. */
+function transcribingFiles(drafts: ChatState['drafts']) {
+  return Object.entries(drafts).flatMap(([dialogId, draft]) =>
+    draft.attachments.filter(isTranscribing).map((item) => ({ dialogId, item })),
+  );
+}
+
+function isUploading(item: DraftAttachment): boolean {
+  return item.status === 'waiting' || item.status === 'uploading';
+}
+
+function isUploadingMedia(item: DraftAttachment): boolean {
+  return item.media !== undefined && isUploading(item);
+}
+
+/** Под панелью — отказ в отправке, причина которого уже исчезла: файлы загрузились, записи расшифрованы. */
+function hasStaleNotice(draft: Draft): boolean {
+  const composer = texts.chat.composer;
+  return (
+    (draft.notice === composer.uploading && !draft.attachments.some(isUploading)) ||
+    (draft.notice === composer.transcribing && !draft.attachments.some(isTranscribing))
+  );
 }
 
 /** Вызывается, когда диалог создан на сервере: экран переходит на его адрес. */
@@ -47,8 +80,12 @@ interface ChatApi {
   state: ChatState;
   mode: AnswerMode;
   setMode: (mode: AnswerMode) => void;
-  knowledge: Knowledge;
-  setKnowledge: (knowledge: Knowledge) => void;
+  /** Базы знаний для следующего вопроса; выбор запоминается в браузере. */
+  collections: KbScope[];
+  setCollections: (collections: KbScope[]) => void;
+  /** Теги для следующего вопроса; живут, пока открыта вкладка (концепция, Д-20). */
+  tags: string[];
+  setTags: (tags: string[]) => void;
   loadHistory: (kind: DialogKind, more: boolean) => void;
   openDialog: (kind: DialogKind, id: string) => void;
   refreshDialog: (id: string) => void;
@@ -119,12 +156,16 @@ export function useDialogs(kind: DialogKind) {
 export function ChatProvider({ config, children }: { config: PortalConfig | null; children: React.ReactNode }) {
   const [state, dispatch] = useReducer(chatReducer, INITIAL_STATE);
   const [mode, setModeState] = useState(readMode);
-  const [knowledge, setKnowledgeState] = useState(readKnowledge);
+  const [collections, setCollectionsState] = useState(readCollections);
+  const [tags, setTags] = useState<string[]>([]);
   const stateRef = useRef(state);
   const streams = useRef(new Map<string, AbortController>());
   const fileCounter = useRef(0);
   // Чаты, созданные первым вложением: строка истории появляется после первого отправленного вопроса.
   const unlisted = useRef(new Map<string, Dialog>());
+  const [mediaUploads] = useState(() => new UploadQueue());
+  // Файлы нового чата, которые ждут его создания: убранный за это время файл загружаться не должен.
+  const awaitingDialog = useRef(new Set<string>());
 
   useEffect(() => {
     stateRef.current = state;
@@ -132,8 +173,11 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
 
   useEffect(() => {
     const open = streams.current;
-    return () => open.forEach((controller) => controller.abort());
-  }, []);
+    return () => {
+      open.forEach((controller) => controller.abort());
+      mediaUploads.clear();
+    };
+  }, [mediaUploads]);
 
   const setMode = useCallback((next: AnswerMode) => {
     setModeState(next);
@@ -144,13 +188,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
     }
   }, []);
 
-  const setKnowledge = useCallback((next: Knowledge) => {
-    setKnowledgeState(next);
-    try {
-      window.localStorage.setItem(KNOWLEDGE_STORAGE_KEY, next);
-    } catch {
-      // Хранилище недоступно — выбор действует до закрытия вкладки.
-    }
+  const setCollections = useCallback((next: KbScope[]) => {
+    setCollectionsState(next);
+    storeCollections(next);
   }, []);
 
   const updateDraft = useCallback((key: string, update: (draft: Draft) => Draft) => {
@@ -274,7 +314,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
             ...draft,
             attachments: draft.attachments.filter((item) => item.key !== fileKey),
             // Без конфигурации (она не загрузилась) текст отказа — общий.
-            notice: config ? uploadErrorText(error, file.name, config.chat) : errorText(error),
+            notice: config ? uploadErrorText(error, file.name, config) : errorText(error),
           }));
         }
       }
@@ -282,21 +322,125 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
     [config, updateDraft],
   );
 
+  const patchFile = useCallback(
+    (key: string, fileKey: string, patch: Partial<DraftAttachment>) =>
+      updateDraft(key, (draft) => ({
+        ...draft,
+        attachments: draft.attachments.map((item) => (item.key === fileKey ? { ...item, ...patch } : item)),
+      })),
+    [updateDraft],
+  );
+
+  /** Ставит запись в очередь загрузки: записи идут строго по одной, остальные ждут (концепция §5.5). */
+  const uploadMedia = useCallback(
+    (id: string, fileKey: string, file: File) => {
+      patchFile(id, fileKey, { status: 'waiting', media: { percent: 0, failure: null } });
+      mediaUploads.enqueue(fileKey, async (signal) => {
+        let shown = 0;
+        patchFile(id, fileKey, { status: 'uploading' });
+        try {
+          const attachment = await api.uploadMediaAttachment(
+            id,
+            file,
+            (percent) => {
+              if (percent !== shown) {
+                shown = percent;
+                patchFile(id, fileKey, { media: { percent, failure: null } });
+              }
+            },
+            signal,
+          );
+          patchFile(id, fileKey, { status: 'ready', attachment });
+        } catch (error) {
+          // Отменённая загрузка — запись уже убрана из панели; потерю сессии показывает экран входа.
+          if (!isAbort(error) && !isApiError(error, 'unauthenticated')) {
+            const failure = mediaUploadFailure(error, file.name, config?.media ?? null);
+            patchFile(id, fileKey, { status: 'failed', media: { percent: shown, failure } });
+          }
+        }
+      });
+    },
+    [config, mediaUploads, patchFile],
+  );
+
+  /** Свежее состояние записи: расшифровка готова или закончилась ошибкой — у вложения это видно сразу. */
+  const applyTranscription = useCallback(
+    (dialogId: string, item: DraftAttachment, attachment: Attachment) => {
+      const failed = attachment.transcription?.status === 'error';
+      const text = transcriptionErrorText(attachment.transcription?.error_code ?? null, item.file.name, config?.media ?? null);
+      patchFile(dialogId, item.key, {
+        attachment,
+        ...(failed ? { status: 'failed' as const, media: { percent: 100, failure: { text, retryable: false } } } : {}),
+      });
+    },
+    [config, patchFile],
+  );
+
+  const transcribing = transcribingFiles(state.drafts)
+    .map(({ dialogId, item }) => `${dialogId}/${item.key}`)
+    .join(' ');
+  useEffect(() => {
+    if (!transcribing) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      for (const { dialogId, item } of transcribingFiles(stateRef.current.drafts)) {
+        api.getAttachment(dialogId, item.attachment.id).then(
+          (attachment) => applyTranscription(dialogId, item, attachment),
+          (error: unknown) => {
+            // Вложения больше нет — как ошибка расшифровки с неизвестной причиной. Любой другой отказ
+            // (нет связи, сервер перезапускается) расшифровку не отменяет: следующий опрос повторит запрос.
+            if (isApiError(error, 'not_found')) {
+              applyTranscription(dialogId, item, {
+                ...item.attachment,
+                transcription: { status: 'error', error_code: null },
+              });
+            }
+          },
+        );
+      }
+    }, TRANSCRIPTION_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [transcribing, applyTranscription]);
+
+  // Пока запись загружается, браузер переспрашивает о закрытии вкладки (концепция §5.5).
+  const uploadingMedia = Object.values(state.drafts).some((draft) => draft.attachments.some(isUploadingMedia));
+  useEffect(() => {
+    if (!uploadingMedia) {
+      return;
+    }
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [uploadingMedia]);
+
+  // Запись загружается и расшифровывается минутами: просьба подождать не должна пережить само ожидание.
+  const staleNotices = Object.keys(state.drafts)
+    .filter((key) => hasStaleNotice(state.drafts[key] as Draft))
+    .join(' ');
+  useEffect(() => {
+    for (const key of staleNotices.split(' ').filter(Boolean)) {
+      setNotice(key, null);
+    }
+  }, [staleNotices, setNotice]);
+
   const addFiles = useCallback(
     (key: string, files: File[], onCreated: OnCreated) => {
       const current = stateRef.current.drafts[key] ?? EMPTY_DRAFT;
       let notice: string | null = null;
-      const accepted: { key: string; file: File }[] = [];
+      const accepted: { key: string; file: File; isMedia: boolean }[] = [];
       for (const file of files) {
         // Без конфигурации (она не загрузилась) пределы проверяет только сервер.
-        const refusal = config && checkFile(file, config.chat);
+        const refusal = config && checkFile(file, config);
         if (refusal) {
           notice = refusal;
         } else if (config && current.attachments.length + accepted.length >= config.chat.max_attachments) {
           notice = texts.chat.files.tooManyFiles(config.chat.max_attachments);
         } else {
           fileCounter.current += 1;
-          accepted.push({ key: `file-${fileCounter.current}`, file });
+          // Каким маршрутом загружать файл, решает расширение: записи — своим (концепция §5.5).
+          const isMedia = config !== null && isMediaFile(file, config.media);
+          accepted.push({ key: `file-${fileCounter.current}`, file, isMedia });
         }
       }
       updateDraft(key, (draft) => ({
@@ -304,29 +448,46 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
         notice,
         attachments: [
           ...draft.attachments,
-          ...accepted.map((item) => ({ ...item, status: 'uploading' as const, attachment: null })),
+          ...accepted.map(({ isMedia, ...item }) => ({
+            ...item,
+            status: isMedia ? ('waiting' as const) : ('uploading' as const),
+            attachment: null,
+            ...(isMedia ? { media: { percent: 0, failure: null } } : {}),
+          })),
         ],
       }));
       if (accepted.length === 0) {
         return;
       }
+      accepted.forEach((item) => awaitingDialog.current.add(item.key));
       ensureDialog(key, onCreated).then(
-        (id) => accepted.forEach((item) => void upload(id, item.key, item.file)),
-        (error: unknown) =>
+        (id) =>
+          accepted
+            .filter((item) => awaitingDialog.current.delete(item.key))
+            .forEach((item) =>
+              item.isMedia ? uploadMedia(id, item.key, item.file) : void upload(id, item.key, item.file),
+            ),
+        (error: unknown) => {
+          accepted.forEach((item) => awaitingDialog.current.delete(item.key));
           updateDraft(key, (draft) => ({
             ...draft,
             notice: errorText(error),
             attachments: draft.attachments.filter((item) => !accepted.some((added) => added.key === item.key)),
-          })),
+          }));
+        },
       );
     },
-    [config, ensureDialog, updateDraft, upload],
+    [config, ensureDialog, updateDraft, upload, uploadMedia],
   );
 
   const retryFile = useCallback(
     (key: string, fileKey: string) => {
       const item = stateRef.current.drafts[key]?.attachments.find((candidate) => candidate.key === fileKey);
       if (!item) {
+        return;
+      }
+      if (item.media) {
+        uploadMedia(key, fileKey, item.file);
         return;
       }
       updateDraft(key, (draft) => ({
@@ -337,7 +498,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       }));
       void upload(key, fileKey, item.file);
     },
-    [updateDraft, upload],
+    [updateDraft, upload, uploadMedia],
   );
 
   const removeFile = useCallback(
@@ -348,13 +509,16 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
         notice: null,
         attachments: draft.attachments.filter((candidate) => candidate.key !== fileKey),
       }));
+      awaitingDialog.current.delete(fileKey);
+      // Запись, которая ждёт очереди или загружается: крестик убирает её из очереди или отменяет загрузку.
+      mediaUploads.cancel(fileKey);
       if (item?.attachment) {
         api.deleteAttachment(key, item.attachment.id).catch(() => {
           // Файл уже убран из сообщения; оставшийся на сервере удалится вместе с чатом.
         });
       }
     },
-    [updateDraft],
+    [mediaUploads, updateDraft],
   );
 
   /**
@@ -448,8 +612,12 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       let refusal: string | null = null;
       if (stateRef.current.dialogs[key]?.messages.at(-1)?.status === 'streaming') {
         refusal = composer.waitAnswer;
-      } else if (draft.attachments.some((item) => item.status === 'uploading')) {
+      } else if (draft.attachments.some(isUploading)) {
         refusal = composer.uploading;
+      } else if (draft.attachments.some((item) => item.media && item.status === 'failed')) {
+        refusal = composer.mediaFailed;
+      } else if (draft.attachments.some(isTranscribing)) {
+        refusal = composer.transcribing;
       } else if (!draft.text.trim() && ready.length === 0) {
         refusal = composer.enterQuestion;
       } else if (config && draft.text.length > config.dialogs.message_max_chars) {
@@ -480,7 +648,10 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
               },
             );
           }
-          dispatch({ type: 'generationStarted', id, question: { content, attachments: ready }, now });
+          // С тегами ли задан вопрос: от этого зависит строка под ответом, если поиск ничего не найдёт.
+          const withTags = isChat && params.collections.length > 0 && (params.tags?.length ?? 0) > 0;
+          const testRun = 'test_run' in params && params.test_run;
+          dispatch({ type: 'generationStarted', id, question: { content, attachments: ready, withTags, testRun }, now });
           dispatch({ type: 'dialogTouched', id, now: new Date(now).toISOString() });
           updateDraft(id, () => EMPTY_DRAFT);
           const body = { content, ...params, ...(isChat ? { attachment_ids: ready.map((a) => a.id) } : {}) };
@@ -549,8 +720,10 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       state,
       mode,
       setMode,
-      knowledge,
-      setKnowledge,
+      collections,
+      setCollections,
+      tags,
+      setTags,
       loadHistory,
       openDialog,
       refreshDialog,
@@ -572,8 +745,10 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       state,
       mode,
       setMode,
-      knowledge,
-      setKnowledge,
+      collections,
+      setCollections,
+      tags,
+      setTags,
       loadHistory,
       openDialog,
       refreshDialog,

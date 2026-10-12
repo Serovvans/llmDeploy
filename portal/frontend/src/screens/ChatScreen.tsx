@@ -4,14 +4,14 @@ import { texts } from '../texts';
 
 /** Чат (концепция §5.5): общий рабочий экран с вложениями, режимом ответа и базой знаний. */
 export function ChatScreen() {
-  const { mode, knowledge } = useChat();
+  const { mode, collections, tags } = useChat();
   return (
     <DialogScreen
       kind="chat"
       basePath="/chat"
       sectionTitle={texts.dialogs.chat.newLabel}
       empty={texts.chat.empty}
-      params={{ mode, knowledge }}
+      params={{ mode, collections, tags }}
     />
   );
 }

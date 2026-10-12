@@ -105,6 +105,19 @@ async def test_validation_error_lists_one_entry_per_field(portal: Portal) -> Non
     assert all(item["message"] for item in error["fields"])
 
 
+async def test_null_character_in_list_search_is_a_validation_error(portal: Portal) -> None:
+    """Нулевой символ в `q` до базы не доходит: PostgreSQL его в тексте не принимает."""
+    admin = portal.client()
+    await portal.onboard(admin, "boss", "admin")
+    for path in ("/api/kb/documents?scope=shared&q=%00", "/api/admin/users?q=a%00b"):
+        response = await admin.get(path)
+        assert response.status_code == 422, path
+        assert response.json()["error"]["code"] == "validation_error"
+        (field,) = response.json()["error"]["fields"]
+        assert (field["field"], field["code"]) == ("q", "invalid_format")
+    assert (await admin.get("/api/admin/users?q=boss")).status_code == 200
+
+
 async def test_error_messages_are_russian_without_codes(portal: Portal) -> None:
     async with portal.client() as client:
         response = await client.post("/api/auth/login", json=LOGIN_BODY)
@@ -159,7 +172,7 @@ async def test_config_is_available_on_any_login_step(portal: Portal) -> None:
         response = await client.get("/api/config")
     assert response.status_code == 200
     config = response.json()
-    assert set(config) == {"password", "dialogs", "chat", "kb", "docparse", "sql"}
+    assert set(config) == {"password", "dialogs", "chat", "kb", "media", "docparse", "sql"}
     assert config["password"] == {"min_length": 12, "max_length": 128}
     assert config["dialogs"] == {"message_max_chars": 32000}
     assert config["chat"] == {
@@ -173,6 +186,14 @@ async def test_config_is_available_on_any_login_step(portal: Portal) -> None:
         "document_max_bytes": 52428800,
         "document_max_pages": 500,
         "document_extensions": [".pdf", ".docx", ".txt", ".md", ".jpg", ".jpeg", ".png"],
+        "tags": {"max_per_document": 10, "max_length": 50, "max_selected": 20},
+    }
+    assert config["media"] == {
+        "enabled": True,
+        "max_bytes": 2147483648,
+        "max_minutes": 180,
+        "chat_max_minutes": 20,
+        "extensions": [".mp3", ".wav", ".m4a", ".ogg", ".flac", ".mp4", ".mkv", ".webm", ".mov"],
     }
     assert set(config["docparse"]) == {
         "document_max_bytes", "max_pages", "document_extensions", "templates",
@@ -187,6 +208,8 @@ async def test_config_is_available_on_any_login_step(portal: Portal) -> None:
         "default_dialect": "postgres",
         "schema_max_chars": 50000,
         "max_schemas": 50,
+        # Флаг проверки на тестовых данных по умолчанию выключен (§13.6).
+        "test_run": {"enabled": False, "dialect": "postgres"},
     }
 
 

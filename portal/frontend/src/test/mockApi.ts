@@ -56,13 +56,22 @@ export const CONFIG = {
     default_dialect: 'postgres',
     schema_max_chars: 50000,
     max_schemas: 50,
+    test_run: { enabled: true, dialect: 'postgres' },
   },
   kb: {
     document_max_bytes: 52428800,
     document_max_pages: 500,
     document_extensions: ['.pdf', '.docx', '.txt', '.md', '.jpg', '.jpeg', '.png'],
+    tags: { max_per_document: 10, max_length: 50, max_selected: 20 },
   },
-} as PortalConfig;
+  media: {
+    enabled: true,
+    max_bytes: 2147483648,
+    max_minutes: 180,
+    chat_max_minutes: 20,
+    extensions: ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.mp4', '.mkv', '.webm', '.mov'],
+  },
+} satisfies PortalConfig;
 
 export const EMPLOYEE: SessionUser = {
   id: 'u-1',
@@ -137,6 +146,84 @@ export function liveSse() {
   };
 }
 
+/** Загрузка записи, которую начал интерфейс: тест сообщает её ход и видит, отменена ли она. */
+export interface MockUpload {
+  path: string;
+  aborted: boolean;
+  progress: (loaded: number, total: number) => void;
+}
+
+/**
+ * Подмена `XMLHttpRequest` для загрузки записей (только через него виден ход отправки): запрос идёт
+ * в те же обработчики, что и `fetch`. Обработчик, бросивший ошибку, — обрыв связи.
+ */
+function stubUploads(handlers: Record<string, Handler>, calls: ApiCall[]): MockUpload[] {
+  const uploads: MockUpload[] = [];
+  class FakeXhr {
+    upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null };
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    status = 0;
+    responseText = '';
+    private method = '';
+    private url = new URL('http://localhost');
+    private headers: Record<string, string> = {};
+    private settled = false;
+
+    open(method: string, url: string) {
+      this.method = method;
+      this.url = new URL(url, 'http://localhost');
+    }
+
+    setRequestHeader(name: string, value: string) {
+      this.headers[name] = value;
+    }
+
+    send(body: unknown) {
+      const route = `${this.method} ${this.url.pathname}`;
+      const handler = handlers[route];
+      if (!handler) {
+        throw new Error(`Тест не описал ответ на ${route}`);
+      }
+      calls.push({ method: this.method, path: this.url.pathname, body, headers: this.headers });
+      const upload: MockUpload = {
+        path: `${this.url.pathname}${this.url.search}`,
+        aborted: false,
+        progress: (loaded, total) => this.upload.onprogress?.({ lengthComputable: true, loaded, total } as ProgressEvent),
+      };
+      uploads.push(upload);
+      this.onabort = ((original) => () => {
+        upload.aborted = true;
+        original?.();
+      })(this.onabort);
+      Promise.resolve()
+        .then(() => handler(body, this.url))
+        .then(
+          (response) => this.settle(() => {
+            this.status = response.status;
+            this.responseText = JSON.stringify(response.body);
+            this.onload?.();
+          }),
+          () => this.settle(() => this.onerror?.()),
+        );
+    }
+
+    abort() {
+      this.settle(() => this.onabort?.());
+    }
+
+    private settle(finish: () => void) {
+      if (!this.settled) {
+        this.settled = true;
+        finish();
+      }
+    }
+  }
+  vi.stubGlobal('XMLHttpRequest', FakeXhr);
+  return uploads;
+}
+
 /**
  * Подменяет ответы API на стороне теста. Ключ — «МЕТОД /путь»; обработчик можно заменить по ходу теста.
  * Запрос без обработчика — ошибка теста.
@@ -178,9 +265,12 @@ export function mockApi(initial: Record<string, Handler>) {
     });
   });
   vi.stubGlobal('fetch', fetchMock);
+  const uploads = stubUploads(handlers, calls);
 
   return {
     calls,
+    /** Загрузки записей по порядку их начала. */
+    uploads,
     on: (route: string, handler: Handler) => {
       handlers[route] = handler;
     },

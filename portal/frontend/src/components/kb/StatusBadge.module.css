@@ -27,3 +27,18 @@
   max-width: 280px;
   color: var(--p-text-muted);
 }
+
+.warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.warningIcon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  /* Значок стоит на первой строке текста (высота строки 20 px). */
+  height: 20px;
+  color: var(--p-warning-icon);
+}

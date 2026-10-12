@@ -1,9 +1,9 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { KbDocument } from '../api/types';
-import { CONFIG, fail, mockApi, ok, session } from '../test/mockApi';
+import { ADMIN, CONFIG, EMPLOYEE, fail, mockApi, ok, session } from '../test/mockApi';
 import { menuItems, renderApp } from '../test/renderApp';
 import { texts } from '../texts';
 
@@ -14,13 +14,19 @@ function doc(patch: Partial<KbDocument>): KbDocument {
     id: 'k-1',
     title: 'Договор аренды 14-А.pdf',
     scope: 'shared',
+    kind: 'document',
     is_cogis: false,
+    tags: [],
     author: { full_name: 'Петров Алексей Сергеевич', is_me: false },
     created_at: '2026-09-12T09:00:00Z',
     page_count: 14,
+    duration_seconds: null,
     status: 'ready',
     error_code: null,
     progress: null,
+    images_truncated: false,
+    reprocess_error: null,
+    reprocessing: false,
     can_delete: false,
     ...patch,
   };
@@ -40,14 +46,19 @@ function page(items: KbDocument[], total = items.length) {
   return ok({ items, page: 1, page_size: 50, total });
 }
 
-function setup(items: KbDocument[] = DOCS, theme?: 'light' | 'dark') {
+function setup(items: KbDocument[] = DOCS, theme?: 'light' | 'dark', user = EMPLOYEE) {
   if (theme) {
     window.localStorage.setItem('portal.theme', theme);
   }
   const server = mockApi({
-    'GET /api/auth/session': () => ok(session('ready')),
-    'GET /api/kb/documents': (_body, url) =>
-      url.searchParams.get('scope') === 'shared' ? page(items) : page(items.filter((item) => item.author.is_me)),
+    'GET /api/auth/session': () => ok(session('ready', user)),
+    'GET /api/kb/tags': () => ok({ items: ['аренда', 'Минстрой'] }),
+    'GET /api/kb/documents': (_body, url) => {
+      const scope = url.searchParams.get('scope');
+      const tags = url.searchParams.getAll('tags').map((tag) => tag.toLowerCase());
+      const inScope = scope === 'personal' ? items.filter((item) => item.author.is_me) : items.filter((item) => item.scope === scope);
+      return page(tags.length ? inScope.filter((item) => item.tags.some((tag) => tags.includes(tag.toLowerCase()))) : inScope);
+    },
   });
   renderApp('/knowledge');
   return { server, user: userEvent.setup({ applyAccept: false }) };
@@ -75,7 +86,7 @@ describe('база знаний: список', () => {
     expect(ready.getByText('Готов')).toBeInTheDocument();
     expect((await row('Договор аренды 14-А.pdf')).textContent?.replace(/\u00a0/g, ' ')).toContain('Петров А. С.');
     expect(ready.getByText('12.09.2026')).toBeInTheDocument();
-    expect(ready.getByText('14')).toBeInTheDocument();
+    expect(ready.getByText('14 стр.')).toBeInTheDocument();
     expect(ready.queryByRole('button', { name: /Действия/ })).not.toBeInTheDocument();
 
     const scan = within(await row('Скан постановления.pdf'));
@@ -114,20 +125,24 @@ describe('база знаний: список', () => {
       await user.keyboard('{Escape}');
       return labels;
     };
-    expect(await items('Плохой скан.pdf')).toEqual(['Обработать заново', 'Удалить']);
-    expect(await items('Огромный.pdf')).toEqual(['Удалить']);
-    expect(await items('Очередь.txt')).toEqual(['Удалить']);
+    expect(await items('Плохой скан.pdf')).toEqual(['Изменить теги', 'Обработать заново', 'Удалить']);
+    expect(await items('Огромный.pdf')).toEqual(['Изменить теги', 'Удалить']);
+    expect(await items('Очередь.txt')).toEqual(['Изменить теги', 'Удалить']);
+    // Неизвестная причина — как внутренний сбой: повтор может помочь.
+    expect(await items('Неизвестная причина.pdf')).toEqual(['Изменить теги', 'Обработать заново', 'Удалить']);
 
-    server.on('POST /api/kb/documents/k-4/retry', () => ok(doc({ id: 'k-4', status: 'queued' })));
-    await user.click(within(await row('Плохой скан.pdf')).getByRole('button', { name: /Действия/ }));
-    await user.click(await screen.findByText(t.menu.retry));
-    expect(await screen.findByText(t.retried)).toBeInTheDocument();
-
-    // Уже в очереди — без сообщения; нет права — сообщение.
+    // Нет права — сообщение, строка перезапрашивается.
     server.on('POST /api/kb/documents/k-4/retry', () => fail(403, 'forbidden'));
     await user.click(within(await row('Плохой скан.pdf')).getByRole('button', { name: /Действия/ }));
     await user.click(await screen.findByText(t.menu.retry));
     expect(await screen.findByText(t.retryForbidden)).toBeInTheDocument();
+
+    // Успех: строка перерисовывается по ответу сервера.
+    server.on('POST /api/kb/documents/k-4/retry', () => ok(doc({ id: 'k-4', title: 'Плохой скан.pdf', status: 'queued', can_delete: true })));
+    await user.click(within(await row('Плохой скан.pdf')).getByRole('button', { name: /Действия/ }));
+    await user.click(await screen.findByText(t.menu.retry));
+    expect(await screen.findByText(t.retried)).toBeInTheDocument();
+    expect(within(await row('Плохой скан.pdf')).getByText('В очереди')).toBeInTheDocument();
   });
 
   it('вкладка, поиск и сортировка уходят на сервер; во вкладке «Моя» нет столбца «Автор»', async () => {
@@ -173,6 +188,23 @@ describe('база знаний: список', () => {
       server.on('GET /api/kb/documents', () => page([doc({})]));
       await vi.advanceTimersByTimeAsync(5100);
       expect(await screen.findByText('Готов')).toBeInTheDocument();
+      const calls = server.callsTo('GET /api/kb/documents').length;
+      await vi.advanceTimersByTimeAsync(11000);
+      expect(server.callsTo('GET /api/kb/documents')).toHaveLength(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('пока обработка готового документа обновляется, список обновляется сам и показывает повторный сбой', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { server } = setup([doc({ reprocessing: true, can_delete: true })]);
+      await screen.findByText(t.reprocessing);
+      server.on('GET /api/kb/documents', () => page([doc({ reprocess_error: 'internal_error', can_delete: true })]));
+      await vi.advanceTimersByTimeAsync(5100);
+      expect(await screen.findByText(t.reprocessFailed.other)).toBeInTheDocument();
+      expect(screen.queryByText(t.reprocessing)).not.toBeInTheDocument();
       const calls = server.callsTo('GET /api/kb/documents').length;
       await vi.advanceTimersByTimeAsync(11000);
       expect(server.callsTo('GET /api/kb/documents')).toHaveLength(calls);
@@ -269,7 +301,13 @@ describe('база знаний: добавление', () => {
     const { server, user } = setup();
     server.on('POST /api/kb/documents', () => ok(doc({ status: 'queued' }), 201));
     const dialog = await openAdd(user);
-    expect(dialog.getByText('PDF, DOCX, TXT, MD, JPG, PNG — до 50 МБ каждый, PDF до 500 страниц. Сканы распознаются автоматически.')).toBeInTheDocument();
+    expect(
+      dialog.getByText(
+        'PDF, DOCX, TXT, MD, JPG, PNG — до 50 МБ каждый, PDF до 500 страниц. ' +
+          'Аудио и видео с русской речью (MP3, WAV, M4A, OGG, FLAC, MP4, MKV, WebM, MOV) — до 2 ГБ и до 3 часов. ' +
+          'Сканы распознаются, записи расшифровываются автоматически.',
+      ),
+    ).toBeInTheDocument();
 
     await user.click(dialog.getByRole('button', { name: t.upload.submit }));
     expect(dialog.getByRole('alert')).toHaveTextContent(t.upload.noFiles);
@@ -447,5 +485,412 @@ describe('база знаний: правки дизайн-ревью', () => {
 
     await user.click(dialog.getByRole('button', { name: t.upload.submit }));
     await waitFor(() => expect(server.callsTo('POST /api/kb/documents')).toHaveLength(1));
+  });
+});
+
+describe('база знаний: «Министерства» и теги', () => {
+  const MINISTRY = doc({ id: 'm-1', title: 'Приказ Минстроя.pdf', scope: 'ministries', tags: ['Минстрой', 'аренда', 'ЛЭП', '<img src=x onerror=alert(1)>'] });
+
+  it('сотрудник: вкладка открыта на чтение — пояснение, действий в строке нет, в окне добавления нет «Министерств»', async () => {
+    const { user } = setup([MINISTRY, doc({ id: 'm-2', title: 'Сломанный.pdf', scope: 'ministries', status: 'error', error_code: 'file_unreadable' })]);
+    await user.click(await screen.findByText(t.tabs.ministries));
+    const line = await row('Приказ Минстроя.pdf');
+    expect(screen.getByText(t.ministriesNote.employee)).toBeInTheDocument();
+    expect(within(line).queryByRole('button', { name: /Действия/ })).not.toBeInTheDocument();
+    expect(within(line).queryByText(t.cogis)).not.toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: t.columns.author })).toBeInTheDocument();
+    expect(within(await row('Сломанный.pdf')).getByText('Файл повреждён или защищён паролем. Обратитесь к администратору')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: t.add })[0] as HTMLElement);
+    const dialog = within(await screen.findByRole('dialog'));
+    expect(dialog.queryByLabelText(t.upload.toMinistries)).not.toBeInTheDocument();
+    expect(dialog.getByLabelText(t.upload.toShared)).toBeChecked();
+  });
+
+  it('пустые «Министерства»: у сотрудника действия нет, у администратора — «Добавить документы» с предвыбранной базой', async () => {
+    const employee = setup([]);
+    await employee.user.click(await screen.findByText(t.tabs.ministries));
+    expect(await screen.findByText(t.empty.ministries.employee)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: t.add })).toHaveLength(1);
+    document.body.innerHTML = '';
+
+    const admin = setup([], undefined, ADMIN);
+    await admin.user.click(await screen.findByText(t.tabs.ministries));
+    expect(await screen.findByText(t.empty.ministries.admin)).toBeInTheDocument();
+    expect(screen.getByText(t.ministriesNote.admin)).toBeInTheDocument();
+    await admin.user.click(screen.getAllByRole('button', { name: t.add })[1] as HTMLElement);
+    expect(within(await screen.findByRole('dialog')).getByLabelText(t.upload.toMinistries)).toBeChecked();
+  });
+
+  it('теги в строке — данные и кнопки отбора; отбор уходит на сервер, сохраняется при смене вкладки и сбрасывается целиком', async () => {
+    const { user } = setup([MINISTRY, doc({ tags: ['аренда'] }), doc({ id: 'k-9', title: 'Без тегов.pdf' })]);
+    await user.click(await screen.findByText(t.tabs.ministries));
+    const line = await row('Приказ Минстроя.pdf');
+    // Видны первые теги, остальные — за «+2»; враждебное значение остаётся текстом в имени кнопки.
+    expect(within(line).getByRole('button', { name: 'Ещё теги: ЛЭП, <img src=x onerror=alert(1)>' })).toHaveTextContent('+2');
+    expect(line.querySelector('img')).toBeNull();
+
+    await user.click(within(line).getByRole('button', { name: 'Показать документы с тегом аренда' }));
+    await waitFor(() => expect(listQueries().at(-1)?.getAll('tags')).toEqual(['аренда']));
+    expect(listQueries().at(-1)?.get('page')).toBe('1');
+    // Повторное нажатие тег не дублирует.
+    await user.click(within(await row('Приказ Минстроя.pdf')).getByRole('button', { name: 'Показать документы с тегом аренда' }));
+
+    await user.click(screen.getByText(t.tabs.shared));
+    await row('Договор аренды 14-А.pdf');
+    expect(listQueries().at(-1)?.getAll('tags')).toEqual(['аренда']);
+    expect(screen.queryByText('Без тегов.pdf')).not.toBeInTheDocument();
+
+    await user.click(screen.getByText(t.tabs.personal));
+    expect(await screen.findByText(t.empty.tags.text)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: t.empty.tags.action }));
+    expect(await screen.findByRole('heading', { level: 2, name: t.empty.personal.title })).toBeInTheDocument();
+    expect(listQueries().at(-1)?.getAll('tags')).toEqual([]);
+  });
+
+  it('отбор: тегов не больше предела из настроек', async () => {
+    const { server, user } = setup([doc({ tags: ['аренда', 'ЛЭП'] })]);
+    server.on('GET /api/config', () => ok({ ...CONFIG, kb: { ...CONFIG.kb, tags: { ...CONFIG.kb.tags, max_selected: 1 } } }));
+    const line = await row('Договор аренды 14-А.pdf');
+    await waitFor(() => expect(server.callsTo('GET /api/config').length).toBeGreaterThan(0));
+    await user.click(within(line).getByRole('button', { name: 'Показать документы с тегом аренда' }));
+    expect(await screen.findByText('Можно выбрать не больше 1 тега')).toBeInTheDocument();
+    await user.click(within(await row('Договор аренды 14-А.pdf')).getByRole('button', { name: 'Показать документы с тегом ЛЭП' }));
+    expect(listQueries().at(-1)?.getAll('tags')).toEqual(['аренда']);
+  });
+
+  async function openTags(user: ReturnType<typeof userEvent.setup>, title: string) {
+    await user.click(within(await row(title)).getByRole('button', { name: /Действия/ }));
+    await user.click(await screen.findByText(t.menu.tags));
+    return within(await screen.findByRole('dialog'));
+  }
+
+  it('правка тегов: список уходит целиком, повтор в другом регистре и лишний тег не добавляются, строка обновляется', async () => {
+    const mine = doc({ id: 'k-8', title: 'Мой.pdf', tags: ['аренда'], can_delete: true });
+    const { server, user } = setup([mine]);
+    server.on('GET /api/config', () => ok({ ...CONFIG, kb: { ...CONFIG.kb, tags: { ...CONFIG.kb.tags, max_per_document: 2, max_length: 6 } } }));
+    server.on('PUT /api/kb/documents/k-8/tags', (body) => ok({ ...mine, tags: (body as { tags: string[] }).tags }));
+    await waitFor(() => expect(server.callsTo('GET /api/config').length).toBeGreaterThan(0));
+    const dialog = await openTags(user, 'Мой.pdf');
+    const field = dialog.getByLabelText(t.tags.label);
+
+    await user.type(field, 'Аренда,');
+    await user.type(field, '  ЛЭП ,');
+    await user.type(field, 'слишком');
+    // Слишком длинный тег остаётся в поле, сохранять рано.
+    expect(await dialog.findByText('Тег длиннее 6 символов. Сократите его')).toBeInTheDocument();
+    expect(dialog.getByRole('button', { name: t.tags.save })).toBeDisabled();
+    await user.type(field, '{Backspace>7/}');
+    await waitFor(() => expect(dialog.getByRole('button', { name: t.tags.save })).toBeEnabled());
+    await user.type(field, 'ещё,');
+    expect(await dialog.findByText('У документа может быть не больше 2 тегов')).toBeInTheDocument();
+
+    await user.click(dialog.getByRole('button', { name: t.tags.save }));
+    expect(await screen.findByText(t.tags.saved)).toBeInTheDocument();
+    expect(server.callsTo('PUT /api/kb/documents/k-8/tags')[0]?.body).toEqual({ tags: ['аренда', 'ЛЭП'] });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(within(await row('Мой.pdf')).getByRole('button', { name: 'Показать документы с тегом ЛЭП' })).toBeInTheDocument();
+  });
+
+  it('правка тегов: отказ сервера по полю — под полем; нет права — окно закрывается; документ удалён — строка убирается', async () => {
+    const mine = doc({ id: 'k-8', title: 'Мой.pdf', can_delete: true });
+    const { server, user } = setup([mine, doc({ id: 'm-1', title: 'Приказ.pdf', scope: 'ministries', can_delete: true })], undefined, ADMIN);
+    server.on('PUT /api/kb/documents/k-8/tags', () =>
+      fail(422, 'validation_error', { fields: [{ field: 'tags', code: 'invalid_format', message: 'Недопустимый тег.' }] }),
+    );
+    // Документ без тегов открывает то же окно ссылкой «Добавить теги».
+    await user.click(within(await row('Мой.pdf')).getByRole('button', { name: t.tags.add }));
+    let dialog = within(await screen.findByRole('dialog'));
+    await user.click(dialog.getByRole('button', { name: t.tags.save }));
+    expect(await dialog.findByText(t.tags.invalid)).toBeInTheDocument();
+
+    server.on('PUT /api/kb/documents/k-8/tags', () => fail(503, 'service_unavailable'));
+    await user.click(dialog.getByRole('button', { name: t.tags.save }));
+    expect(await dialog.findByText(t.tags.failed)).toBeInTheDocument();
+
+    server.on('PUT /api/kb/documents/k-8/tags', () => fail(404, 'not_found'));
+    await user.click(dialog.getByRole('button', { name: t.tags.save }));
+    expect(await screen.findByText(texts.viewer.deleted)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('Мой.pdf')).not.toBeInTheDocument());
+
+    await user.click(screen.getByText(t.tabs.ministries));
+    server.on('PUT /api/kb/documents/m-1/tags', () => fail(403, 'forbidden'));
+    dialog = await openTags(user, 'Приказ.pdf');
+    await user.click(dialog.getByRole('button', { name: t.tags.save }));
+    expect(await screen.findByText(t.tags.forbiddenMinistries)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+});
+
+describe('база знаний: записи и обновление обработки', () => {
+  const RECORDING = doc({ id: 'r-1', title: 'Совещание 03.10.mp3', scope: 'shared', kind: 'recording', page_count: null, can_delete: true });
+
+  it('состояния записи: ход расшифровки, длительность, причины ошибок; повтор — только где он поможет', async () => {
+    const { user } = setup([
+      { ...RECORDING, status: 'processing', duration_seconds: 4320, progress: { seconds_done: 1500, seconds_total: 4320 } },
+      { ...RECORDING, id: 'r-2', title: 'Без хода.mp3', status: 'processing' },
+      { ...RECORDING, id: 'r-3', title: 'Длинная.mp4', status: 'error', error_code: 'media_too_long' },
+      { ...RECORDING, id: 'r-4', title: 'Тишина.wav', status: 'error', error_code: 'no_text' },
+      { ...RECORDING, id: 'r-5', title: 'Сбой.mp3', status: 'error', error_code: 'transcription_failed' },
+      { ...RECORDING, id: 'r-6', title: 'Истёк.mp3', status: 'error', error_code: 'source_expired' },
+    ]);
+    const transcribing = within(await row('Совещание 03.10.mp3'));
+    expect(transcribing.getByText('Расшифровывается')).toBeInTheDocument();
+    expect(transcribing.getByText('25 мин из 1 ч 12 мин')).toBeInTheDocument();
+    expect(transcribing.getByText('1 ч 12 мин')).toBeInTheDocument();
+    expect((await row('Без хода.mp3')).textContent).not.toMatch(/ из /);
+    expect(within(await row('Длинная.mp4')).getByText('Запись длиннее 3 часов. Удалите её и добавьте по частям')).toBeInTheDocument();
+    expect(within(await row('Тишина.wav')).getByText('В записи не нашлось русской речи. Удалите документ')).toBeInTheDocument();
+
+    const menu = async (title: string) => {
+      await user.click(within(await row(title)).getByRole('button', { name: /Действия/ }));
+      await screen.findByText(t.menu.remove);
+      const labels = menuItems().map((item) => item.textContent);
+      await user.keyboard('{Escape}');
+      return labels;
+    };
+    expect(await menu('Сбой.mp3')).toContain(t.menu.retry);
+    expect(await menu('Истёк.mp3')).not.toContain(t.menu.retry);
+    expect(await menu('Длинная.mp4')).not.toContain(t.menu.retry);
+  });
+
+  it('исходный файл записи удалён, пока список был открыт: без сообщения, причина — в строке, повтора больше нет', async () => {
+    const { server, user } = setup([{ ...RECORDING, status: 'error', error_code: 'transcription_failed' }]);
+    server.on('POST /api/kb/documents/r-1/retry', () => fail(409, 'source_unavailable'));
+    await user.click(within(await row('Совещание 03.10.mp3')).getByRole('button', { name: /Действия/ }));
+    await user.click(await screen.findByText(t.menu.retry));
+    expect(
+      await screen.findByText('Не удалось расшифровать запись, а исходный файл уже удалён. Удалите документ и добавьте запись снова'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Сообщение сервера/)).not.toBeInTheDocument();
+    await user.click(within(await row('Совещание 03.10.mp3')).getByRole('button', { name: /Действия/ }));
+    await screen.findByText(t.menu.remove);
+    expect(menuItems().map((item) => item.textContent)).toEqual([t.menu.tags, t.menu.remove]);
+  });
+
+  it('обновление обработки не удалось: отметка и «Обработать заново» — только у того, кто вправе; документ остаётся «Готов»', async () => {
+    const failed = doc({ id: 'k-8', title: 'Мой.pdf', reprocess_error: 'recognition_failed', can_delete: true });
+    const { server, user } = setup([
+      failed,
+      doc({ id: 'k-9', title: 'Чужой.pdf', reprocess_error: 'internal_error' }),
+      doc({ id: 'k-10', title: 'Много картинок.pdf', images_truncated: true }),
+    ]);
+    const mine = await row('Мой.pdf');
+    expect(within(mine).getByText('Готов')).toBeInTheDocument();
+    expect(within(mine).getByText(t.reprocessFailed.recognition_failed)).toBeInTheDocument();
+    // Название нажимается: документ работает в прежнем виде.
+    expect(within(mine).getByRole('button', { name: 'Мой.pdf' })).toBeInTheDocument();
+    expect((await row('Чужой.pdf')).textContent).not.toContain('Обновить обработку не удалось');
+    expect(within(await row('Много картинок.pdf')).getByText(t.imagesTruncated)).toBeInTheDocument();
+
+    // `retry` снимает отметку сразу: строка — по ответу сервера, остаётся «Готов», пункта больше нет.
+    server.on('POST /api/kb/documents/k-8/retry', () => ok({ ...failed, reprocess_error: null, reprocessing: true }));
+    await user.click(within(mine).getByRole('button', { name: /Действия/ }));
+    await user.click(await screen.findByText(t.menu.retry));
+    expect(await screen.findByText(t.reprocessRetried)).toBeInTheDocument();
+    const updated = await row('Мой.pdf');
+    expect(within(updated).getByText('Готов')).toBeInTheDocument();
+    expect(within(updated).getByText(t.reprocessing)).toBeInTheDocument();
+    await user.click(within(updated).getByRole('button', { name: /Действия/ }));
+    await screen.findByText(t.menu.remove);
+    expect(menuItems().map((item) => item.textContent)).toEqual([t.menu.tags, t.menu.remove]);
+  });
+});
+
+describe('база знаний: добавление записей', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'DataTransfer',
+      class {
+        items = { add: () => undefined };
+        files = null;
+      },
+    );
+  });
+
+  function sized(name: string, size: number): File {
+    const file = new File(['x'], name);
+    Object.defineProperty(file, 'size', { value: size });
+    return file;
+  }
+
+  function pick(...files: File[]) {
+    fireEvent.change(document.querySelector('[role="dialog"] input[type="file"]') as HTMLInputElement, { target: { files } });
+  }
+
+  async function openAdd(user: ReturnType<typeof userEvent.setup>) {
+    await waitFor(() => expect(screen.getAllByRole('button', { name: t.add })[0]).toBeEnabled());
+    await user.click(screen.getAllByRole('button', { name: t.add })[0] as HTMLElement);
+    return within(await screen.findByRole('dialog'));
+  }
+
+  const MB = 1024 * 1024;
+
+  it('запись уходит своим маршрутом в личную базу с тегами; записи — строго по одной, документ их не ждёт', async () => {
+    const { server, user } = setup();
+    const responses: (() => void)[] = [];
+    server.on('POST /api/kb/documents/media', () => new Promise((resolve) => responses.push(() => resolve(ok(doc({ kind: 'recording', status: 'queued' }), 201)))));
+    server.on('POST /api/kb/documents', () => ok(doc({ status: 'queued' }), 201));
+    const dialog = await openAdd(user);
+
+    await user.click(dialog.getByLabelText(t.upload.cogis));
+    pick(sized('совещание.mp4', 1228 * MB), sized('планёрка.mp3', 10 * MB), new File(['%PDF-'], 'договор.pdf'));
+    // Место переставлено на личную базу с заметкой; отметка CoGIS вместе с общей базой пропала.
+    expect(dialog.getByLabelText(t.upload.toPersonal)).toBeChecked();
+    expect(dialog.getByText(t.upload.recordingNotice)).toBeInTheDocument();
+    expect(dialog.queryByLabelText(t.upload.cogis)).not.toBeInTheDocument();
+
+    await user.type(dialog.getByLabelText(t.tags.label), 'Совещания,');
+    await user.click(dialog.getByRole('button', { name: t.upload.submit }));
+
+    await waitFor(() => expect(server.uploads).toHaveLength(1));
+    expect(server.uploads[0]?.path).toBe(
+      `/api/kb/documents/media?${new URLSearchParams({ file_name: 'совещание.mp4', scope: 'personal', tags: 'Совещания' }).toString()}`,
+    );
+    expect(server.callsTo('POST /api/kb/documents/media')[0]?.headers['X-Portal-Csrf']).toBe('1');
+    expect(dialog.getByText(t.upload.waiting)).toBeInTheDocument();
+    await waitFor(() => expect(server.callsTo('POST /api/kb/documents')).toHaveLength(1));
+    const form = server.callsTo('POST /api/kb/documents')[0]?.body as FormData;
+    expect([form.get('scope'), form.get('is_cogis'), form.getAll('tags')]).toEqual(['personal', 'false', ['Совещания']]);
+
+    act(() => server.uploads[0]?.progress(28, 100));
+    expect(await dialog.findByText('343 МБ из 1,1 ГБ · 28 %')).toBeInTheDocument();
+    expect(dialog.getByRole('progressbar', { name: 'Загрузка файла совещание.mp4' })).toHaveAttribute('aria-valuenow', '28');
+
+    responses[0]?.();
+    await waitFor(() => expect(server.uploads).toHaveLength(2));
+    responses[1]?.();
+    expect(await screen.findByText('Добавлено документов: 3. Они появятся в ответах после обработки')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('место, выбранное вручную, запись не переставляет; отметка CoGIS к записям не относится', async () => {
+    const { user } = setup();
+    const dialog = await openAdd(user);
+    await user.click(dialog.getByLabelText(t.upload.toPersonal));
+    await user.click(dialog.getByLabelText(t.upload.toShared));
+    pick(sized('совещание.mp3', MB));
+    expect(dialog.getByLabelText(t.upload.toShared)).toBeChecked();
+    expect(dialog.getByText(t.upload.recordingNotice)).toBeInTheDocument();
+    // Одни записи — отметки нет; с документом — есть, с оговоркой.
+    expect(dialog.queryByLabelText(t.upload.cogis)).not.toBeInTheDocument();
+    pick(new File(['%PDF-'], 'договор.pdf'));
+    expect(dialog.getByLabelText(t.upload.cogis)).toBeInTheDocument();
+    expect(dialog.getByText(t.upload.cogisNotForRecordings)).toBeInTheDocument();
+  });
+
+  it('закрытие вкладки во время загрузки любого файла — предупреждение браузера; после загрузки его нет', async () => {
+    const { server, user } = setup();
+    let finish: () => void = () => undefined;
+    server.on('POST /api/kb/documents', () => new Promise((resolve) => (finish = () => resolve(ok(doc({ status: 'queued' }), 201)))));
+    const leave = () => {
+      const event = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const dialog = await openAdd(user);
+    pick(new File(['%PDF-'], 'первый.pdf'));
+    expect(leave()).toBe(false);
+
+    await user.click(dialog.getByRole('button', { name: t.upload.submit }));
+    await waitFor(() => expect(server.callsTo('POST /api/kb/documents')).toHaveLength(1));
+    expect(leave()).toBe(true);
+
+    finish();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(leave()).toBe(false);
+  });
+
+  it('отмена загрузки и выход из очереди; закрытие окна во время загрузки переспрашивает и прерывает', async () => {
+    const { server, user } = setup();
+    server.on('POST /api/kb/documents/media', () => new Promise(() => undefined));
+    const dialog = await openAdd(user);
+    pick(sized('первая.mp3', MB), sized('вторая.mp3', MB), sized('третья.mp3', MB));
+    await user.click(dialog.getByRole('button', { name: t.upload.submit }));
+    await waitFor(() => expect(server.uploads).toHaveLength(1));
+
+    // Ждущая запись убирается из очереди; отменённая освобождает место следующей.
+    await user.click(dialog.getAllByRole('button', { name: t.upload.removeWaiting })[0] as HTMLElement);
+    expect(dialog.queryByText('вторая.mp3')).not.toBeInTheDocument();
+    await user.click(dialog.getByRole('button', { name: t.upload.cancel }));
+    expect(server.uploads[0]?.aborted).toBe(true);
+    await waitFor(() => expect(server.uploads).toHaveLength(2));
+    expect(server.uploads[1]?.path).toContain(encodeURIComponent('третья.mp3'));
+
+    await user.click(dialog.getByRole('button', { name: texts.common.cancel }));
+    expect(await screen.findByText(t.upload.abort.title)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: t.upload.abort.stay })).toHaveFocus());
+    await user.click(screen.getByRole('button', { name: t.upload.abort.stay }));
+    expect(dialog.getByText('третья.mp3')).toBeInTheDocument();
+    expect(server.uploads[1]?.aborted).toBe(false);
+
+    await user.click(dialog.getByRole('button', { name: texts.common.cancel }));
+    await user.click(await screen.findByRole('button', { name: t.upload.abort.action }));
+    expect(server.uploads[1]?.aborted).toBe(true);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it.each([
+    [() => fail(429, 'too_many_uploads'), 'Сейчас загружается слишком много записей. Повторите через несколько минут', true],
+    [() => fail(408, 'upload_timeout', { message: 'Загрузка прервалась: данные перестали поступать. Повторите загрузку' }), 'Загрузка прервалась: данные перестали поступать. Повторите загрузку', true],
+    [() => fail(507, 'media_quota_exceeded', { details: { reason: 'user' } }), t.upload.quotaUser, false],
+    [() => fail(507, 'media_quota_exceeded', { details: { reason: 'free_space' } }), 'На портале закончилось место для записей. Сообщите администратору', false],
+    [() => fail(415, 'unsupported_file_type'), t.upload.mediaInvalid, false],
+    [() => fail(413, 'file_too_large', { details: { max_bytes: 2147483648 } }), 'Файл больше 2 ГБ', false],
+    [() => fail(403, 'forbidden'), t.upload.ministriesForbidden, true],
+  ])('отказ в приёме записи %#: текст у файла; сам интерфейс не повторяет', async (respond, text, retryable) => {
+    const { server, user } = setup();
+    server.on('POST /api/kb/documents/media', respond);
+    const dialog = await openAdd(user);
+    pick(sized('совещание.mp3', MB));
+    await user.click(dialog.getByRole('button', { name: t.upload.submit }));
+    expect(await dialog.findByText(text)).toBeInTheDocument();
+    expect(server.uploads).toHaveLength(1);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    if (retryable) {
+      await user.click(dialog.getByRole('button', { name: texts.common.retry }));
+      await waitFor(() => expect(server.uploads).toHaveLength(2));
+    } else {
+      expect(dialog.queryByRole('button', { name: texts.common.retry })).not.toBeInTheDocument();
+    }
+  });
+
+  it('проверка до отправки: запись больше предела; при выключенном приёме запись не поддерживается', async () => {
+    const { server, user } = setup();
+    let dialog = await openAdd(user);
+    pick(sized('огромная.mkv', 2147483649));
+    expect(dialog.getByText('Файл больше 2 ГБ')).toBeInTheDocument();
+    await user.click(dialog.getByRole('button', { name: t.upload.submit }));
+    expect(server.uploads).toHaveLength(0);
+    await user.click(dialog.getByRole('button', { name: texts.common.cancel }));
+    document.body.innerHTML = '';
+
+    const off = setup();
+    off.server.on('GET /api/config', () => ok({ ...CONFIG, media: { ...CONFIG.media, enabled: false } }));
+    await waitFor(() => expect(off.server.callsTo('GET /api/config').length).toBeGreaterThan(0));
+    dialog = await openAdd(off.user);
+    expect(dialog.getByText('PDF, DOCX, TXT, MD, JPG, PNG — до 50 МБ каждый, PDF до 500 страниц. Сканы распознаются автоматически.')).toBeInTheDocument();
+    pick(sized('совещание.mp3', MB));
+    expect(dialog.getByText(t.upload.unsupported)).toBeInTheDocument();
+    expect(dialog.queryByText(t.upload.recordingNotice)).not.toBeInTheDocument();
+  });
+
+  it('повтор файла при заданных тегах: подсказка, где их сменить, — тому, кто вправе', async () => {
+    const { server, user } = setup();
+    server.on('POST /api/kb/documents', () =>
+      fail(409, 'duplicate_document', {
+        details: {
+          document: { id: 'k-1', title: 'Договор аренды 14-А', author_full_name: 'Петров Алексей Сергеевич', created_at: '2026-09-12T09:00:00Z', status: 'ready', error_code: null, can_delete: true },
+        },
+      }),
+    );
+    const dialog = await openAdd(user);
+    pick(new File(['%PDF-'], 'копия.pdf'));
+    await user.type(dialog.getByLabelText(t.tags.label), 'аренда,');
+    await user.click(dialog.getByRole('button', { name: t.upload.submit }));
+    expect((await dialog.findByText(/Такой документ уже есть/)).textContent?.replace(/\u00a0/g, ' ')).toBe(
+      'Такой документ уже есть в этой базе: „Договор аренды 14-А“, добавил(а) Петров А. С. 12.09.2026. Чтобы сменить его теги, выберите в списке „Изменить теги“',
+    );
   });
 });

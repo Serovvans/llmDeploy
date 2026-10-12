@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { StreamEvent } from '../api/stream';
-import type { Dialog, Message } from '../api/types';
+import type { Dialog, Message, SqlRunBlock } from '../api/types';
 import { chatReducer, historyGroup, INITIAL_STATE, type ChatAction, type ChatState } from './state';
 
 const ID = 'd-1';
@@ -27,6 +27,7 @@ function message(patch: Partial<Message>): Message {
     sources: null,
     sources_found: null,
     sql_check: null,
+    sql_run: null,
     sql_dangers: null,
     dropped_messages: 0,
     created_at: '2026-10-05T09:00:00Z',
@@ -37,9 +38,88 @@ function message(patch: Partial<Message>): Message {
 const QUESTION: ChatAction = {
   type: 'generationStarted',
   id: ID,
-  question: { content: 'Вопрос', attachments: [] },
+  question: { content: 'Вопрос', attachments: [], withTags: false, testRun: false },
   now: 1000,
 };
+
+function runBlock(patch: Partial<SqlRunBlock>): SqlRunBlock {
+  return {
+    index: 0,
+    line: 1,
+    status: 'passed',
+    reason: null,
+    fixture: null,
+    result: null,
+    affected_rows: null,
+    error: null,
+    fixed_sql: null,
+    ...patch,
+  };
+}
+
+describe('проверка SQL на тестовых данных', () => {
+  const ANSWERED: ChatAction[] = [
+    QUESTION,
+    ...events(
+      1000,
+      [{ type: 'start', user_message_id: 'u-1', assistant_message_id: 'a-1' }, 10],
+      [{ type: 'delta', text: '```sql\nSELECT 1\n```' }, 20],
+      [{ type: 'sql_check', blocks: [] }, 30],
+    ),
+  ];
+  const HALF_DONE: StreamEvent = {
+    type: 'sql_run',
+    blocks: [
+      runBlock({ index: 0, line: 1, status: 'passed' }),
+      runBlock({ index: 1, line: 5, status: 'running' }),
+      runBlock({ index: 2, line: 9, status: 'pending' }),
+    ],
+  };
+
+  it('первое событие sql_run: ответ дописан, диалог занят; каждое событие заменяет предыдущее; done называет состояние', () => {
+    let state = run(ANSWERED);
+    expect(state.dialogs[ID]?.messages.at(-1)?.status).toBe('streaming');
+
+    state = run(events(1000, [{ type: 'sql_run', blocks: [runBlock({ status: 'pending' })] }, 40]), state);
+    expect(state.dialogs[ID]?.generation?.phase).toBe('checking');
+    expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ status: 'complete', sql_run: { blocks: [{ status: 'pending' }] } });
+
+    state = run(events(1000, [HALF_DONE, 50], [{ type: 'done', status: 'length_limit' }, 60]), state);
+    expect(state.dialogs[ID]?.generation).toBeNull();
+    expect(state.dialogs[ID]?.messages.at(-1)?.status).toBe('length_limit');
+    expect(state.dialogs[ID]?.messages.at(-1)?.sql_run?.blocks.map((block) => block.status)).toEqual(['passed', 'running', 'pending']);
+  });
+
+  it.each<[string, ChatAction]>([
+    ['остановка', { type: 'generationStopped', id: ID }],
+    ['потеря сессии', { type: 'streamEvent', id: ID, event: { type: 'error', code: 'session_ended', message: '' }, now: 2000 }],
+  ])('%s во время проверки: ответ цел, блоки без итога — «не завершена», готовый итог остаётся', (_name, action) => {
+    const state = run([...ANSWERED, ...events(1000, [HALF_DONE, 40]), action]);
+    const answer = state.dialogs[ID]?.messages.at(-1);
+    expect(state.dialogs[ID]?.generation).toBeNull();
+    expect(answer).toMatchObject({ status: 'complete', error_code: null, content: '```sql\nSELECT 1\n```' });
+    expect(answer?.sql_run?.blocks.map((block) => block.status)).toEqual(['passed', 'stopped', 'stopped']);
+  });
+
+  it.each<[string, ChatAction]>([
+    ['остановка', { type: 'generationStopped', id: ID }],
+    ['потеря сессии', { type: 'streamEvent', id: ID, event: { type: 'error', code: 'session_ended', message: '' }, now: 2000 }],
+  ])('вопрос с проверкой: ответ дописан уже по sql_check — %s сразу после него ответ не трогает', (_name, action) => {
+    const asked: ChatAction = { ...QUESTION, question: { content: 'Вопрос', attachments: [], withTags: false, testRun: true } };
+    let state = run([asked, ...ANSWERED.slice(1)]);
+    expect(state.dialogs[ID]?.generation?.phase).toBe('checking');
+    expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ status: 'complete', sql_check: { blocks: [] }, sql_run: null });
+
+    state = run([action], state);
+    expect(state.dialogs[ID]?.generation).toBeNull();
+    expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ status: 'complete', error_code: null, sql_run: null });
+  });
+
+  it('остановка до проверки — обычная остановка ответа', () => {
+    const state = run([...ANSWERED, { type: 'generationStopped', id: ID }]);
+    expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ status: 'stopped', sql_run: null });
+  });
+});
 
 describe('состояние чата', () => {
   it('порядок событий: start → размышления → текст → done', () => {
@@ -112,6 +192,8 @@ describe('состояние чата', () => {
       document_title: `Документ ${n}`,
       scope: 'shared' as const,
       page: n,
+      timecode_seconds: null,
+      image_id: null,
       fragment_id: `f-${n}`,
       quote: `Цитата ${n}`,
     });
@@ -135,7 +217,7 @@ describe('состояние чата', () => {
   });
 
   it('остановленный ответ: источники — по сноскам в полученной части; без поиска источников нет', () => {
-    const found = [{ n: 1, document_id: 'd', document_title: 'Д', scope: 'shared' as const, page: null, fragment_id: 'f', quote: 'ц' }];
+    const found = [{ n: 1, document_id: 'd', document_title: 'Д', scope: 'shared' as const, page: null, timecode_seconds: null, image_id: null, fragment_id: 'f', quote: 'ц' }];
     const stopped = run([
       QUESTION,
       ...events(1000, [{ type: 'sources', sources: found }, 10], [{ type: 'delta', text: 'Пока без ссылок' }, 20]),
@@ -199,6 +281,22 @@ describe('состояние чата', () => {
     const rejected = run([{ type: 'generationRejected', id: ID, messages: before }], started);
     expect(rejected.dialogs[ID]?.messages).toEqual(before);
     expect(rejected.dialogs[ID]?.generation).toBeNull();
+  });
+
+  it('были ли у вопроса теги: «Ответить заново» наследует признак, ответ из истории его не имеет', () => {
+    const asked = run([{ ...QUESTION, question: { content: 'Вопрос', attachments: [], withTags: true, testRun: false } } as ChatAction]);
+    expect(asked.dialogs[ID]?.messages.at(-1)?.asked_with_tags).toBe(true);
+    const again = run(
+      [...events(1000, [{ type: 'done', status: 'complete' }, 10]), { type: 'generationStarted', id: ID, question: null, now: 2000 }],
+      asked,
+    );
+    expect(again.dialogs[ID]?.messages.at(-1)).toMatchObject({ status: 'streaming', asked_with_tags: true });
+
+    const fromHistory = run([
+      { type: 'messagesLoaded', id: ID, older: false, nextCursor: null, items: [message({ id: 'a-1' }), message({ id: 'u-1', role: 'user' })] },
+      { type: 'generationStarted', id: ID, question: null, now: 5 },
+    ]);
+    expect(fromHistory.dialogs[ID]?.messages.at(-1)?.asked_with_tags).toBeUndefined();
   });
 
   it('обновление последней страницы не теряет ранее подгруженные сообщения', () => {

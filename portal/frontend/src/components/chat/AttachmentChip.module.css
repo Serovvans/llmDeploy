@@ -88,3 +88,49 @@
   border-radius: 4px;
   color: var(--p-text-muted);
 }
+
+/* Запись (аудио, видео) в панели запроса: шире обычного вложения, в две строки. */
+.media {
+  align-items: flex-start;
+  max-width: 440px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.mediaBody {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+
+.mediaState {
+  display: flex;
+  gap: 6px;
+  color: var(--p-text-muted);
+}
+
+.mediaIcon,
+.mediaState > .failed {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 20px;
+}
+
+.media > .remove {
+  margin-top: -6px;
+  margin-bottom: 0;
+}
+
+.duration {
+  flex: none;
+  color: var(--p-text-muted);
+  white-space: nowrap;
+}
+
+.sound {
+  flex: none;
+  display: flex;
+  color: var(--p-text-muted);
+}

@@ -52,3 +52,17 @@ p {
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+/* Картинка из документа — всегда на белой подложке (концепция §7.3): схема с прозрачным фоном
+   и чёрными линиями на тёмном фоне страницы не читается. Как и QR-код, это исключение из правила о цветах. */
+.p-doc-image {
+  border: 1px solid var(--p-line);
+  border-radius: 4px;
+  background: #ffffff;
+  object-fit: contain;
+}
+
+/* В светлой теме рамка `--p-line` на белом ниже 3:1 — картинка сливалась бы со страницей (концепция §9). */
+[data-theme='light'] .p-doc-image {
+  border-color: var(--p-text-muted);
+}

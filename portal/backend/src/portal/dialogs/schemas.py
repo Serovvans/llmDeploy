@@ -3,7 +3,7 @@
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from portal.core.schemas import ApiTime, RequestModel
 from portal.dialogs.domain import (
@@ -12,13 +12,14 @@ from portal.dialogs.domain import (
     Dialog,
     DialogKind,
     Docparse,
-    Knowledge,
     MessageRole,
     MessageStatus,
     SummaryStatus,
+    TranscriptionStatus,
 )
 from portal.dialogs.service import MessageView
-from portal.files.ports import MediaType
+from portal.files.ports import MediaType, RecordingType
+from portal.kb.ports import Collection
 
 
 class CreateDialogRequest(RequestModel):
@@ -39,7 +40,8 @@ class ChatMessageRequest(RequestModel):
     content: str
     attachment_ids: tuple[UUID, ...] = ()
     mode: AnswerMode
-    knowledge: Knowledge
+    collections: tuple[Collection, ...]
+    tags: tuple[str, ...] = ()
 
 
 class SqlMessageRequest(RequestModel):
@@ -49,6 +51,7 @@ class SqlMessageRequest(RequestModel):
     action: Literal["write", "explain", "debug", "optimize"]
     dialect: str
     schema_id: UUID | None
+    test_run: StrictBool
 
 
 class CogisMessageRequest(RequestModel):
@@ -138,14 +141,23 @@ class DialogListOut(BaseModel):
     next_cursor: str | None
 
 
+class TranscriptionOut(BaseModel):
+    """Состояние расшифровки вложения-записи (§5.1)."""
+
+    status: TranscriptionStatus
+    error_code: str | None
+
+
 class AttachmentOut(BaseModel):
-    """Объект `Attachment`."""
+    """Объект `Attachment`; `transcription: null` — вложение не запись."""
 
     id: UUID
     file_name: str
-    media_type: MediaType
+    media_type: MediaType | RecordingType
     page_count: int | None
     image_count: int
+    duration_seconds: int | None
+    transcription: TranscriptionOut | None
     created_at: ApiTime
 
     @classmethod
@@ -157,18 +169,30 @@ class AttachmentOut(BaseModel):
             media_type=attachment.media_type,
             page_count=attachment.page_count,
             image_count=attachment.image_count,
+            duration_seconds=attachment.duration_seconds,
+            transcription=None
+            if attachment.transcription_status is None
+            else TranscriptionOut(
+                status=attachment.transcription_status, error_code=attachment.transcription_error
+            ),
             created_at=attachment.created_at,
         )
 
 
 class SourceOut(BaseModel):
-    """Объект `Source`: источник, на который в ответе есть сноска `[n]`."""
+    """Объект `Source`: источник, на который в ответе есть сноска `[n]`.
+
+    В снимках, сохранённых до версии 0.15, полей `timecode_seconds` и `image_id` нет —
+    они отдаются как `null` (§5.1).
+    """
 
     n: int
     document_id: UUID
     document_title: str
-    scope: Literal["shared", "personal"]
+    scope: Collection
     page: int | None
+    timecode_seconds: int | None = None
+    image_id: UUID | None = None
     fragment_id: UUID
     quote: str
 
@@ -187,6 +211,7 @@ class MessageOut(BaseModel):
     sources: list[SourceOut] | None
     sources_found: int | None
     sql_check: dict[str, Any] | None
+    sql_run: dict[str, Any] | None
     sql_dangers: list[str] | None
     dropped_messages: int
     created_at: ApiTime
@@ -209,6 +234,7 @@ class MessageOut(BaseModel):
             else [SourceOut.model_validate(source) for source in message.sources],
             sources_found=message.sources_found,
             sql_check=message.sql_check,
+            sql_run=message.sql_run,
             sql_dangers=message.sql_dangers,
             dropped_messages=message.dropped_messages,
             created_at=message.created_at,

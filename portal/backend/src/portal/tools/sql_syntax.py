@@ -11,9 +11,11 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import sqlglot
+from sqlglot import exp
 from sqlglot.errors import ParseError, SqlglotError, TokenError
 
 from portal.tools.sql_check import SyntaxVerdict, Unchecked
+from portal.tools.sql_run import StatementKind
 
 _NEAR_MAX_CHARS = 80
 
@@ -58,6 +60,36 @@ def check_syntax(sql: str, dialect: str) -> SyntaxVerdict | Unchecked:
     return SyntaxVerdict(valid=True)
 
 
+def _statement_kind(statement: exp.Expr) -> StatementKind:
+    """Вид оператора для проверки на тестовых данных (§7.4)."""
+    if isinstance(statement, exp.Select | exp.SetOperation | exp.Subquery):
+        # `SELECT … INTO таблица` создаёт таблицу: это не запрос на чтение. У объединения
+        # признак лежит не в корне, а в одном из его `SELECT`.
+        return "other" if statement.find(exp.Into) else "select"
+    if isinstance(statement, exp.Insert):
+        return "insert_values" if isinstance(statement.expression, exp.Values) else "insert"
+    if isinstance(statement, exp.Update):
+        return "update"
+    if isinstance(statement, exp.Delete):
+        return "delete"
+    if isinstance(statement, exp.Merge):
+        return "merge"
+    if isinstance(statement, exp.Create):
+        plain_table = statement.kind == "TABLE" and statement.expression is None
+        return "create_table" if plain_table else "other"
+    return "other"
+
+
+def statement_kinds(sql: str, dialect: str) -> list[StatementKind] | None:
+    """Виды операторов текста по порядку; `None` — текст не разобран."""
+    try:
+        statements = sqlglot.parse(sql, read=dialect)
+    except (SqlglotError, RecursionError):
+        return None
+    # Пустой оператор (лишняя `;` в конце) оператором не считается.
+    return [_statement_kind(statement) for statement in statements if statement is not None]
+
+
 class SqlSyntaxChecker:
     """Реализация порта `SyntaxChecker`: пределы длины и времени, один разбор за раз."""
 
@@ -79,6 +111,19 @@ class SqlSyntaxChecker:
             )
         except TimeoutError:
             return "too_complex"
+
+    async def statements(self, sql: str, dialect: str) -> list[StatementKind] | None:
+        """Виды операторов текста — с теми же пределами, что у `check`; `None` — не разобран."""
+        if len(sql) > self._max_chars:
+            return None
+        loop = asyncio.get_running_loop()
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(self._executor, statement_kinds, sql, dialect),
+                self._timeout_seconds,
+            )
+        except TimeoutError:
+            return None
 
     def backslash_escapes(self, dialect: str) -> bool:
         """Экранирует ли обратная черта в обычных строках диалекта — по его описанию."""

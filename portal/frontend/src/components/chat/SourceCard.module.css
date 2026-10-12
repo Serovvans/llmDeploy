@@ -55,6 +55,32 @@
 }
 
 .meta {
+  display: flex;
+  flex-wrap: wrap;
+  color: var(--p-text-muted);
+}
+
+.meta > :not(:first-child)::before {
+  content: ' · ';
+  white-space: pre;
+}
+
+/* Момент записи: значок «звук» и моноширинные цифры. */
+.timecode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Картинка источника вписана в рамку 288×120 без обрезки. */
+.image {
+  display: block;
+  width: 288px;
+  max-width: 100%;
+  height: 120px;
+}
+
+.imageFailed {
   color: var(--p-text-muted);
 }
 

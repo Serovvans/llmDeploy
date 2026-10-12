@@ -33,6 +33,18 @@ async def get_config(_: AnySession, container: ContainerDep) -> dict[str, Any]:
             "document_max_bytes": settings.kb.document_max_bytes,
             "document_max_pages": settings.kb.document_max_pages,
             "document_extensions": settings.kb.document_extensions,
+            "tags": {
+                "max_per_document": settings.kb.tags.max_per_document,
+                "max_length": settings.kb.tags.max_length,
+                "max_selected": settings.kb.tags.max_selected,
+            },
+        },
+        "media": {
+            "enabled": settings.media.enabled,
+            "max_bytes": settings.media.max_bytes,
+            "max_minutes": settings.media.max_minutes,
+            "chat_max_minutes": settings.media.chat_max_minutes,
+            "extensions": settings.media.extensions,
         },
         "docparse": {
             "document_max_bytes": settings.docparse.document_max_bytes,
@@ -55,5 +67,9 @@ async def get_config(_: AnySession, container: ContainerDep) -> dict[str, Any]:
             "default_dialect": settings.sql.default_dialect,
             "schema_max_chars": settings.sql.schema_max_chars,
             "max_schemas": settings.sql.max_schemas,
+            "test_run": {
+                "enabled": settings.sql.sandbox.enabled,
+                "dialect": settings.sql.sandbox.dialect,
+            },
         },
     }

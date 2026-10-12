@@ -34,6 +34,7 @@ messages = sa.Table(
     sa.Column("sources", postgresql.JSONB),
     sa.Column("sources_found", sa.Integer),
     sa.Column("sql_check", postgresql.JSONB),
+    sa.Column("sql_run", postgresql.JSONB),
     sa.Column("sql_dangers", postgresql.ARRAY(sa.Text)),
     sa.Column("dropped_messages", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -54,6 +55,9 @@ attachments = sa.Table(
     sa.Column("page_count", sa.Integer),
     sa.Column("text_content", sa.Text),
     sa.Column("image_pages", postgresql.ARRAY(sa.Integer), nullable=False, server_default="{}"),
+    sa.Column("duration_seconds", sa.Integer),
+    sa.Column("transcription_status", sa.Text),
+    sa.Column("transcription_error", sa.Text),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
 )
 

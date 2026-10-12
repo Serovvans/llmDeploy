@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -12,8 +13,13 @@ from llm_stub.app import create_app as create_stub
 
 from portal.core.settings import Settings
 from portal.kb.embedder import BifrostEmbedder
-from portal.kb.ports import EmbeddingsUnavailableError, RecognitionFailedError
+from portal.kb.ports import (
+    EmbeddingsUnavailableError,
+    RecognitionFailedError,
+    RerankUnavailableError,
+)
 from portal.kb.recognizer import ModelPageRecognizer
+from portal.kb.reranker import BifrostReranker
 from portal.llm.bifrost import BifrostChatModel
 from portal.llm.ports import (
     ChatRequest,
@@ -195,3 +201,70 @@ async def test_failed_page_is_retried_then_fails_whole_call(settings: Settings) 
 
 async def test_empty_answer_means_page_without_text(settings: Settings) -> None:
     assert await _recognizer(_VisionModel("  \n "), settings).recognize([samples.png()]) == [""]
+
+
+# --- реранкер ---
+
+
+def _reranker(
+    settings: Settings, url: str, client: httpx.AsyncClient, **update: Any
+) -> BifrostReranker:
+    rerank = settings.kb.rerank.model_copy(update={"url": f"{url}/rerank", **update})
+    return BifrostReranker(client, rerank, "sk-bf-test")
+
+
+async def test_scores_come_in_document_order_through_real_client_and_stub(
+    stub: tuple[str, httpx.AsyncClient], settings: Settings
+) -> None:
+    """Заглушка отдаёт записи по убыванию оценки — порт возвращает их по порядку документов."""
+    reranker = _reranker(settings, *stub)
+    documents = ["арендная плата", "срок аренды 49 лет", "срок сервитута"]
+    assert await reranker.scores("срок аренды", documents) == [0.0, 1.0, 0.5]
+
+
+@pytest.mark.parametrize("failure", ["status", "model", "refused", "partial", "garbage", "slow"])
+async def test_every_reranker_failure_is_one_port_error(
+    stub: tuple[str, httpx.AsyncClient], settings: Settings, failure: str
+) -> None:
+    """Статус не 200, отказ соединения, неполный ответ и превышение срока — «недоступен»."""
+    url, client = stub
+    query = "срок аренды"
+
+    async def answer(request: httpx.Request) -> httpx.Response:
+        if failure == "slow":
+            await asyncio.sleep(5)
+        body: Any = {"results": [{"index": 0, "relevance_score": 0.9}]}
+        return httpx.Response(200, json="не то" if failure == "garbage" else body)
+
+    if failure == "status":
+        reranker = _reranker(settings, url, client)
+        query += " [[stub:rerank-error]]"
+    elif failure == "model":
+        reranker = _reranker(settings, url, client, model="unknown")
+    elif failure == "refused":
+        reranker = _reranker(settings, "http://127.0.0.1:1/v1", client)
+    else:
+        mock = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+        reranker = _reranker(settings, url, mock, timeout_seconds=0.05)
+    with pytest.raises(RerankUnavailableError):
+        await reranker.scores(query, ["первый документ", "второй документ"])
+
+
+async def test_rerank_request_follows_protocol_and_cuts_long_texts(settings: Settings) -> None:
+    seen: list[httpx.Request] = []
+
+    async def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 1}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    reranker = _reranker(settings, "http://bifrost:8080/v1", client, document_max_chars=10)
+    assert await reranker.scores("з" * 50, ["д" * 50]) == [1.0]
+    (request,) = seen
+    assert str(request.url) == "http://bifrost:8080/v1/rerank"
+    assert request.headers["Authorization"] == "Bearer sk-bf-test"
+    assert json.loads(request.content) == {
+        "model": "rerank",
+        "query": "з" * 10,
+        "documents": ["д" * 10],
+    }

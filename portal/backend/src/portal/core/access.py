@@ -112,6 +112,9 @@ def page_query(
     order: SortOrder | None = None,
 ) -> PageQuery:
     """Зависимость: параметры постраничной выдачи (§1.4)."""
+    # Нулевой символ PostgreSQL в тексте не принимает: запрос списка упал бы с ошибкой.
+    if q is not None and "\x00" in q:
+        raise errors.validation_error([errors.field_error("q", "invalid_format")])
     return PageQuery(page=page, page_size=page_size, q=q, sort=sort, order=order)
 
 

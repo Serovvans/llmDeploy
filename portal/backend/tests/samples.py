@@ -1,8 +1,11 @@
 """Образцы файлов для тестов: строятся в памяти, без файлов в репозитории."""
 
 import io
+import struct
+import zlib
 
 import docx
+import pypdfium2 as pdfium
 from PIL import Image
 
 TEXT_LAYER = "This page has a real text layer inside"
@@ -12,6 +15,16 @@ def png(width: int = 40, height: int = 30, color: str = "white") -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", (width, height), color).save(buffer, "PNG")
     return buffer.getvalue()
+
+
+def png_with_huge_text_chunk(width: int = 300, height: int = 300) -> bytes:
+    """PNG, текстовый блок которого распаковывается сверх предела Pillow."""
+    source = png(width, height)
+    body = b"Comment\x00\x00" + zlib.compress(b"x" * 3_000_000)
+    chunk = struct.pack(">I", len(body)) + b"zTXt" + body
+    chunk += struct.pack(">I", zlib.crc32(b"zTXt" + body))
+    header_end = 8 + 25  # сигнатура и блок IHDR
+    return source[:header_end] + chunk + source[header_end:]
 
 
 def jpeg(width: int = 40, height: int = 30) -> bytes:
@@ -68,4 +81,35 @@ def docx_file(*paragraphs: str) -> bytes:
         document.add_paragraph(paragraph)
     buffer = io.BytesIO()
     document.save(buffer)
+    return buffer.getvalue()
+
+
+def docx_with_pictures(*pictures: bytes) -> bytes:
+    """DOCX, в тексте которого по порядку стоят картинки."""
+    document = docx.Document()
+    document.add_paragraph("Текст перед картинками.")
+    for picture in pictures:
+        document.add_picture(io.BytesIO(picture))
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def pdf_with_picture(picture_jpeg: bytes, text: str = TEXT_LAYER, copies: int = 1) -> bytes:
+    """PDF, на странице которого есть и текстовый слой, и встроенная картинка JPEG.
+
+    `copies` — сколько раз картинка стоит на странице.
+    """
+    document = pdfium.PdfDocument(text_pdf([text]))
+    page = document[0]
+    for _ in range(copies):
+        image = pdfium.PdfImage.new(document)
+        image.load_jpeg(io.BytesIO(picture_jpeg), inline=True)
+        image.set_matrix(pdfium.PdfMatrix().scale(200, 150))
+        page.insert_obj(image)
+    page.gen_content()
+    buffer = io.BytesIO()
+    document.save(buffer)
+    page.close()
+    document.close()
     return buffer.getvalue()

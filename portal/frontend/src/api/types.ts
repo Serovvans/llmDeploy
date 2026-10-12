@@ -1,4 +1,4 @@
-/** Типы контракта `docs/portal-api.md` (§1.3, §1.4, §2.3, §2.4, §3, §4). Имена полей — как в контракте. */
+/** Типы контракта `docs/portal-api.md` версии 0.15. Имена полей — как в контракте. */
 
 export type LoginStep = 'second_factor' | 'password_change' | 'second_factor_setup' | 'ready';
 
@@ -78,7 +78,20 @@ export interface PortalConfig {
     max_attachments: number;
     max_images: number;
   };
-  kb: { document_max_bytes: number; document_max_pages: number; document_extensions: string[] };
+  kb: {
+    document_max_bytes: number;
+    document_max_pages: number;
+    document_extensions: string[];
+    tags: { max_per_document: number; max_length: number; max_selected: number };
+  };
+  /** Записи (аудио и видео): при `enabled: false` интерфейс их не предлагает; остальное — пределы для подсказки. */
+  media: {
+    enabled: boolean;
+    max_bytes: number;
+    max_minutes: number;
+    chat_max_minutes: number;
+    extensions: string[];
+  };
   docparse: {
     document_max_bytes: number;
     max_pages: number;
@@ -90,6 +103,8 @@ export interface PortalConfig {
     default_dialect: string;
     schema_max_chars: number;
     max_schemas: number;
+    /** Проверка на тестовых данных: при `enabled: false` переключателя нет; `dialect` — единственный проверяемый. */
+    test_run: { enabled: boolean; dialect: string };
   };
 }
 
@@ -124,18 +139,24 @@ export interface Dialog {
   docparse?: DocparseResult;
 }
 
+export type TranscriptionStatus = 'queued' | 'processing' | 'ready' | 'error';
+
 export interface Attachment {
   id: string;
   file_name: string;
   media_type: string;
   page_count: number | null;
   image_count: number;
+  /** Длительность записи; `null`, пока она не измерена, и у остальных вложений. */
+  duration_seconds: number | null;
+  /** `null` у всего, кроме записи (аудио, видео); `error_code` — только при `status: "error"`. */
+  transcription: { status: TranscriptionStatus; error_code: string | null } | null;
   created_at: string;
 }
 
 export type MessageStatus = 'complete' | 'streaming' | 'stopped' | 'length_limit' | 'error';
 
-export type KbScope = 'shared' | 'personal';
+export type KbScope = 'shared' | 'personal' | 'ministries';
 
 /** Источник ответа (контракт §5.1): `n` — номер сноски `[n]` в тексте. */
 export interface Source {
@@ -144,6 +165,10 @@ export interface Source {
   document_title: string;
   scope: KbScope;
   page: number | null;
+  /** У фрагмента расшифровки записи — секунда, с которой он начинается; иначе `null`. */
+  timecode_seconds: number | null;
+  /** У источника-картинки; `quote` тогда — её описание. Адрес картинки строит интерфейс. */
+  image_id: string | null;
   fragment_id: string;
   quote: string;
 }
@@ -167,6 +192,50 @@ export interface SqlCheck {
   }[];
 }
 
+/** Таблица тестовых данных или результат запроса: ячейки — строки, как их отдаёт СУБД, либо `null` (SQL `NULL`). */
+export interface SqlRunRows {
+  columns: string[];
+  rows: (string | null)[][];
+  /** Строк было больше, чем отдано. */
+  truncated: boolean;
+}
+
+/**
+ * Состояние проверки блока на тестовых данных (контракт §7.4). `pending` и `running` бывают только
+ * в событиях; значение вне перечня интерфейс показывает как «Не проверялось».
+ */
+export type SqlRunStatus =
+  | 'pending'
+  | 'running'
+  | 'passed'
+  | 'fixed'
+  | 'failed'
+  | 'not_checked'
+  | 'unavailable'
+  | 'timeout'
+  | 'stopped';
+
+export interface SqlRunBlock {
+  index: number;
+  /** Как в `SqlCheck`: строка ответа, на которой блок открывается. */
+  line: number;
+  status: SqlRunStatus;
+  /** Почему блок не проверялся — только при `status: "not_checked"`. */
+  reason: string | null;
+  fixture: ({ table: string } & SqlRunRows)[] | null;
+  result: SqlRunRows | null;
+  affected_rows: number | null;
+  /** Сообщение СУБД: при `failed` — последняя ошибка, при `fixed` — ошибка исходного запроса. */
+  error: string | null;
+  /** Исправленный запрос — только при `status: "fixed"`. */
+  fixed_sql: string | null;
+}
+
+/** Проверка блоков `sql` ответа на тестовых данных — событие `sql_run` и поле `Message.sql_run` (контракт §7.4). */
+export interface SqlRun {
+  blocks: SqlRunBlock[];
+}
+
 /** Сообщение диалога (контракт §5.1). */
 export interface Message {
   id: string;
@@ -182,6 +251,8 @@ export interface Message {
   sources_found: number | null;
   /** Только у ответа в диалоге `sql`. */
   sql_check: SqlCheck | null;
+  /** Только у ответа на вопрос с `test_run: true`; `null` — проверки на тестовых данных нет. */
+  sql_run: SqlRun | null;
   /** Только у вопроса в диалоге `sql`: опасные операции во вставленном запросе. */
   sql_dangers: SqlDanger[] | null;
   dropped_messages: number;
@@ -190,15 +261,13 @@ export interface Message {
 
 export type AnswerMode = 'fast' | 'thorough';
 
-export type Knowledge = 'none' | 'shared' | 'shared_and_personal';
-
 export type SqlAction = 'write' | 'explain' | 'debug' | 'optimize';
 export type CogisAction = 'write' | 'explain' | 'debug';
 
 /** Параметры вопроса по виду диалога (контракт §5.3); к ним добавляется `content`. */
 export type QuestionParams =
-  | { mode: AnswerMode; knowledge: Knowledge }
-  | { action: SqlAction; dialect: string; schema_id: string | null }
+  | { mode: AnswerMode; collections: KbScope[]; tags?: string[] }
+  | { action: SqlAction; dialect: string; schema_id: string | null; test_run: boolean }
   | { action: CogisAction }
   | Record<string, never>;
 
@@ -239,13 +308,29 @@ export interface KbDocument {
   id: string;
   title: string;
   scope: KbScope;
+  /** `recording` — запись (аудио или видео). */
+  kind: 'document' | 'recording';
   is_cogis: boolean;
+  tags: string[];
   author: { full_name: string; is_me: boolean };
   created_at: string;
   page_count: number | null;
+  /** Длительность записи; `null`, пока она не измерена, и у документов. */
+  duration_seconds: number | null;
   status: KbStatus;
   error_code: string | null;
-  progress: { pages_done: number; pages_total: number; recognizing: boolean } | null;
+  /** Только при `status: "processing"`: у документа — страницы, у записи — расшифрованные секунды. */
+  progress:
+    | { pages_done: number; pages_total: number; recognizing: boolean }
+    | { seconds_done: number; seconds_total: number }
+    | null;
+  /** Картинок в документе больше предела — обработаны первые по порядку. */
+  images_truncated: boolean;
+  /** Код причины, по которой не удалась последняя переобработка готового документа; иначе `null`. */
+  reprocess_error: string | null;
+  /** Готовый документ переобрабатывается по запросу пользователя. */
+  reprocessing: boolean;
+  /** Право удалить, отправить на повторную обработку и сменить теги. */
   can_delete: boolean;
 }
 
@@ -254,7 +339,12 @@ export interface DocumentText {
   page: number | null;
   page_count: number | null;
   recognized: boolean;
-  segments: { text: string; highlight: boolean }[];
+  /** `start_seconds` — начало отрезка речи у записи; у документов и у продолжения отрезка — `null`. */
+  segments: { text: string; highlight: boolean; start_seconds: number | null }[];
+  /** У записи — с какой секунды начать проигрывание; у документов — `null`. */
+  timecode_seconds: number | null;
+  /** Картинка источника и её описание — только на странице этой картинки. */
+  image: { id: string; description: string } | null;
 }
 
 /** Существующий документ в отказе `duplicate_document` (контракт §8.1). */

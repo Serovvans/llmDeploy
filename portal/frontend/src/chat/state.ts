@@ -1,21 +1,35 @@
 /** Состояние чата: история, сообщения диалогов, идущие ответы и черновики панели запроса. Чистые функции. */
 import type { StreamEvent } from '../api/stream';
-import type { Attachment, Dialog, DialogKind, Message, Source } from '../api/types';
+import type { Attachment, Dialog, DialogKind, Message, Source, SqlRun } from '../api/types';
+import type { MediaFailure } from './files';
 import { footnoteNumbers } from './footnotes';
 
 /** Сообщение на экране: `error_message` — текст сервера для кода, которого нет в словаре (только из потока). */
 export interface ChatMessage extends Message {
   error_message?: string;
+  /**
+   * Был ли вопрос задан с тегами — только у ответа, полученного в этой вкладке: в истории параметров
+   * вопроса нет (концепция §4.3). От него зависит строка под ответом, когда поиск ничего не нашёл.
+   */
+  asked_with_tags?: boolean;
 }
 
 /** Ответ, который формируется в этой вкладке. */
 export interface Generation {
-  /** `preparing` — поиск закончен, текста ещё нет: к «Отправляю…» строка состояния не возвращается. */
-  phase: 'sending' | 'searching' | 'preparing' | 'thinking' | 'answering';
+  /**
+   * `preparing` — поиск закончен, текста ещё нет: к «Отправляю…» строка состояния не возвращается.
+   * `checking` — ответ дописан и сохранён, идёт проверка SQL на тестовых данных (концепция §5.7).
+   */
+  phase: 'sending' | 'searching' | 'preparing' | 'thinking' | 'answering' | 'checking';
   startedAt: number;
   reasoningStartedAt: number | null;
   /** Всё найденное в базе знаний (событие `sources`); под ответом остаются только упомянутые в тексте. */
   found: Source[] | null;
+  /**
+   * Вопрос задан с проверкой SQL на тестовых данных: ответ дописан уже по `sql_check` (контракт §6.2).
+   * У «Ответить заново» параметры вопроса неизвестны — там ответ дописан по первому `sql_run`.
+   */
+  testRun: boolean;
 }
 
 export interface DialogView {
@@ -30,8 +44,17 @@ export interface DialogView {
 export interface DraftAttachment {
   key: string;
   file: File;
-  status: 'uploading' | 'ready' | 'failed';
+  /** `waiting` — запись ждёт очереди загрузки; `ready` — файл на сервере (у записи расшифровка может ещё идти). */
+  status: 'waiting' | 'uploading' | 'ready' | 'failed';
   attachment: Attachment | null;
+  /** Только у записи (аудио, видео): ход загрузки в процентах и причина ошибки загрузки или расшифровки. */
+  media?: { percent: number; failure: MediaFailure | null };
+}
+
+/** Запись загружена, расшифровка ещё не закончилась: её состояние узнаётся опросом (концепция §5.5). */
+export function isTranscribing(item: DraftAttachment): item is DraftAttachment & { attachment: Attachment } {
+  const status = item.status === 'ready' ? item.attachment?.transcription?.status : undefined;
+  return status === 'queued' || status === 'processing';
 }
 
 /** Черновик панели запроса; живёт, пока открыто приложение. */
@@ -84,7 +107,13 @@ export type ChatAction =
   | { type: 'messagesLoading'; id: string }
   | { type: 'messagesLoaded'; id: string; items: Message[]; nextCursor: string | null; older: boolean }
   | { type: 'messagesFailed'; id: string; notFound: boolean }
-  | { type: 'generationStarted'; id: string; question: { content: string; attachments: Attachment[] } | null; now: number }
+  | {
+      type: 'generationStarted';
+      id: string;
+      /** `null` — повторная генерация: вопрос прежний. `withTags` — поиск сужен тегами, `testRun` — с проверкой SQL. */
+      question: { content: string; attachments: Attachment[]; withTags: boolean; testRun: boolean } | null;
+      now: number;
+    }
   | { type: 'streamEvent'; id: string; event: StreamEvent; now: number }
   | { type: 'generationStopped'; id: string }
   | { type: 'generationRejected'; id: string; messages: ChatMessage[] }
@@ -124,6 +153,7 @@ function localMessage(role: 'user' | 'assistant', now: number, patch: Partial<Ch
     sources: null,
     sources_found: null,
     sql_check: null,
+    sql_run: null,
     sql_dangers: null,
     dropped_messages: 0,
     created_at: new Date(now).toISOString(),
@@ -141,6 +171,19 @@ function withCitedSources(answer: ChatMessage, generation: Generation): ChatMess
   }
   const cited = footnoteNumbers(answer.content);
   return { ...answer, sources: generation.found.filter((source) => cited.has(source.n)) };
+}
+
+/**
+ * Проверка оборвана — остановкой, обрывом связи или событием `error`: блоки без итога получают
+ * «Проверка не завершена», готовые итоги остаются (концепция §5.7); так же их сохраняет сервер.
+ */
+function withRunStopped(answer: ChatMessage): ChatMessage {
+  const run: SqlRun | null = answer.sql_run && {
+    blocks: answer.sql_run.blocks.map((block) =>
+      block.status === 'pending' || block.status === 'running' ? { ...block, status: 'stopped' } : block,
+    ),
+  };
+  return { ...answer, sql_run: run };
 }
 
 /** Применяет событие потока к диалогу (контракт §6.2). Размышления и текст принимаются в любом чередовании. */
@@ -168,7 +211,27 @@ export function applyStreamEvent(view: DialogView, event: StreamEvent, now: numb
       return { ...view, messages };
     }
     case 'sql_check':
-      return withLastAnswer(view, (answer) => ({ ...answer, sql_check: { blocks: event.blocks } }));
+      if (!generation.testRun) {
+        return withLastAnswer(view, (answer) => ({ ...answer, sql_check: { blocks: event.blocks } }));
+      }
+      // Вопрос с проверкой на тестовых данных: текст дописан и сохранён, дальше идёт только проверка.
+      return {
+        ...withLastAnswer(view, (answer) => ({
+          ...withCitedSources(answer, generation),
+          status: 'complete',
+          sql_check: { blocks: event.blocks },
+        })),
+        generation: { ...generation, phase: 'checking' },
+      };
+    case 'sql_run':
+      // Проверка идёт после ответа: текст дописан и сохранён, итоговое состояние ответа назовёт `done`.
+      return {
+        ...withLastAnswer(view, (answer) => ({
+          ...(generation.phase === 'checking' ? answer : { ...withCitedSources(answer, generation), status: 'complete' }),
+          sql_run: { blocks: event.blocks },
+        })),
+        generation: { ...generation, phase: 'checking' },
+      };
     case 'progress':
     case 'extraction_started':
     case 'extraction':
@@ -212,6 +275,10 @@ export function applyStreamEvent(view: DialogView, event: StreamEvent, now: numb
         generation: null,
       };
     case 'error':
+      if (generation.phase === 'checking') {
+        // Ответ уже сохранён со своим состоянием и остаётся им: обрывается только проверка (контракт §6.2).
+        return { ...withLastAnswer(view, withRunStopped), generation: null };
+      }
       return {
         ...withLastAnswer(view, (answer) => ({
           ...withCitedSources(answer, generation),
@@ -305,12 +372,27 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         const kept = action.question
           ? view.messages
           : view.messages.filter((message, index) => index < view.messages.length - 1 || message.role === 'user');
-        const question = action.question ? [localMessage('user', action.now, action.question)] : [];
+        const question = action.question
+          ? [localMessage('user', action.now, { content: action.question.content, attachments: action.question.attachments })]
+          : [];
+        // «Ответить заново» ищет с теми же тегами, что исходный вопрос: признак переходит от прежнего ответа.
+        const replaced = view.messages.at(-1);
+        const askedWithTags = action.question
+          ? action.question.withTags
+          : replaced?.role === 'assistant'
+            ? replaced.asked_with_tags
+            : undefined;
         return {
           ...view,
           status: 'ready',
-          messages: [...kept, ...question, localMessage('assistant', action.now, {})],
-          generation: { phase: 'sending', startedAt: action.now, reasoningStartedAt: null, found: null },
+          messages: [...kept, ...question, localMessage('assistant', action.now, { asked_with_tags: askedWithTags })],
+          generation: {
+            phase: 'sending',
+            startedAt: action.now,
+            reasoningStartedAt: null,
+            found: null,
+            testRun: action.question?.testRun ?? false,
+          },
         };
       });
     case 'streamEvent': {
@@ -323,17 +405,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return withView(state, action.id, (view) => applyStreamEvent(view, event, action.now));
     }
     case 'generationStopped':
-      return withView(state, action.id, (view) =>
-        view.generation
-          ? {
-              ...withLastAnswer(view, (answer) => ({
-                ...withCitedSources(answer, view.generation as Generation),
-                status: 'stopped',
-              })),
-              generation: null,
-            }
-          : view,
-      );
+      return withView(state, action.id, (view) => {
+        const generation = view.generation;
+        if (!generation) {
+          return view;
+        }
+        return {
+          ...withLastAnswer(view, (answer) =>
+            // Остановка во время проверки SQL ответ не трогает: он уже дописан.
+            generation.phase === 'checking'
+              ? withRunStopped(answer)
+              : { ...withCitedSources(answer, generation), status: 'stopped' },
+          ),
+          generation: null,
+        };
+      });
     case 'generationRejected':
       return withView(state, action.id, (view) => ({ ...view, messages: action.messages, generation: null }));
     case 'draftUpdated':

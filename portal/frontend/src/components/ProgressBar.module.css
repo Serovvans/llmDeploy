@@ -1,0 +1,13 @@
+.track {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--p-line);
+}
+
+.fill {
+  display: block;
+  height: 100%;
+  background: var(--p-accent);
+}

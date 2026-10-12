@@ -14,13 +14,21 @@ import pytest
 import sqlalchemy as sa
 import yaml
 from pixeltable_pgserver.postgres_server import get_server
+from qdrant_client import AsyncQdrantClient
 
 from portal.cli import migrate
 from portal.core.app import create_app
 from portal.core.container import build_container
 from portal.core.settings import Settings, load_settings
+from portal.tools.ports import SqlSandbox
 from tests.kb_support import KbBench, kb_settings, make_bench
-from tests.support import FakeClock, FakeKnowledge, Portal, ScriptedModel
+from tests.support import (
+    FakeClock,
+    FakeKnowledge,
+    FakeTranscriptionQueue,
+    Portal,
+    ScriptedModel,
+)
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
 SECRET_KEY = base64.b64encode(bytes(range(32))).decode()
@@ -77,22 +85,39 @@ def settings(environ: dict[str, str], override_path: Path) -> Settings:
     return loaded
 
 
-async def make_portal(settings: Settings, *, scripted_model: bool = True) -> Portal:
+async def make_portal(
+    settings: Settings,
+    *,
+    scripted_model: bool = True,
+    qdrant: AsyncQdrantClient | None = None,
+    sql_sandbox: SqlSandbox | None = None,
+) -> Portal:
     """Приложение на чистой базе с подменными часами.
 
     Модель подменная; с `scripted_model=False` работает настоящий клиент Bifrost — его
-    адрес тест направляет на заглушку стенда.
+    адрес тест направляет на заглушку стенда. `qdrant` — клиент вместо настоящего:
+    локальный режим для стенда базы знаний. `sql_sandbox` — песочница проверки SQL вместо
+    настоящей (нужна при включённом `sql.sandbox.enabled`).
     """
     clock = FakeClock(START)
     model = ScriptedModel()
     knowledge = FakeKnowledge()
-    container = build_container(settings, clock, model if scripted_model else None, knowledge)
+    transcriptions = FakeTranscriptionQueue()
+    container = build_container(
+        settings,
+        clock,
+        model if scripted_model else None,
+        knowledge,
+        qdrant,
+        sql_sandbox,
+        transcriptions,
+    )
     shutil.rmtree(settings.files.root, ignore_errors=True)
     async with container.engine.begin() as connection:
         await connection.execute(
             sa.text("TRUNCATE users, auth_throttle, audit_log RESTART IDENTITY CASCADE")
         )
-    return Portal(create_app(container), container, clock, model, knowledge)
+    return Portal(create_app(container), container, clock, model, knowledge, transcriptions)
 
 
 async def close_portal(portal: Portal) -> None:
@@ -113,11 +138,15 @@ async def portal(settings: Settings) -> AsyncIterator[Portal]:
     await close_portal(built)
 
 
+async def make_kb_bench(settings: Settings) -> KbBench:
+    """Портал и воркер базы знаний на одном локальном Qdrant; закрывает его `close_portal`."""
+    local_qdrant = AsyncQdrantClient(location=":memory:")
+    return await make_bench(await make_portal(settings, qdrant=local_qdrant), settings)
+
+
 @pytest.fixture
 async def bench(settings: Settings, tmp_path: Path) -> AsyncIterator[KbBench]:
     """Портал вместе с воркером базы знаний на локальном Qdrant."""
-    tuned = kb_settings(settings, tmp_path)
-    built = await make_bench(await make_portal(tuned), tuned)
+    built = await make_kb_bench(kb_settings(settings, tmp_path))
     yield built
-    await built.qdrant.close()
     await close_portal(built.portal)

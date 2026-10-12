@@ -26,10 +26,15 @@ BODY_REFUSAL_KEY = "portal.body_refusal"
 
 @dataclass(frozen=True)
 class BodyLimit:
-    """Предел размера тела запроса и отказ, которым отвечает его превышение."""
+    """Предел размера тела запроса и отказ, которым отвечает его превышение.
+
+    `length_required` — тело без числового `Content-Length` не принимается вовсе: по
+    заявленной длине резервируется место под запись (§1.6).
+    """
 
     max_bytes: int
     refusal: errors.AppError
+    length_required: bool = False
 
 
 def error_body(error: errors.AppError) -> dict[str, Any]:
@@ -100,8 +105,8 @@ class PortalMiddleware:
                 await self._app(scope, receive, send_wrapper)
             elif scope["method"] not in _SAFE_METHODS and not _has_csrf_header(scope):
                 await error_response(errors.csrf_check_failed())(scope, receive, send_wrapper)
-            elif _declared_length(scope) > (limit := self._limit_for(scope)).max_bytes:
-                await error_response(limit.refusal)(scope, receive, send_wrapper)
+            elif refusal := _length_refusal(scope, limit := self._limit_for(scope)):
+                await error_response(refusal)(scope, receive, send_wrapper)
             else:
                 scope[BODY_REFUSAL_KEY] = limit.refusal
                 await self._app(scope, _limited(receive, limit.max_bytes), send_wrapper)
@@ -154,12 +159,19 @@ def _limited(receive: Receive, max_bytes: int) -> Receive:
     return limited
 
 
-def _declared_length(scope: Scope) -> int:
-    """Значение `Content-Length`; 0 — заголовка нет или он не число."""
-    for name, value in scope["headers"]:
-        if name == b"content-length" and value.isdigit():
-            return int(value)
-    return 0
+def _length_refusal(scope: Scope, limit: BodyLimit) -> errors.AppError | None:
+    """Отказ по заявленной длине тела — до его чтения; `None` — тело можно принимать."""
+    declared = next(
+        (
+            int(value)
+            for name, value in scope["headers"]
+            if name == b"content-length" and value.isdigit()
+        ),
+        None,
+    )
+    if declared is None:
+        return errors.length_required() if limit.length_required else None
+    return limit.refusal if declared > limit.max_bytes else None
 
 
 def _has_csrf_header(scope: MutableMapping[str, Any]) -> bool:

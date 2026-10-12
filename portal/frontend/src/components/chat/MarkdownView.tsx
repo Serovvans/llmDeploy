@@ -2,11 +2,12 @@ import { createContext, useContext, useMemo } from 'react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-import type { Source, SqlCheck } from '../../api/types';
+import type { Source, SqlCheck, SqlRun } from '../../api/types';
 import { FOOTNOTE_MARK, markFootnotes, unmarkFootnotes } from '../../chat/footnotes';
-import { texts } from '../../texts';
+import { spokenTimecode, texts } from '../../texts';
 import { CodeBlock, SqlOrphanNotice } from './CodeBlock';
 import styles from './MarkdownView.module.css';
+import { SqlRunResult } from './SqlRunResult';
 
 const LANGUAGE_CLASS = /language-(\S+)/;
 
@@ -79,22 +80,43 @@ function sourceMarks() {
 
 const PLUGINS = [remarkGfm, sourceMarks];
 
-const SqlCheckContext = createContext<SqlCheck | null>(null);
+/** Проверки блоков `sql` ответа: синтаксис с опасными операциями и исполнение на тестовых данных. */
+const SqlChecksContext = createContext<{ check: SqlCheck | null; run: SqlRun | null }>({ check: null, run: null });
 
-/** Блок кода с итогом проверки, если это блок `sql` проверенного ответа. */
+/** Блок кода с итогами проверок, если это блок `sql` проверенного ответа: синтаксис, под ним — тестовые данные. */
 function CheckedCodeBlock({ code, language, line }: { code: string; language: string | null; line?: number }) {
-  const check = useContext(SqlCheckContext);
+  const { check, run } = useContext(SqlChecksContext);
   const block = check?.blocks.find((item) => item.line === Number(line));
-  return <CodeBlock code={code} language={language} check={block} />;
+  const runBlock = run?.blocks.find((item) => item.line === Number(line));
+  return (
+    <>
+      <CodeBlock code={code} language={language} check={block} superseded={runBlock?.status === 'fixed'} />
+      {runBlock && <SqlRunResult block={runBlock} />}
+    </>
+  );
 }
 
-/** Итоги записей, для которых на их строке блока кода нет. */
+/** Итоги записей, для которых на их строке блока кода нет: они не теряются и стоят под текстом ответа. */
 function SqlOrphans({ lines }: { lines: string }) {
-  const check = useContext(SqlCheckContext);
+  const { check, run } = useContext(SqlChecksContext);
   const drawn = new Set(lines.split(',').map(Number));
-  return check?.blocks
-    .filter((block) => block.line === undefined || !drawn.has(block.line))
-    .map((block) => <SqlOrphanNotice key={block.index} check={block} />);
+  return (
+    <>
+      {check?.blocks
+        .filter((block) => block.line === undefined || !drawn.has(block.line))
+        .map((block) => (
+          <SqlOrphanNotice key={block.index} check={block} />
+        ))}
+      {run?.blocks
+        .filter((block) => !drawn.has(block.line))
+        .map((block) => (
+          <div key={block.index} className={styles.orphanRun}>
+            <p className={styles.orphanNote}>{texts.sql.check.orphan}</p>
+            <SqlRunResult block={block} />
+          </div>
+        ))}
+    </>
+  );
 }
 
 const COMPONENTS: Components = {
@@ -153,6 +175,8 @@ interface MarkdownViewProps {
   links?: SourceLinks;
   /** Итог проверки блоков `sql` — только у ответа SQL-помощника. */
   sqlCheck?: SqlCheck | null;
+  /** Проверка блоков `sql` на тестовых данных — только у ответа на вопрос с включённой проверкой. */
+  sqlRun?: SqlRun | null;
 }
 
 /**
@@ -169,12 +193,20 @@ function SourceMark({ n }: { n: number }) {
     return `[${n}]`;
   }
   const openerId = links.openerId(n);
+  const marks = texts.chat.sources;
+  // Место источника в имени сноски: у записи — момент словами, у документа со страницами — страница.
+  const place =
+    source.timecode_seconds !== null
+      ? marks.markTimecode(spokenTimecode(source.timecode_seconds))
+      : source.page !== null
+        ? marks.markPage(source.page)
+        : null;
   return (
     <button
       type="button"
       className={links.active === n ? `${styles.sourceMark} ${styles.sourceMarkActive}` : styles.sourceMark}
       data-opener={openerId}
-      aria-label={texts.chat.sources.markLabel(n, source.document_title, source.page)}
+      aria-label={marks.markLabel(n, source.document_title, place)}
       onMouseEnter={() => links.onActive(n)}
       onMouseLeave={() => links.onActive(null)}
       onFocus={() => links.onActive(n)}
@@ -188,22 +220,23 @@ function SourceMark({ n }: { n: number }) {
 
 const COMPONENTS_WITH_MARKS = { ...COMPONENTS, 'source-mark': SourceMark, 'sql-orphans': SqlOrphans } as Components;
 
-export function MarkdownView({ text, streaming = false, links, sqlCheck = null }: MarkdownViewProps) {
+export function MarkdownView({ text, streaming = false, links, sqlCheck = null, sqlRun = null }: MarkdownViewProps) {
   const numbers = links?.sources.map((source) => source.n).join(',') ?? '';
   const marked = useMemo(
     () => (numbers ? markFootnotes(text, new Set(numbers.split(',').map(Number))) : text),
     [text, numbers],
   );
+  const checks = useMemo(() => ({ check: sqlCheck, run: sqlRun }), [sqlCheck, sqlRun]);
 
   return (
     <SourceLinksContext.Provider value={links ?? null}>
-      <SqlCheckContext.Provider value={sqlCheck}>
+      <SqlChecksContext.Provider value={checks}>
       <div className={streaming ? `${styles.markdown} ${styles.streaming}` : styles.markdown}>
         <Markdown remarkPlugins={PLUGINS} components={COMPONENTS_WITH_MARKS}>
           {marked}
         </Markdown>
       </div>
-      </SqlCheckContext.Provider>
+      </SqlChecksContext.Provider>
     </SourceLinksContext.Provider>
   );
 }

@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Dialog, DocparseResult, Message } from '../api/types';
+import type { Dialog, DocparseResult, Message, SqlRunBlock } from '../api/types';
 import { CONFIG, fail, liveSse, mockApi, ok, session, sse } from '../test/mockApi';
 import { menuItems, renderApp } from '../test/renderApp';
 import { texts } from '../texts';
@@ -28,6 +28,7 @@ function message(patch: Partial<Message>): Message {
     sources: null,
     sources_found: null,
     sql_check: null,
+    sql_run: null,
     sql_dangers: null,
     dropped_messages: 0,
     created_at: '2026-10-05T09:01:00Z',
@@ -69,7 +70,7 @@ describe('SQL-помощник', () => {
 
     expect(await screen.findByRole('heading', { level: 1, name: t.title })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: t.empty.title })).toBeInTheDocument();
-    expect(screen.getByText(t.note)).toBeInTheDocument();
+    expect(await screen.findByText(t.note.withRun)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: texts.dialogs.sql.newLabel })).toBeInTheDocument();
     // Вложений, режима ответа и базы знаний в инструменте нет.
     expect(screen.queryByRole('button', { name: texts.chat.composer.attach })).not.toBeInTheDocument();
@@ -96,6 +97,8 @@ describe('SQL-помощник', () => {
         action: 'optimize',
         dialect: 'mssql',
         schema_id: 's-1',
+        // Схема выбрана, но диалект не проверяется: проверка на тестовых данных не запрашивается.
+        test_run: false,
       }),
     );
     expect(await screen.findByRole('link', { name: texts.dialogs.sql.newLabel })).toBeInTheDocument();
@@ -451,7 +454,11 @@ describe('SQL-помощник: правки дизайн-ревью', () => {
     });
 
     expect(await screen.findByText(texts.common.configFailed)).toBeInTheDocument();
-    expect(screen.queryByText(t.dialect)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(t.dialect)).not.toBeInTheDocument();
+    // Без настроек нет ни переключателя проверки, ни строки о том, что портал делает с запросами.
+    expect(screen.queryByRole('switch', { name: t.testRun.label })).not.toBeInTheDocument();
+    expect(screen.queryByText(t.note.withRun)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.note.withoutRun)).not.toBeInTheDocument();
 
     await user.type(field(t.placeholders.write), 'Участки больше гектара');
     await user.click(screen.getByRole('button', { name: texts.chat.composer.send }));
@@ -462,7 +469,7 @@ describe('SQL-помощник: правки дизайн-ревью', () => {
 
     server.on('GET /api/config', () => ok(CONFIG));
     await user.click(screen.getByRole('button', { name: texts.common.retry }));
-    expect(await screen.findByText(t.dialect)).toBeInTheDocument();
+    expect(await screen.findByLabelText(t.dialect)).toBeInTheDocument();
     expect(field(t.placeholders.write)).toHaveValue('Участки больше гектара');
     // Настройки загрузились: текст об отказе под панелью запроса исчез вместе с заметкой.
     await waitFor(() => expect(screen.queryByText(texts.common.configFailed)).not.toBeInTheDocument());
@@ -490,7 +497,7 @@ describe('SQL-помощник: правки дизайн-ревью', () => {
     expect(field(t.placeholders.write)).toHaveValue('Участки больше гектара');
 
     answer(ok(CONFIG));
-    expect(await screen.findByText(t.dialect)).toBeInTheDocument();
+    expect(await screen.findByText('PostgreSQL + PostGIS')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: texts.chat.composer.send }));
     expect(await screen.findByText('Готово')).toBeInTheDocument();
   });
@@ -553,6 +560,357 @@ describe('SQL-помощник: правки дизайн-ревью', () => {
   });
 });
 
+function runBlock(patch: Partial<SqlRunBlock>): SqlRunBlock {
+  return {
+    index: 0,
+    line: 1,
+    status: 'passed',
+    reason: null,
+    fixture: null,
+    result: null,
+    affected_rows: null,
+    error: null,
+    fixed_sql: null,
+    ...patch,
+  };
+}
+
+describe('SQL-помощник: переименование', () => {
+  const t = texts.sql;
+
+  it('на время правки названия настройки остаются в заголовке', async () => {
+    const { user } = setup('sql', `/sql/${ID}`, [QUESTION], { 'GET /api/sql/schemas': () => ok({ items: [] }) });
+    const header = within(await screen.findByRole('banner'));
+    await header.findByRole('heading', { level: 1, name: 'Участки с истёкшей арендой' });
+    await header.findByLabelText(t.dialect);
+
+    await user.click(header.getByRole('button', { name: /^Действия:/ }));
+    await user.click(await screen.findByText(texts.chat.menu.rename));
+
+    expect(await header.findByLabelText(texts.chat.titleLabel)).toHaveFocus();
+    expect(header.getByLabelText(t.dialect)).toBeInTheDocument();
+    expect(header.getByLabelText(t.schema)).toBeInTheDocument();
+    expect(header.getByRole('switch', { name: t.testRun.label })).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    expect(await header.findByRole('heading', { level: 1, name: 'Участки с истёкшей арендой' })).toBeInTheDocument();
+    expect(header.getByLabelText(t.dialect)).toBeInTheDocument();
+  });
+});
+
+describe('SQL-помощник: проверка на тестовых данных', () => {
+  const t = texts.sql;
+  const r = t.run;
+  const SCHEMAS = { 'GET /api/sql/schemas': () => ok({ items: [{ id: 's-1', name: 'Кадастр', updated_at: '2026-10-01T09:00:00Z' }] }) };
+  const FIXTURE = [{ table: 'parcels', columns: ['id', 'area'], rows: [['1', '120.5'], ['2', null]], truncated: false }];
+  const toggle = () => screen.getByRole('switch', { name: t.testRun.label });
+
+  it('строка заголовка: диалект, схема, «Мои схемы», переключатель — в этом порядке; действие — в панели запроса после поля', async () => {
+    const { user } = setup('sql', `/sql/${ID}`, [QUESTION, message({ content: 'Ответ' })], SCHEMAS);
+    await screen.findByRole('switch', { name: t.testRun.label });
+    const header = screen.getByRole('heading', { level: 1 }).closest('header') as HTMLElement;
+    const order = [
+      screen.getByLabelText(t.dialect),
+      screen.getByLabelText(t.schema),
+      screen.getByRole('button', { name: t.mySchemas }),
+      toggle(),
+      within(header).getByRole('button', { name: /^Действия/ }),
+    ];
+    order.forEach((element) => expect(header).toContainElement(element));
+    order.slice(1).forEach((element, index) =>
+      expect((order[index] as HTMLElement).compareDocumentPosition(element)).toBe(Node.DOCUMENT_POSITION_FOLLOWING),
+    );
+    // Название поля без подписи — первой строкой раскрытого списка.
+    await user.click(screen.getByLabelText(t.schema));
+    await waitFor(() => expect(document.querySelector('[data-tid="MenuHeader__root"]')).toHaveTextContent(t.schema));
+    await user.keyboard('{Escape}');
+
+    const input = field(t.placeholders.write);
+    const action = screen.getByRole('switch', { name: t.actions.debug });
+    expect(header).not.toContainElement(action);
+    expect(input.compareDocumentPosition(action)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(action.compareDocumentPosition(screen.getByRole('button', { name: texts.chat.composer.send }))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    await user.click(action);
+    expect(window.localStorage.getItem('portal.sql.action')).toBe('debug');
+  });
+
+  it('проверка выключена на портале: переключателя нет, строка под панелью — второй вариант, test_run: false', async () => {
+    window.localStorage.setItem('portal.sql.test_run', 'on');
+    window.localStorage.setItem('portal.sql.schema', 's-1');
+    const { server, user } = setup('sql', `/sql/${ID}`, [], {
+      ...SCHEMAS,
+      'GET /api/config': () => ok({ ...CONFIG, sql: { ...CONFIG.sql, test_run: { enabled: false, dialect: 'postgres' } } }),
+      [`GET /api/dialogs/${ID}`]: () => ok(dialog('sql')),
+      [`POST /api/dialogs/${ID}/messages`]: () => sse([START, ['done', { status: 'complete' }]]),
+    });
+
+    expect(await screen.findByText(t.note.withoutRun)).toBeInTheDocument();
+    expect(screen.queryByText(t.note.withRun)).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: t.testRun.label })).not.toBeInTheDocument();
+    await user.type(field(t.placeholders.write), 'Участки{Enter}');
+    await waitFor(() => expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]?.body).toMatchObject({ test_run: false }));
+  });
+
+  it('переключатель: без схемы и с непроверяемым диалектом недоступен, но в обходе и с причиной; выбор запоминается и не теряется', async () => {
+    const { server, user } = setup('sql', `/sql/${ID}`, [], {
+      ...SCHEMAS,
+      [`GET /api/dialogs/${ID}`]: () => ok(dialog('sql')),
+      [`POST /api/dialogs/${ID}/messages`]: () => sse([START, ['done', { status: 'complete' }]]),
+    });
+    const sent = () => server.callsTo(`POST /api/dialogs/${ID}/messages`).at(-1)?.body;
+
+    // «Без схемы»: выключен, недоступен, фокус получает, причина связана с ним.
+    await screen.findByText(t.note.withRun);
+    expect(toggle()).toHaveAttribute('aria-disabled', 'true');
+    expect(toggle()).toHaveAttribute('aria-checked', 'false');
+    expect(toggle()).toHaveAttribute('tabindex', '0');
+    expect(toggle()).toHaveAccessibleDescription(t.testRun.needSchema);
+
+    // Схема выбрана: доступен, по умолчанию выключен; включение запоминается и уходит с вопросом.
+    await user.click(screen.getByText(t.noSchema));
+    await user.click(await screen.findByText('Кадастр'));
+    expect(toggle()).not.toHaveAttribute('aria-disabled');
+    expect(toggle()).not.toBeChecked();
+    expect(toggle()).toHaveAccessibleDescription(t.testRun.hint);
+    await user.click(toggle());
+    expect(toggle()).toBeChecked();
+    expect(window.localStorage.getItem('portal.sql.test_run')).toBe('on');
+    await user.type(field(t.placeholders.write), 'Первый{Enter}');
+    await waitFor(() => expect(sent()).toMatchObject({ content: 'Первый', schema_id: 's-1', test_run: true }));
+
+    // Диалект, который не проверяется: недоступен, вопрос уходит без проверки.
+    await user.click(screen.getByText('PostgreSQL + PostGIS'));
+    await user.click(await screen.findByText('Microsoft SQL Server'));
+    expect(toggle()).toHaveAttribute('aria-disabled', 'true');
+    expect(toggle()).toHaveAccessibleDescription('Проверка работает только для PostgreSQL + PostGIS');
+    await user.type(field(t.placeholders.write), 'Второй{Enter}');
+    await waitFor(() => expect(sent()).toMatchObject({ content: 'Второй', dialect: 'mssql', test_run: false }));
+
+    // Запомненное «включено» возвращается вместе с проверяемым диалектом.
+    await user.click(screen.getByText('Microsoft SQL Server'));
+    await user.click(await screen.findByText('PostgreSQL + PostGIS'));
+    expect(toggle()).toBeChecked();
+  });
+
+  it('поток: ответ дописан по первому sql_run; на время проверки «Ответить заново» недоступно, «Остановить» есть; done возвращает панель', async () => {
+    const { server, user } = setup('sql', `/sql/${ID}`, [], { [`GET /api/dialogs/${ID}`]: () => ok(dialog('sql')) });
+    const live = liveSse();
+    server.on(`POST /api/dialogs/${ID}/messages`, () => live.response);
+    await screen.findByRole('heading', { level: 2, name: t.empty.title });
+    await user.type(field(t.placeholders.write), 'Участки{Enter}');
+
+    live.push(START, ['delta', { text: 'Первый:\n```sql\nSELECT 1\n```\nВторой:\n```sql\nSELECT 2\n```' }]);
+    live.push(['sql_check', { blocks: [{ index: 0, line: 2, valid: true, error: null, dangers: [] }] }]);
+    await screen.findAllByText(t.check.valid);
+    // До первого sql_run блоков проверки нет, ответ ещё не считается дописанным.
+    expect(screen.queryByText(r.running)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: texts.chat.exportAnswer })).not.toBeInTheDocument();
+
+    live.push(['sql_run', { blocks: [runBlock({ index: 0, line: 2, status: 'running' }), runBlock({ index: 1, line: 6, status: 'pending' })] }]);
+    expect(await screen.findByText(r.running)).toBeInTheDocument();
+    expect(screen.getByText(r.pending)).toBeInTheDocument();
+    // Итог синтаксиса стоит выше блока проверки.
+    expect(screen.getByText(t.check.valid).compareDocumentPosition(screen.getByText(r.running))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(screen.getByRole('button', { name: texts.chat.exportAnswer })).toBeInTheDocument();
+    const regenerate = screen.getByRole('button', { name: texts.chat.regenerate });
+    expect(regenerate).toHaveAttribute('aria-disabled', 'true');
+    await user.click(regenerate);
+    expect(server.callsTo(`POST /api/dialogs/${ID}/regenerate`)).toHaveLength(0);
+    expect(screen.getByRole('button', { name: texts.chat.composer.stop })).toBeInTheDocument();
+    // Оговорки у состояний без данных нет.
+    expect(screen.queryByText(r.disclaimer)).not.toBeInTheDocument();
+
+    live.push(
+      [
+        'sql_run',
+        {
+          blocks: [
+            runBlock({ index: 0, line: 2, fixture: FIXTURE, result: { columns: ['n'], rows: [['1'], ['2'], ['3']], truncated: false } }),
+            runBlock({ index: 1, line: 6, status: 'unavailable' }),
+          ],
+        },
+      ],
+      ['done', { status: 'complete' }],
+    );
+    live.close();
+    expect(await screen.findByText(r.passed)).toBeInTheDocument();
+    expect(screen.getByText(r.unavailable)).toBeInTheDocument();
+    expect(screen.queryByText(r.running)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: texts.chat.composer.send })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: texts.chat.regenerate })).not.toHaveAttribute('aria-disabled');
+    // Одно объявление для экранного чтения — по завершении.
+    expect(screen.getByText(`Проверка на тестовых данных: запрос выполнился, строк в результате: 3. ${r.unavailable}`)).toHaveAttribute(
+      'role',
+      'status',
+    );
+  });
+
+  it('вопрос с проверкой: ответ дописан по sql_check — остановка до первого sql_run его не трогает; проверять нечего — «Ответ готов»', async () => {
+    const { server, user } = setup('sql', `/sql/${ID}`, [], { ...SCHEMAS, [`GET /api/dialogs/${ID}`]: () => ok(dialog('sql')) });
+    let live = liveSse();
+    server.on(`POST /api/dialogs/${ID}/messages`, () => live.response);
+    await screen.findByText(t.note.withRun);
+    await user.click(screen.getByText(t.noSchema));
+    await user.click(await screen.findByText('Кадастр'));
+    await user.click(toggle());
+    await user.type(field(t.placeholders.write), 'Участки{Enter}');
+    await waitFor(() => expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]?.body).toMatchObject({ test_run: true }));
+
+    live.push(START, ['delta', { text: 'Запрос не нужен.' }], ['sql_check', { blocks: [] }]);
+    // Ответ дописан: строка действий есть, хотя проверка ещё не началась и поток открыт.
+    expect(await screen.findByRole('button', { name: texts.chat.exportAnswer })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: texts.chat.composer.stop }));
+    await waitFor(() => expect(screen.getByRole('button', { name: texts.chat.composer.send })).toBeInTheDocument());
+    expect(screen.queryByText(texts.chat.stopped)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: texts.chat.exportAnswer })).toBeInTheDocument();
+
+    // Закрытых блоков sql в ответе нет: сервер присылает пустую проверку, объявление — обычное.
+    live = liveSse();
+    await user.type(field(t.placeholders.write), 'Ещё{Enter}');
+    live.push(['start', { user_message_id: 'u-2', assistant_message_id: 'a-2' }], ['delta', { text: 'Запрос не нужен.' }]);
+    live.push(['sql_check', { blocks: [] }], ['sql_run', { blocks: [] }], ['done', { status: 'complete' }]);
+    live.close();
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(texts.chat.phase.done));
+  });
+
+  it('«Остановить» во время проверки: ответ цел и не «остановлен», блок без итога — «Проверка не завершена»', async () => {
+    const { server, user } = setup('sql', `/sql/${ID}`, [], { [`GET /api/dialogs/${ID}`]: () => ok(dialog('sql')) });
+    const live = liveSse();
+    server.on(`POST /api/dialogs/${ID}/messages`, () => live.response);
+    await screen.findByRole('heading', { level: 2, name: t.empty.title });
+    await user.type(field(t.placeholders.write), 'Участки{Enter}');
+    live.push(START, ['delta', { text: '```sql\nSELECT 1\n```\n\n```sql\nSELECT 2\n```' }], ['sql_check', { blocks: [] }]);
+    live.push(['sql_run', { blocks: [runBlock({ index: 0, line: 1, status: 'timeout' }), runBlock({ index: 1, line: 5, status: 'running' })] }]);
+    await screen.findByText(r.running);
+
+    // Esc в поле ввода — то же, что «Остановить».
+    await user.click(field(t.placeholders.write));
+    await user.keyboard('{Escape}');
+    expect(await screen.findByText(r.stopped)).toBeInTheDocument();
+    expect(screen.getByText(r.timeout)).toBeInTheDocument();
+    expect(screen.queryByText(texts.chat.stopped)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: texts.chat.composer.send })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: texts.chat.regenerate })).not.toHaveAttribute('aria-disabled');
+  });
+
+  it('успех: оговорка, тестовые данные свёрнуты, результат развёрнут; значения из базы — только текст', async () => {
+    const hostile = '<img src=x onerror=alert(1)>';
+    const { user } = setup('sql', `/sql/${ID}`, [
+      QUESTION,
+      message({
+        content: '```sql\nSELECT id, area FROM parcels\n```',
+        sql_run: {
+          blocks: [
+            runBlock({
+              fixture: FIXTURE,
+              result: { columns: ['id', hostile], rows: [['1', hostile], ['2', null]], truncated: true },
+            }),
+          ],
+        },
+      }),
+    ]);
+
+    expect(await screen.findByText(r.passed)).toBeInTheDocument();
+    expect(screen.getByText(r.disclaimer)).toBeInTheDocument();
+    const result = screen.getByRole('table', { name: r.resultCaption });
+    expect(screen.getByText('Результат · 2 строки')).toBeInTheDocument();
+    expect(within(result).getAllByText(hostile)).toHaveLength(2);
+    expect(result.querySelector('img')).toBeNull();
+    expect(within(result).getByText('NULL')).toBeInTheDocument();
+    expect(screen.getByText('Показаны первые 2 строки')).toBeInTheDocument();
+    // Область с прокруткой достижима с клавиатуры.
+    expect(screen.getByRole('region', { name: r.resultCaption })).toHaveAttribute('tabindex', '0');
+
+    const fixture = screen.getByRole('button', { name: 'Тестовые данные · 1 таблица' });
+    expect(fixture).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('table', { name: 'Тестовая таблица parcels' })).not.toBeInTheDocument();
+    await user.click(fixture);
+    expect(fixture).toHaveAttribute('aria-expanded', 'true');
+    expect(within(screen.getByRole('table', { name: 'Тестовая таблица parcels' })).getByText('120.5')).toBeInTheDocument();
+  });
+
+  it('исправлено и ошибка: сообщение базы как есть, исправленный запрос со своим «Скопировать», исходный блок отмечен', async () => {
+    setup('sql', `/sql/${ID}`, [
+      QUESTION,
+      message({
+        content: '```sql\nSELECT aera FROM parcels\n```\n\n```sql\nSELECT * FROM nowhere\n```',
+        sql_run: {
+          blocks: [
+            runBlock({
+              status: 'fixed',
+              fixture: FIXTURE,
+              error: 'column "aera" does not exist',
+              fixed_sql: 'SELECT area FROM parcels',
+              result: { columns: ['area'], rows: [], truncated: false },
+            }),
+            runBlock({ index: 1, line: 5, status: 'failed', error: 'relation "nowhere" does not exist' }),
+          ],
+        },
+      }),
+    ]);
+
+    expect(await screen.findByText(r.fixed)).toBeInTheDocument();
+    expect(screen.getByText(r.superseded)).toBeInTheDocument();
+    expect(screen.getByText(r.originalError)).toBeInTheDocument();
+    expect(screen.getByText('column "aera" does not exist')).toHaveAttribute('lang', 'en');
+    const blocks = [...document.querySelectorAll('pre:not([lang])')];
+    expect(blocks.map((block) => block.textContent)).toEqual([
+      'SELECT aera FROM parcels',
+      'SELECT area FROM parcels',
+      'SELECT * FROM nowhere',
+    ]);
+    // Исправленный запрос выполнился, но данных не вернул: пояснение вместо таблицы результата.
+    expect(screen.getByText(r.emptyReadText)).toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+
+    expect(screen.getByText(r.failed)).toBeInTheDocument();
+    expect(screen.getByText(r.failedText)).toBeInTheDocument();
+    expect(screen.getByText(r.dbMessage)).toBeInTheDocument();
+    expect(screen.getByText('relation "nowhere" does not exist')).toBeInTheDocument();
+    // Оговорка — в обоих блоках с рамкой; у ошибки без тестовых данных их кнопки нет.
+    expect(screen.getAllByText(r.disclaimer)).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /^Тестовые данные/ })).toHaveLength(1);
+  });
+
+  it.each<[string, Partial<SqlRunBlock>, string[], string[]]>([
+    ['изменяющий запрос', { affected_rows: 3 }, [r.passed, 'Затронуто строк: 3. Изменения отменены — проверка ничего не сохраняет'], [r.emptyWrite]],
+    ['пусто, чтение', { result: { columns: ['id'], rows: [], truncated: false } }, [r.emptyRead, r.emptyReadText, r.disclaimer], [r.passed]],
+    ['пусто, изменение', { affected_rows: 0 }, [r.emptyWrite, r.emptyWriteText, r.disclaimer], [r.passed]],
+    ['не проверялось: причина', { status: 'not_checked', reason: 'multiple_statements' }, [r.reasons.multiple_statements as string], [r.disclaimer]],
+    ['не проверялось: неизвестная причина', { status: 'not_checked', reason: 'new_reason' }, [r.notChecked], [r.disclaimer]],
+    ['неизвестное состояние', { status: 'new_status' as SqlRunBlock['status'] }, [r.notChecked], [r.disclaimer]],
+    ['после перезагрузки — не завершена', { status: 'stopped' }, [r.stopped], [r.disclaimer]],
+  ])('состояние блока: %s', async (_name, patch, present, absent) => {
+    setup('sql', `/sql/${ID}`, [
+      QUESTION,
+      message({ content: '```sql\nUPDATE parcels SET area = 1\n```', sql_run: { blocks: [runBlock({ fixture: FIXTURE, ...patch })] } }),
+    ]);
+
+    // Однострочный итог повторяется в объявлении для экранного чтения — оно здесь не в счёт.
+    for (const text of present) {
+      expect(await screen.findByText(text, { ignore: '[role="status"]' })).toBeInTheDocument();
+    }
+    absent.forEach((text) => expect(screen.queryByText(text)).not.toBeInTheDocument());
+  });
+
+  it('итог без блока на его строке не теряется: под текстом ответа, с пояснением', async () => {
+    setup('sql', `/sql/${ID}`, [
+      QUESTION,
+      message({ content: '```sql\nSELECT 1\n```\n\nТекст', sql_run: { blocks: [runBlock({ line: 40, status: 'failed', error: 'boom' })] } }),
+    ]);
+
+    const note = await screen.findByText(t.check.orphan);
+    const failed = screen.getByText(r.failed);
+    expect(screen.getByText('Текст').compareDocumentPosition(note)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(note.compareDocumentPosition(failed)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(screen.queryByText(r.superseded)).not.toBeInTheDocument();
+  });
+});
+
 describe('помощник CoGIS', () => {
   const t = texts.cogis;
 
@@ -579,14 +937,14 @@ describe('помощник CoGIS', () => {
     expect((await screen.findAllByText(/Ищу в базе знаний/)).length).toBeGreaterThan(0);
     live.push(['sources', { sources: [] }]);
     expect(await screen.findByText(t.nothingFound)).toBeInTheDocument();
-    expect(screen.queryByText(texts.chat.sources.nothingFound)).not.toBeInTheDocument();
+    expect(screen.queryByText(texts.chat.sources.nothingFound.withoutTags)).not.toBeInTheDocument();
     live.push(['delta', { text: 'Ответ по общим знаниям.' }], ['done', { status: 'complete' }]);
     live.close();
     expect(await screen.findByText('Ответ по общим знаниям.')).toBeInTheDocument();
   });
 
   it('ответ с источниками: кнопки-сноски и карточки', async () => {
-    const source = { n: 1, document_id: 'k-1', document_title: 'Руководство CoGIS SDK.pdf', scope: 'shared' as const, page: 12, fragment_id: 'f-1', quote: 'Плагин реализует интерфейс IPlugin…' };
+    const source = { n: 1, document_id: 'k-1', document_title: 'Руководство CoGIS SDK.pdf', scope: 'shared' as const, page: 12, timecode_seconds: null, image_id: null, fragment_id: 'f-1', quote: 'Плагин реализует интерфейс IPlugin…' };
     setup('cogis', `/cogis/${ID}`, [QUESTION, message({ content: 'Реализуйте IPlugin [1].', sources_found: 3, sources: [source] })]);
 
     expect(await screen.findByRole('button', { name: 'Источник 1: Руководство CoGIS SDK.pdf, страница 12' })).toBeInTheDocument();

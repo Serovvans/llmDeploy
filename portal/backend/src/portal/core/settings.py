@@ -29,6 +29,8 @@ CONFIG_DIR = Path("config")
 OVERRIDE_PATH = Path("/etc/portal/config.override.yaml")
 
 _SECRET_KEY_BYTES = 32
+# Слова «Документ: », «Раздел: » и переводы строк в тексте для поиска (docs/portal-api.md §10.1).
+_SEARCH_TEXT_LABELS_CHARS = 22
 
 
 class ConfigError(Exception):
@@ -202,6 +204,20 @@ class KbChunkingSettings(_Section):
 
     max_chars: int = Field(ge=1)
     overlap_chars: int = Field(ge=0)
+    heading_patterns: tuple[str, ...]
+    section_max_chars: int = Field(ge=1)
+
+    @field_validator("heading_patterns")
+    @classmethod
+    def _check_heading_patterns(cls, patterns: tuple[str, ...]) -> tuple[str, ...]:
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                raise ValueError(
+                    "kb.chunking.heading_patterns: негодное регулярное выражение"
+                ) from error
+        return patterns
 
     @model_validator(mode="after")
     def _check_overlap(self) -> Self:
@@ -226,6 +242,7 @@ class KbSearchSettings(_Section):
     top_k: int = Field(ge=1)
     prefetch_limit: int = Field(ge=1)
     lexical_slots: int = Field(ge=0)
+    neighbors: int = Field(ge=0)
 
     @model_validator(mode="after")
     def _check_slots(self) -> Self:
@@ -256,12 +273,67 @@ class KbWorkerSettings(_Section):
     call_retry_pause_seconds: float = Field(ge=0)
     heartbeat_file: Path
     heartbeat_stale_seconds: float = Field(gt=0)
+    chat_slots: int = Field(ge=1)
+    background_llm_parallel: int = Field(ge=1)
 
     @model_validator(mode="after")
     def _check_heartbeat(self) -> Self:
         if self.heartbeat_stale_seconds <= self.poll_seconds:
             raise ValueError("kb.worker.heartbeat_stale_seconds должен быть больше poll_seconds")
         return self
+
+
+class KbTagsSettings(_Section):
+    """Теги документов (docs/portal-api.md §8.5)."""
+
+    max_per_document: int = Field(ge=1)
+    max_length: int = Field(ge=1)
+    max_selected: int = Field(ge=1)
+    suggest_limit: int = Field(ge=1)
+
+
+class KbImagesSettings(_Section):
+    """Картинки документов и их описание моделью (docs/portal-api.md §8.6)."""
+
+    enabled: bool
+    min_side_px: int = Field(ge=1)
+    min_area_px: int = Field(ge=1)
+    max_per_document: int = Field(ge=1)
+    description_max_tokens: int = Field(ge=1)
+    system_prompt: str = Field(min_length=1)
+
+
+class KbContextSettings(_Section):
+    """Пояснения к фрагментам — задание `context` (docs/portal-api.md §11.5)."""
+
+    enabled: bool
+    window_tokens: int = Field(ge=1)
+    max_tokens: int = Field(ge=1)
+    max_chars: int = Field(ge=1)
+    batch_size: int = Field(ge=1)
+    system_prompt: str = Field(min_length=1)
+
+
+class KbRewriteSettings(_Section):
+    """Переписывание уточняющего вопроса в запрос для поиска (docs/portal-api.md §8.4)."""
+
+    enabled: bool
+    history_messages: int = Field(ge=1)
+    history_max_chars: int = Field(ge=1)
+    max_tokens: int = Field(ge=1)
+    timeout_seconds: float = Field(gt=0)
+    system_prompt: str = Field(min_length=1)
+
+
+class KbRerankSettings(_Section):
+    """Реранкер (docs/portal-api.md §8.4, §12.1)."""
+
+    enabled: bool
+    url: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    candidates: int = Field(ge=1)
+    document_max_chars: int = Field(ge=1)
+    timeout_seconds: float = Field(gt=0)
 
 
 class KbSettings(_Section):
@@ -279,11 +351,37 @@ class KbSettings(_Section):
     search: KbSearchSettings
     qdrant: KbQdrantSettings
     worker: KbWorkerSettings
+    tags: KbTagsSettings
+    images: KbImagesSettings
+    context: KbContextSettings
+    rewrite: KbRewriteSettings
+    rerank: KbRerankSettings
+
+    @property
+    def search_text_max_chars(self) -> int:
+        """Наибольшая длина текста для поиска (§10.1): название, раздел, пояснение, фрагмент."""
+        return (
+            2 * self.chunking.section_max_chars
+            + self.context.max_chars
+            + self.chunking.max_chars
+            + _SEARCH_TEXT_LABELS_CHARS
+        )
 
     @model_validator(mode="after")
-    def _check_fragment_fits_embedder(self) -> Self:
-        if self.chunking.max_chars > self.embeddings.max_input_chars:
-            raise ValueError("kb.chunking.max_chars больше kb.embeddings.max_input_chars")
+    def _check_search_text_fits(self) -> Self:
+        """Ни эмбеддинги, ни реранкер не получают текст с обрезанным хвостом фрагмента."""
+        if self.search_text_max_chars > self.embeddings.max_input_chars:
+            raise ValueError("текст для поиска длиннее kb.embeddings.max_input_chars")
+        if self.search_text_max_chars > self.rerank.document_max_chars:
+            raise ValueError("текст для поиска длиннее kb.rerank.document_max_chars")
+        return self
+
+    @model_validator(mode="after")
+    def _check_candidates(self) -> Self:
+        if not self.search.prefetch_limit >= self.rerank.candidates >= self.search.top_k:
+            raise ValueError(
+                "нужно kb.search.prefetch_limit ≥ kb.rerank.candidates ≥ kb.search.top_k"
+            )
         return self
 
 
@@ -360,6 +458,34 @@ class SqlPrompts(_Section):
     optimize: str = Field(min_length=1)
 
 
+class SqlSandboxSettings(_Section):
+    """Проверка SQL на тестовых данных (docs/portal-api.md §7.4); пароли — из окружения."""
+
+    enabled: bool
+    dialect: str = Field(min_length=1)
+    host: str = Field(min_length=1)
+    port: int = Field(ge=1)
+    database: str = Field(min_length=1)
+    role_prefix: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    control_role: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    max_parallel: int = Field(ge=1)
+    connect_timeout_seconds: float = Field(gt=0)
+    statement_timeout_seconds: int = Field(ge=1)
+    lock_timeout_seconds: int = Field(ge=1)
+    total_timeout_seconds: int = Field(ge=1)
+    result_max_rows: int = Field(ge=1)
+    result_max_bytes: int = Field(ge=1)
+    cell_max_chars: int = Field(ge=1)
+    fixture_max_rows: int = Field(ge=1)
+    fixture_max_bytes: int = Field(ge=1)
+    error_max_chars: int = Field(ge=1)
+    max_blocks: int = Field(ge=1)
+    fix_attempts: int = Field(ge=0)
+    max_output_tokens: int = Field(ge=1)
+    data_system_prompt: str = Field(min_length=1)
+    fix_system_prompt: str = Field(min_length=1)
+
+
 class SqlSettings(_Section):
     """SQL-помощник."""
 
@@ -387,6 +513,7 @@ class SqlSettings(_Section):
         return patterns
 
     system_prompts: SqlPrompts
+    sandbox: SqlSandboxSettings
 
     def dialect(self, dialect_id: str) -> SqlDialect | None:
         """Диалект по идентификатору."""
@@ -394,8 +521,11 @@ class SqlSettings(_Section):
 
     @model_validator(mode="after")
     def _check_default(self) -> Self:
-        if self.default_dialect not in {dialect.id for dialect in self.dialects}:
+        ids = {dialect.id for dialect in self.dialects}
+        if self.default_dialect not in ids:
             raise ValueError("sql.default_dialect нет в sql.dialects")
+        if self.sandbox.dialect not in ids:
+            raise ValueError("sql.sandbox.dialect нет в sql.dialects")
         return self
 
 
@@ -416,6 +546,56 @@ class CogisSettings(_Section):
     no_documentation_notice: str = Field(min_length=1)
 
 
+class MediaFfmpegSettings(_Section):
+    """Пределы одного запуска ffmpeg и ffprobe (docs/portal-api.md §8.7)."""
+
+    timeout_seconds: int = Field(ge=1)
+    memory_bytes: int = Field(ge=1)
+    threads: int = Field(ge=1)
+    output_max_bytes: int = Field(ge=1)
+
+
+class MediaAsrSettings(_Section):
+    """Распознавание речи на CPU (docs/portal-api.md §8.7)."""
+
+    engine: Literal["gigaam", "stub"]
+    model_dir: Path
+    threads: int = Field(ge=1)
+    chat_threads: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _check_threads(self) -> Self:
+        if self.chat_threads >= self.threads:
+            raise ValueError("media.asr.chat_threads должен быть меньше media.asr.threads")
+        return self
+
+
+class MediaSettings(_Section):
+    """Аудио и видео — «записи» (docs/portal-api.md §1.6, §8.7).
+
+    Параметры приёма объявляет `backend-engineer` (`app.yaml`), параметры обработки —
+    `rag-engineer` (`kb.yaml`), §13.1.
+    """
+
+    enabled: bool
+    max_bytes: int = Field(ge=1)
+    max_minutes: int = Field(ge=1)
+    chat_max_minutes: int = Field(ge=1)
+    extensions: tuple[str, ...]
+    quota_bytes: int = Field(ge=1)
+    user_quota_share: float = Field(gt=0, le=1)
+    min_free_bytes: int = Field(ge=0)
+    max_concurrent_uploads: int = Field(ge=1)
+    upload_idle_timeout_seconds: float = Field(gt=0)
+    upload_timeout_seconds: float = Field(gt=0)
+    audio_codecs: tuple[str, ...] = Field(min_length=1)
+    failed_source_ttl_hours: int = Field(ge=1)
+    part_seconds: int = Field(ge=1)
+    audio_bitrate_kbps: int = Field(ge=1)
+    ffmpeg: MediaFfmpegSettings
+    asr: MediaAsrSettings
+
+
 class Settings(_Section):
     """Все настройки приложения: YAML и секреты окружения."""
 
@@ -430,13 +610,18 @@ class Settings(_Section):
     docparse: DocparseSettings
     sql: SqlSettings
     cogis: CogisSettings
+    media: MediaSettings
 
     common_passwords: frozenset[str] = Field(repr=False)
     db_password: SecretStr
     secret_key: SecretBytes | None
     llm_api_key: SecretStr | None
     qdrant_api_key: SecretStr | None
+    # Только для запасной схемы доступа к реранкеру (§12.1); в основной не задаётся.
+    rerank_api_key: SecretStr | None = None
     max_model_len: int | None
+    sql_sandbox_password: SecretStr | None = None
+    sql_sandbox_control_password: SecretStr | None = None
 
     def require_llm_api_key(self) -> str:
         """Вернуть ключ `PORTAL_LLM_API_KEY` или отказать, если он не задан или пуст."""
@@ -444,11 +629,33 @@ class Settings(_Section):
             raise ConfigError("Не задана переменная окружения PORTAL_LLM_API_KEY")
         return self.llm_api_key.get_secret_value()
 
+    def require_rerank_api_key(self) -> str:
+        """Ключ реранкера: `PORTAL_RERANK_API_KEY`, а если она не задана — ключ портала."""
+        if self.rerank_api_key is not None:
+            return self.rerank_api_key.get_secret_value()
+        return self.require_llm_api_key()
+
     def require_qdrant_api_key(self) -> str:
         """Вернуть ключ `QDRANT_API_KEY` или отказать, если он не задан или пуст."""
         if self.qdrant_api_key is None:
             raise ConfigError("Не задана переменная окружения QDRANT_API_KEY")
         return self.qdrant_api_key.get_secret_value()
+
+    def require_sql_sandbox_passwords(self) -> tuple[str, str]:
+        """Пароли ролей проверки и управляющей роли песочницы SQL (§13.5).
+
+        Нужны только при включённом `sql.sandbox.enabled`; совпадать не должны.
+        """
+        run, control = self.sql_sandbox_password, self.sql_sandbox_control_password
+        if run is None:
+            raise ConfigError("Не задана переменная окружения SQL_SANDBOX_PASSWORD")
+        if control is None:
+            raise ConfigError("Не задана переменная окружения SQL_SANDBOX_CONTROL_PASSWORD")
+        if run.get_secret_value() == control.get_secret_value():
+            raise ConfigError(
+                "SQL_SANDBOX_PASSWORD и SQL_SANDBOX_CONTROL_PASSWORD не должны совпадать"
+            )
+        return run.get_secret_value(), control.get_secret_value()
 
     def require_max_model_len(self) -> int:
         """Вернуть контекст модели `MAX_MODEL_LEN`; запасного значения нет (§13.5)."""
@@ -534,6 +741,9 @@ def load_settings(
     secret_key = environ.get("PORTAL_SECRET_KEY")
     llm_api_key = environ.get("PORTAL_LLM_API_KEY", "").strip()
     qdrant_api_key = environ.get("QDRANT_API_KEY", "").strip()
+    rerank_api_key = environ.get("PORTAL_RERANK_API_KEY", "").strip()
+    sandbox_password = environ.get("SQL_SANDBOX_PASSWORD", "")
+    sandbox_control_password = environ.get("SQL_SANDBOX_CONTROL_PASSWORD", "")
 
     try:
         passwords_file = str(data["auth"]["password"]["common_passwords_file"])
@@ -547,7 +757,12 @@ def load_settings(
             secret_key=SecretBytes(_decode_secret_key(secret_key)) if secret_key else None,
             llm_api_key=SecretStr(llm_api_key) if llm_api_key else None,
             qdrant_api_key=SecretStr(qdrant_api_key) if qdrant_api_key else None,
+            rerank_api_key=SecretStr(rerank_api_key) if rerank_api_key else None,
             max_model_len=_parse_max_model_len(environ.get("MAX_MODEL_LEN")),
+            sql_sandbox_password=SecretStr(sandbox_password) if sandbox_password else None,
+            sql_sandbox_control_password=(
+                SecretStr(sandbox_control_password) if sandbox_control_password else None
+            ),
         )
     except ValueError as error:
         raise ConfigError(f"Ошибка конфигурации: {error}") from error

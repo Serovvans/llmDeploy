@@ -1,5 +1,7 @@
 """Отказы диалогов и вложений (docs/portal-api.md §5.2, §5.3, §5.8, §1.5)."""
 
+from uuid import UUID
+
 from portal.core.errors import AppError
 from portal.llm.ports import MAX_IMAGES_PER_REQUEST
 
@@ -33,6 +35,16 @@ def message_too_long() -> AppError:
     """Сообщение с вложениями не помещается в запрос к модели."""
     return AppError(
         422, "message_too_long", "Сообщение слишком длинное. Сократите текст или вложения."
+    )
+
+
+def attachment_not_ready(attachment_id: UUID) -> AppError:
+    """Среди вложений вопроса есть запись без готовой расшифровки (§5.3)."""
+    return AppError(
+        409,
+        "attachment_not_ready",
+        "Расшифровка записи не готова: дождитесь её или уберите запись из сообщения.",
+        details={"attachment_id": str(attachment_id)},
     )
 
 

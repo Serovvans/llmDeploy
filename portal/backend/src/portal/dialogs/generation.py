@@ -10,6 +10,7 @@
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Executor
@@ -33,6 +34,7 @@ from portal.dialogs.context import (
     question_turn,
 )
 from portal.dialogs.domain import AnswerMode, Attachment, DialogKind, Message, MessageStatus
+from portal.dialogs.files import AttachmentFiles
 from portal.dialogs.footnotes import cited_numbers
 from portal.dialogs.ports import (
     AnswerPlan,
@@ -48,12 +50,14 @@ from portal.dialogs.watch import (
 )
 from portal.files.ports import DocumentReader, FileStorage
 from portal.kb.ports import (
+    DialogTurn,
     KnowledgeBase,
-    KnowledgeScope,
+    KnowledgeSelection,
     KnowledgeUnavailableError,
     Retrieval,
     Source,
 )
+from portal.kb.tags import TagsError, normalize_tags
 from portal.llm.ports import (
     MAX_IMAGES_PER_REQUEST,
     ChatModel,
@@ -138,11 +142,20 @@ class _Job:
     announce_dangers: Sequence[str] = ()
     channel: EventChannel = field(default_factory=EventChannel)
     outcome: _Outcome = field(default_factory=_Outcome)
-    leftover_files: list[str] = field(default_factory=list)
+    leftovers: list[Attachment] = field(default_factory=list)
 
 
 # Проверки и сохранение вопроса под блокировкой диалога; получает последнее сообщение.
 type _Save = Callable[[DialogUnitOfWork, Message | None], Awaitable[_Job]]
+
+
+def search_history(messages: Sequence[Message]) -> list[DialogTurn]:
+    """История для поиска: только текст вопросов и ответов по порядку (§5.4).
+
+    Размышлений, блоков вложений и найденных мест в ней нет; сообщение с пустым текстом —
+    вопрос из одних вложений или оборванный ответ — пропускается.
+    """
+    return [DialogTurn(message.role, message.content) for message in messages if message.content]
 
 
 def clean_title(raw: str) -> str:
@@ -163,6 +176,7 @@ class GenerationService:
         model: ChatModel,
         estimator: TokenEstimator,
         storage: FileStorage,
+        files: AttachmentFiles,
         reader: DocumentReader,
         document_executor: Executor,
         sessions: SessionAuthenticator,
@@ -187,11 +201,13 @@ class GenerationService:
         self._model = model
         self._estimator = estimator
         self._storage = storage
+        self._files = files
         self._reader = reader
         self._document_executor = document_executor
         self._sessions = sessions
         self._clock = clock
         self._chat = settings.chat
+        self._tags = settings.kb.tags
         self._dialogs = settings.dialogs
         self._llm = settings.llm
         self._recheck_seconds = settings.auth.session.stream_recheck_seconds
@@ -222,6 +238,7 @@ class GenerationService:
         """Сохранить вопрос с пустым ответом и начать формировать ответ."""
         self._check_input(kind, body)
         if kind == "chat":
+            self._check_selection(body.params)
             return await self._start(
                 user.id,
                 dialog_id,
@@ -269,6 +286,10 @@ class GenerationService:
             attachments = [item for item in files if item.id in chosen]
             if sum(item.image_count for item in attachments) > MAX_IMAGES_PER_REQUEST:
                 raise errors.too_many_images()
+            for item in attachments:
+                # Запись идёт в вопрос текстом расшифровки: без него отправлять нечего (§5.3).
+                if item.transcription_status not in (None, "ready"):
+                    raise errors.attachment_not_ready(item.id)
             plan = self._chat_plan(body.content, body.params, attachments)
             self._check_fits(plan)
 
@@ -284,7 +305,7 @@ class GenerationService:
             for item in leftovers:
                 await uow.dialogs.delete_attachment(user.id, item.id)
             job = _Job(user.id, session_id, dialog_id, question, plan, uuid4())
-            job.leftover_files = [item.storage_key for item in leftovers]
+            job.leftovers = leftovers
             return job
 
         return save
@@ -323,7 +344,9 @@ class GenerationService:
                         **question.params,
                         "schema_id": None if schema_id is None else str(schema_id),
                     }
-                await tool.accept(user.id, dialog_id, question.content, question.params)
+                await tool.accept(
+                    user.id, dialog_id, question.content, question.params, regenerate=True
+                )
                 plan = await tool.plan(user.id, dialog_id, question.content, question.params)
                 await uow.dialogs.set_question_params(user.id, question.id, question.params)
             self._check_fits(plan)
@@ -342,18 +365,40 @@ class GenerationService:
         if not body.content.strip() and not (kind == "chat" and body.attachment_ids):
             raise validation_error([field_error("content", "required")])
 
+    def _check_selection(self, params: Mapping[str, Any]) -> None:
+        """Выбор базы знаний в вопросе чата: набор без повторов, теги — только формат (§5.3).
+
+        Существование тега не проверяется: ответ не должен раскрывать, какие теги есть.
+        """
+        collections: Sequence[str] = params["collections"]
+        if len(set(collections)) != len(collections):
+            raise validation_error([field_error("collections", "invalid_format")])
+        # Правило одно с отбором списка документов: тег, принятый там, годен и здесь.
+        try:
+            normalize_tags(
+                params["tags"],
+                max_count=self._tags.max_selected,
+                max_length=self._tags.max_length,
+            )
+        except TagsError as error:
+            raise validation_error([field_error("tags", error.code)]) from None
+
     def _chat_plan(
         self, content: str, params: Mapping[str, Any], attachments: Sequence[Attachment]
     ) -> AnswerPlan:
         mode: AnswerMode = params["mode"]
-        # Вопрос без текста поиск не запускает (§5.4).
-        searches = params["knowledge"] != "none" and bool(content.strip())
+        # Вопрос без текста и пустой набор коллекций поиск не запускают (§5.4).
+        selection = None
+        if params["collections"] and content.strip():
+            selection = KnowledgeSelection(
+                frozenset(params["collections"]), frozenset(params["tags"])
+            )
         return AnswerPlan(
             system=self._chat.system_prompt,
             question=question_turn(content, attachments),
             effort=_EFFORT[mode],
             max_tokens=int(getattr(self._chat.max_output_tokens, mode)),
-            scope=params["knowledge"] if searches else None,
+            selection=selection,
         )
 
     def _budget(self, plan: AnswerPlan) -> int:
@@ -367,7 +412,7 @@ class GenerationService:
         правила и найденные места заведомо не вытеснят сам вопрос (§5.4).
         """
         budget = self._budget(plan)
-        if plan.scope is not None:
+        if plan.selection is not None:
             budget -= self._knowledge_reserve
         if not fits_alone(plan.system, plan.question, budget, self._estimator):
             raise errors.message_too_long()
@@ -433,9 +478,10 @@ class GenerationService:
                 if kind == "docparse" and await self._summary_blocks(uow, owner_id, dialog_id):
                     return None
                 last = await uow.dialogs.last_message(owner_id, dialog_id)
+                if last is not None and last.id in self._active:
+                    # Ответ ещё формируется либо уже сохранён, но идёт проверка SQL (§5.5).
+                    return None
                 if last is not None and last.status == "streaming":
-                    if last.id in self._active:
-                        return None
                     # Процесс один: «формируется» без живой задачи — это ответ, который
                     # не удалось сохранить. Он прерван, диалог не должен оставаться запертым.
                     await uow.dialogs.interrupt_answer(owner_id, last.id)
@@ -511,27 +557,75 @@ class GenerationService:
             outcome.status, outcome.error_code = "error", "internal_error"
 
         finished = outcome.status in ("complete", "length_limit")
+        interrupted: Interruption | None = None
+        if finished and outcome.sql_check is not None:
+            # Текст ответа получен целиком и сохранён; дальше — только проверка (§5.5, шаг 6).
+            channel.emit("sql_check", outcome.sql_check)
+            if job.tool is not None and job.plan.sql_test_schema is not None:
+                interrupted = await self._test_run(job, job.tool)
         if title_task is not None:
-            if finished:
+            if finished and interrupted is None:
                 await asyncio.wait({title_task}, timeout=self._dialogs.title_wait_seconds)
             title_task.cancel()
             await asyncio.gather(title_task, return_exceptions=True)
-        if finished:
-            if outcome.sql_check is not None:
-                channel.emit("sql_check", outcome.sql_check)
+        if interrupted is not None:
+            # Проверка оборвана; ответ уже сохранён со своим состоянием и остаётся им. Поток,
+            # закрытый клиентом, завершающего события не получает (§6.2).
+            if interrupted != "stopped":
+                channel.emit(
+                    "error", {"code": interrupted, "message": _ERROR_MESSAGES[interrupted]}
+                )
+        elif finished:
             channel.emit("done", {"status": outcome.status})
         elif outcome.status == "error" and outcome.error_code is not None:
             code = outcome.error_code
             channel.emit("error", {"code": code, "message": _ERROR_MESSAGES[code]})
+
+    async def _test_run(self, job: _Job, tool: DialogTool) -> Interruption | None:
+        """Проверить запросы сохранённого ответа на тестовых данных (§5.5, шаг 6; §7.4).
+
+        Срок ответа на проверку не действует; наблюдение за соединением, сессией и
+        диалогом продолжается. Возвращает причину обрыва. Итог пишется в `sql_run` ответа
+        один раз; сбой самой проверки ответу не мешает — `sql_run` остаётся `null`.
+        """
+        latest: list[Mapping[str, Any]] = []
+
+        def report(state: Mapping[str, Any]) -> None:
+            latest[:] = [state]
+            job.channel.emit("sql_run", state)
+
+        watch = StreamWatch(
+            job.channel,
+            self._sessions,
+            job.session_id,
+            lambda: self._answer_exists(job),
+            math.inf,
+            self._recheck_seconds,
+        )
+        try:
+            _, reason = await watch.result(
+                tool.test_run(job.owner_id, job.plan, job.outcome.content, report)
+            )
+        except Exception as error:
+            self._log_failure("sql test run failed", error)
+            return None
+        finally:
+            watch.close()
+        if reason != "dialog_deleted" and latest:
+            await self._persist(
+                "sql run not saved",
+                lambda uow: uow.dialogs.set_sql_run(job.owner_id, job.answer_id, latest[0]),
+            )
+        return reason
 
     async def _drop_leftovers(self, job: _Job) -> None:
         """Удалить файлы неотправленных остатков; их строки удалены вместе с вопросом.
 
         Сбой здесь ответу не мешает: файл без строки никому не виден.
         """
-        for key in job.leftover_files:
+        for item in job.leftovers:
             try:
-                await self._storage.delete(key)
+                await self._files.delete(item)
             except OSError as error:
                 self._log_failure("leftover file not deleted", error)
 
@@ -543,34 +637,43 @@ class GenerationService:
         )
 
     async def _save(self, job: _Job) -> bool:
-        """Сохранить ответ; при сбое базы — несколько попыток. `False` — не удалось."""
+        """Сохранить ответ; `False` — не удалось и после повторов."""
         outcome = job.outcome
         cited = None
         if outcome.found is not None:
             # Хранятся только источники, на которые в тексте есть сноска вне кода (§5.5).
             numbers = cited_numbers(outcome.content, [source.n for source in outcome.found])
             cited = [_source_data(source) for source in outcome.found if source.n in numbers]
+        return await self._persist(
+            "answer not saved",
+            lambda uow: uow.dialogs.finish_answer(
+                job.owner_id,
+                job.answer_id,
+                content=outcome.content,
+                status=outcome.status,
+                error_code=outcome.error_code if outcome.status == "error" else None,
+                reasoning=outcome.reasoning or None,
+                reasoning_seconds=outcome.reasoning_seconds,
+                sources=cited,
+                sources_found=None if outcome.found is None else len(outcome.found),
+                sql_check=outcome.sql_check,
+                dropped_messages=outcome.dropped_messages,
+            ),
+        )
+
+    async def _persist(
+        self, failure: str, write: Callable[[DialogUnitOfWork], Awaitable[None]]
+    ) -> bool:
+        """Записать итог в своей транзакции; при сбое базы — несколько попыток (§5.5)."""
         for attempt in range(_SAVE_ATTEMPTS):
             if attempt:
                 await asyncio.sleep(_SAVE_RETRY_SECONDS * attempt)
             try:
                 async with self._uow_factory() as uow:
-                    await uow.dialogs.finish_answer(
-                        job.owner_id,
-                        job.answer_id,
-                        content=outcome.content,
-                        status=outcome.status,
-                        error_code=outcome.error_code if outcome.status == "error" else None,
-                        reasoning=outcome.reasoning or None,
-                        reasoning_seconds=outcome.reasoning_seconds,
-                        sources=cited,
-                        sources_found=None if outcome.found is None else len(outcome.found),
-                        sql_check=outcome.sql_check,
-                        dropped_messages=outcome.dropped_messages,
-                    )
+                    await write(uow)
                 return True
             except Exception as error:
-                self._log_failure("answer not saved", error)
+                self._log_failure(failure, error)
         return False
 
     async def _produce(self, job: _Job) -> None:
@@ -599,8 +702,13 @@ class GenerationService:
         outcome, plan = job.outcome, job.plan
         system = plan.system
         question = plan.question
-        if plan.scope is not None:
-            retrieval = await self._search(job, plan.scope, watch)
+        async with self._uow_factory() as uow:
+            earlier = await uow.dialogs.history(job.owner_id, job.dialog_id, job.question.position)
+            files = await uow.dialogs.message_attachments(
+                job.owner_id, [message.id for message in earlier if message.role == "user"]
+            )
+        if plan.selection is not None:
+            retrieval = await self._search(job, plan.selection, search_history(earlier), watch)
             if retrieval is None:
                 return
             # Правила — в конец системного сообщения; найденное — первым блоком вопроса,
@@ -609,11 +717,6 @@ class GenerationService:
             if retrieval.context:
                 question = Turn("user", f"{retrieval.context}\n\n{question.text}", question.images)
 
-        async with self._uow_factory() as uow:
-            earlier = await uow.dialogs.history(job.owner_id, job.dialog_id, job.question.position)
-            files = await uow.dialogs.message_attachments(
-                job.owner_id, [message.id for message in earlier if message.role == "user"]
-            )
         history = history_turns(earlier, files)
         budget = self._budget(plan)
         dropped = fit_history(system, history, question, budget, self._estimator)
@@ -640,18 +743,23 @@ class GenerationService:
         outcome.status, outcome.error_code = "error", "message_too_long"
 
     async def _search(
-        self, job: _Job, scope: KnowledgeScope, watch: StreamWatch
+        self,
+        job: _Job,
+        selection: KnowledgeSelection,
+        history: Sequence[DialogTurn],
+        watch: StreamWatch,
     ) -> Retrieval | None:
         """Найти места в базе знаний; `None` — ответа не будет, итог записан.
 
-        Поиск идёт по тексту вопроса как есть, с фильтром доступа по пользователю и
-        области. Остановка, конец сессии и срок прерывают и его.
+        В порт уходят текст вопроса как есть, пользователь из сессии, выбор из параметров
+        вопроса и история диалога — по ней порт сам переписывает уточняющий вопрос (§5.4).
+        Остановка, конец сессии и срок прерывают и поиск.
         """
         outcome = job.outcome
         job.channel.emit("search_started", {})
         try:
             retrieval, reason = await watch.result(
-                self._knowledge.retrieve(job.question.content, job.owner_id, scope)
+                self._knowledge.retrieve(job.question.content, job.owner_id, selection, history)
             )
         except KnowledgeUnavailableError:
             # Ответ без базы знаний сервер не подменяет.
@@ -751,6 +859,8 @@ def _source_data(source: Source) -> dict[str, Any]:
         "document_title": source.document_title,
         "scope": source.scope,
         "page": source.page,
+        "timecode_seconds": source.timecode_seconds,
+        "image_id": None if source.image_id is None else str(source.image_id),
         "fragment_id": str(source.fragment_id),
         "quote": source.quote,
     }

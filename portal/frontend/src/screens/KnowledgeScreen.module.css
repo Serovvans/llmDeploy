@@ -7,15 +7,41 @@
   padding: 16px 24px 24px;
 }
 
+/* В узком окне вкладки остаются одной строкой, а отбор и поиск целиком уходят на вторую — вправо. */
 .toolbar {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
 }
 
+.toolbar > :first-child {
+  flex: none;
+}
+
+.filters {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.tagFilter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 280px;
+}
+
+.note {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
 .title {
-  max-width: 380px;
+  max-width: 320px;
 }
 
 .open,

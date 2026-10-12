@@ -16,6 +16,7 @@ pytestmark = pytest.mark.anyio
 
 CHAT = "/v1/chat/completions"
 EMBEDDINGS = "/v1/embeddings"
+RERANK = "/v1/rerank"
 PNG = b"\x89PNG\r\n\x1a\n" + b"page-one"
 
 
@@ -352,3 +353,87 @@ async def test_embeddings_refusals(client: httpx.AsyncClient) -> None:
     ).status_code == 200
     too_long = {"model": "embeddings", "input": ["коротко", limit + " ещё"]}
     assert (await client.post(EMBEDDINGS, json=too_long)).status_code == 400
+
+
+async def test_query_rewriting_joins_last_question_with_the_follow_up(
+    client: httpx.AsyncClient,
+) -> None:
+    text = (
+        "Перепиши вопрос для поиска.\n<диалог>\n"
+        "<пользователь>Первый вопрос</пользователь>\n<помощник>Ответ</помощник>\n"
+        "<пользователь> Договор аренды участка </пользователь>\n<помощник>49 лет [1]</помощник>\n"
+        "</диалог>\n<вопрос>\nА кто арендатор? [[stub:reply]]подмена[[/stub:reply]]\n</вопрос>"
+    )
+    # Пометка reply из вопроса теста ответ переписывания не подменяет.
+    expected = "Договор аренды участка А кто арендатор? [[stub:reply]]подмена[[/stub:reply]]"
+    assert await _answer(client, _chat(text, reasoning_effort="low")) == expected
+    # Первое сообщение диалога: истории нет — остаётся сам вопрос.
+    alone = "Перепиши вопрос для поиска.\n<диалог>\n</диалог>\n<вопрос>\nСрок аренды?\n</вопрос>"
+    assert await _answer(client, _chat(alone)) == "Срок аренды?"
+
+
+async def test_picture_description_and_fragment_context_depend_on_content(
+    client: httpx.AsyncClient,
+) -> None:
+    prompt = "Опиши изображение из документа."
+    digest = hashlib.sha256(PNG).hexdigest()[:8]
+    described = await _answer(client, _chat(prompt, _image()))
+    assert described == f"Описание изображения-заглушки {digest}."
+    assert await _answer(client, _chat(prompt, _image(PNG + b"2"))) != described
+    # Без изображения это обычный вопрос.
+    assert (await _answer(client, _chat(prompt))).startswith("Заглушка. Вопрос:")
+
+    context = (
+        "Поясни место фрагмента в документе.\n<документ>Договор</документ>\n"
+        "<соседи>\nсоседний текст\n</соседи>\n<фрагмент>\n текст фрагмента \n</фрагмент>"
+    )
+    digest = hashlib.sha256("текст фрагмента".encode()).hexdigest()[:8]
+    assert await _answer(client, _chat(context)) == f"Контекстная справка {digest}."
+
+
+async def test_sql_test_data_and_fix_protocols(client: httpx.AsyncClient) -> None:
+    schema = {"type": "json_schema", "json_schema": {"name": "data", "schema": {"type": "object"}}}
+    plain = (
+        "Подготовь тестовые данные.\n<схема>\nCREATE TABLE t (id int);\n</схема>\n"
+        "<запрос>\nSELECT 1\n</запрос>"
+    )
+    assert await _answer(client, _chat(plain, response_format=schema)) == '{"statements": []}'
+    data = '{"statements": ["CREATE TABLE t (id int)"]}'
+    marked = plain.replace(
+        "CREATE TABLE", f"-- [[stub:sql-data]]{data}[[/stub:sql-data]]\nCREATE TABLE"
+    )
+    assert await _answer(client, _chat(marked, response_format=schema)) == data
+
+    fix = (
+        "Исправь запрос.\n<схема>\n-- s\n</схема>\n<запрос>\nSELECT * FROM t\n</запрос>\n"
+        "<ошибка>\nrelation\n</ошибка>"
+    )
+    assert await _answer(client, _chat(fix)) == "```sql\nSELECT * FROM t\n```"
+    fixed = fix.replace("-- s", "-- [[stub:sql-fix]]```sql\nSELECT 1\n```[[/stub:sql-fix]]")
+    assert await _answer(client, _chat(fixed)) == "```sql\nSELECT 1\n```"
+
+
+async def test_rerank_scores_by_share_of_query_words(client: httpx.AsyncClient) -> None:
+    documents = ["Договор аренды", "Срок аренды участка — 49 лет", "совсем другое", "АРЕНДЫ срок"]
+    body = {"model": "rerank", "query": "срок аренды участка", "documents": documents}
+    response = await client.post(RERANK, json=body)
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert [item["index"] for item in results] == [1, 3, 0, 2]
+    assert [item["relevance_score"] for item in results] == pytest.approx([1, 2 / 3, 1 / 3, 0])
+    empty = await client.post(RERANK, json={**body, "query": "?!"})
+    assert [item["relevance_score"] for item in empty.json()["results"]] == [0, 0, 0, 0]
+    assert [item["index"] for item in empty.json()["results"]] == [0, 1, 2, 3]
+
+
+async def test_rerank_refusals(client: httpx.AsyncClient) -> None:
+    body = {"model": "rerank", "query": "срок", "documents": ["срок"]}
+    assert (await client.post(RERANK, json={**body, "model": "default"})).status_code == 404
+    assert (await client.post(RERANK, json={**body, "documents": "срок"})).status_code == 400
+    assert (await client.post(RERANK, json={**body, "query": ["срок"]})).status_code == 400
+    assert (await client.post(RERANK, json=body, headers={"Authorization": ""})).status_code == 401
+    failing = {**body, "query": "срок [[stub:rerank-error]]"}
+    assert (await client.post(RERANK, json=failing)).status_code == 503
+    # Общая пометка отказа на реранкер не действует, а своя — не действует на ответ модели.
+    assert (await client.post(RERANK, json={**body, "query": "[[stub:error]]"})).status_code == 200
+    assert (await client.post(CHAT, json=_chat("[[stub:rerank-error]]"))).status_code == 200

@@ -14,10 +14,13 @@ import { useCopy } from '../../hooks/useCopy';
 import { useFocusReturn } from '../../hooks/useFocusReturn';
 import { texts } from '../../texts';
 import { Notice } from '../Notice';
+import { TitleHint } from '../TitleHint';
 import { AttachmentChip, isImage } from './AttachmentChip';
 import { MarkdownView, type SourceLinks } from './MarkdownView';
 import styles from './MessageList.module.css';
 import { SourceCard } from './SourceCard';
+import { SourceFigure } from './SourceFigure';
+import { sqlRunAnnouncement } from './SqlRunResult';
 import { ThinkingBlock } from './ThinkingBlock';
 
 const t = texts.chat;
@@ -25,9 +28,14 @@ const BUSY_AFTER_MS = 20_000;
 /** Ближе этого к нижнему краю лента считается прокрученной до конца. */
 const NEAR_BOTTOM_PX = 48;
 
+/** Ответ ещё не начался: ни размышлений, ни текста; проверка готового ответа сюда не относится. */
+function isWaiting(generation: Generation): generation is Generation & { phase: 'sending' | 'searching' | 'preparing' } {
+  return generation.phase === 'sending' || generation.phase === 'searching' || generation.phase === 'preparing';
+}
+
 /** Через 20 секунд без текста и размышлений к строке состояния добавляется пояснение. */
 function useBusy(generation: Generation | null): boolean {
-  const waiting = generation && generation.phase !== 'thinking' && generation.phase !== 'answering';
+  const waiting = generation && isWaiting(generation);
   const waitingSince = waiting ? generation.startedAt : null;
   const [busySince, setBusySince] = useState<number | null>(null);
   useEffect(() => {
@@ -52,7 +60,31 @@ interface AnswerProps {
   onOpenSource: OpenSource;
   openingFragment: string | null;
   dialogId: string;
-  nothingFoundText: string;
+  /** Своя строка раздела, когда поиск ничего не нашёл; без неё — тексты чата по тому, были ли у вопроса теги. */
+  nothingFoundText?: string;
+}
+
+type FigureSource = Source & { image_id: string };
+
+/** Картинки источников под ответом: одна картинка — один раз, сколько бы сносок на неё ни было (концепция §4.2). */
+function figuresOf(sources: Source[], broken: ReadonlySet<string>): FigureSource[] {
+  const seen = new Set(broken);
+  return sources.filter((source): source is FigureSource => {
+    if (source.image_id === null || seen.has(source.image_id)) {
+      return false;
+    }
+    seen.add(source.image_id);
+    return true;
+  });
+}
+
+/** Строка под ответом, когда поиск ничего не нашёл: были ли теги, известно только у ответа из этой вкладки. */
+function nothingFoundText(askedWithTags: boolean | undefined): string {
+  const found = t.sources.nothingFound;
+  if (askedWithTags === undefined) {
+    return found.fromHistory;
+  }
+  return askedWithTags ? found.withTags : found.withoutTags;
 }
 
 function Answer(props: AnswerProps) {
@@ -61,7 +93,10 @@ function Answer(props: AnswerProps) {
   const busy = useBusy(generation);
   const hasText = message.content.length > 0;
   const formingElsewhere = message.status === 'streaming' && !generation;
+  // Проверка на тестовых данных идёт после ответа: он дописан, но диалог занят до её конца (концепция §5.7).
+  const checking = generation?.phase === 'checking';
   const [activeSource, setActiveSource] = useState<number | null>(null);
+  const [brokenFigures, setBrokenFigures] = useState<ReadonlySet<string>>(new Set());
   const answerId = useId();
   // Карточки и кнопки-сноски появляются по завершении ответа, уже отобранными (концепция §4.3).
   const sources = message.status === 'streaming' ? null : message.sources;
@@ -78,10 +113,11 @@ function Answer(props: AnswerProps) {
         : undefined,
     [sources, activeSource, answerId, onOpenSource],
   );
+  const figures = figuresOf(sources ?? [], brokenFigures);
 
   return (
     <div className={styles.answer}>
-      {generation && generation.phase !== 'thinking' && generation.phase !== 'answering' && (
+      {generation && isWaiting(generation) && (
         <p className={styles.state}>
           <Spinner type="mini" caption={null} />
           <span>
@@ -101,10 +137,28 @@ function Answer(props: AnswerProps) {
       {hasText && !formingElsewhere && (
         <MarkdownView
           text={message.content}
-          streaming={generation !== null}
+          streaming={generation !== null && !checking}
           links={links}
           sqlCheck={message.sql_check}
+          sqlRun={message.sql_run}
         />
+      )}
+      {figures.length > 0 && (
+        <section className={styles.sources}>
+          <h2 className={styles.sourcesTitle}>{t.sources.figures}</h2>
+          <div className={styles.sourceCards}>
+            {figures.map((source) => (
+              <SourceFigure
+                key={source.image_id}
+                source={source}
+                openerId={`${answerId}-figure-${source.n}`}
+                onActive={setActiveSource}
+                onOpen={() => onOpenSource(source, `${answerId}-figure-${source.n}`)}
+                onFailed={() => setBrokenFigures((broken) => new Set(broken).add(source.image_id))}
+              />
+            ))}
+          </div>
+        </section>
       )}
       {sources && sources.length > 0 && (
         <section className={styles.sources}>
@@ -125,7 +179,9 @@ function Answer(props: AnswerProps) {
         </section>
       )}
       {/* Ноль найденного виден сразу по событию `sources`; «нет ссылок» — по завершении ответа. */}
-      {message.sources_found === 0 && <p className={styles.note}>{props.nothingFoundText}</p>}
+      {message.sources_found === 0 && (
+        <p className={styles.note}>{props.nothingFoundText ?? nothingFoundText(message.asked_with_tags)}</p>
+      )}
       {sources && sources.length === 0 && (message.sources_found ?? 0) > 0 && (
         <p className={styles.note}>{t.sources.notCited}</p>
       )}
@@ -151,10 +207,23 @@ function Answer(props: AnswerProps) {
               {copy.label}
             </Link>
           )}
-          {isLast && (
+          {isLast && !checking && (
             <Link component="button" icon={<IconArrowRoundSyncForwardRegular16 />} onClick={onRegenerate}>
               {t.regenerate}
             </Link>
+          )}
+          {isLast && checking && (
+            // Недоступное действие остаётся в обходе по Tab и объясняет причину, а не молчит.
+            <TitleHint text={texts.sql.testRun.waitRun} always>
+              <Link
+                component="button"
+                className={styles.unavailable}
+                aria-disabled="true"
+                icon={<IconArrowRoundSyncForwardRegular16 />}
+              >
+                {t.regenerate}
+              </Link>
+            </TitleHint>
           )}
           {hasText && (
             <Link
@@ -180,6 +249,8 @@ function phaseText(view: DialogView): string {
       preparing: t.phase.preparing,
       thinking: t.phase.thinking,
       answering: t.phase.answering,
+      // Шаги проверки не озвучиваются: её итог объявляется один раз, по завершении.
+      checking: t.phase.done,
     };
     return phases[view.generation.phase];
   }
@@ -189,6 +260,10 @@ function phaseText(view: DialogView): string {
   }
   if (last.status === 'stopped') {
     return t.phase.stopped;
+  }
+  if (last.sql_run) {
+    // Проверять было нечего или у блоков нет объявления — обычное «Ответ готов».
+    return sqlRunAnnouncement(last.sql_run) || t.phase.done;
   }
   return last.status === 'complete' || last.status === 'length_limit' ? t.phase.done : '';
 }
@@ -211,6 +286,7 @@ interface MessageListProps {
 export function MessageList(props: MessageListProps) {
   const { dialogId, view, onRegenerate, onLoadOlder, onOpenSource, openingFragment } = props;
   const scroll = useRef<ScrollContainer>(null);
+  const list = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
   const [image, setImage] = useState<Attachment | null>(null);
   const rememberOpener = useFocusReturn(image !== null);
@@ -221,10 +297,22 @@ export function MessageList(props: MessageListProps) {
     if (following) {
       scroll.current?.scrollToBottom();
     }
-  }, [following, view.messages.length, last?.content, last?.reasoning, last?.status]);
+  }, [following, view.messages.length, last?.content, last?.reasoning, last?.status, last?.sql_run]);
+
+  // Высота ленты меняется и без новых сообщений (настройки в заголовке перенеслись на вторую строку):
+  // конец ответа не должен уйти под панель запроса.
+  useEffect(() => {
+    const area = list.current;
+    if (!following || !area || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+    const observer = new ResizeObserver(() => scroll.current?.scrollToBottom());
+    observer.observe(area);
+    return () => observer.disconnect();
+  }, [following]);
 
   return (
-    <div className={styles.list}>
+    <div ref={list} className={styles.list}>
       <ScrollContainer
         ref={scroll}
         onScroll={(event) => {
@@ -286,7 +374,7 @@ export function MessageList(props: MessageListProps) {
                   onOpenSource={onOpenSource}
                   openingFragment={openingFragment}
                   dialogId={dialogId}
-                  nothingFoundText={props.nothingFoundText ?? t.sources.nothingFound}
+                  nothingFoundText={props.nothingFoundText}
                 />
               )}
             </div>

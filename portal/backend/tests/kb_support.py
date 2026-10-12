@@ -1,9 +1,12 @@
 """Помощники тестов базы знаний: стенд воркера на локальном Qdrant и подменных портах."""
 
+import asyncio
 import hashlib
 import io
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -11,18 +14,58 @@ import httpx
 from llm_stub import replies
 from qdrant_client import AsyncQdrantClient
 
-from portal.core.settings import KbSettings, Settings
+from portal.core.settings import KbSettings, KbWorkerSettings, Settings
+from portal.dialogs.transcripts import SqlAttachmentTranscripts
+from portal.files.media import DiskMediaStorage
+from portal.files.ports import RecordingType
 from portal.files.reader import ContentDocumentReader
 from portal.files.storage import DiskFileStorage
+from portal.kb.explaining import Contextualizer, FragmentExplainer
+from portal.kb.images import ImageCollector
 from portal.kb.indexing import Indexer
-from portal.kb.ports import EmbeddingsUnavailableError, RecognitionFailedError
+from portal.kb.ports import (
+    EmbeddingsUnavailableError,
+    KnowledgeSelection,
+    RecognitionFailedError,
+    RerankUnavailableError,
+)
 from portal.kb.qdrant import QdrantVectorIndex
+from portal.kb.recordings import RecordingProcessor
 from portal.kb.reindex import Reindexer
 from portal.kb.repositories import SqlKbUnitOfWorkFactory
+from portal.kb.reprocess import Reprocessor
 from portal.kb.retrieval import KnowledgeRetriever
+from portal.kb.rewrite import QueryRewriter
 from portal.llm.estimator import RatioTokenEstimator
+from portal.llm.ports import (
+    ChatRequest,
+    ContentDelta,
+    Finished,
+    ImagePart,
+    ReasoningDelta,
+    TextPart,
+)
+from portal.media.files import stale_recording_keys
+from portal.media.ports import (
+    AudioInfo,
+    AudioToolsError,
+    MediaRejectedError,
+    RejectionCode,
+    SpeechRecognitionError,
+    SpeechSegment,
+)
+from portal.media.stub import StubSpeechRecognizer
+from portal.media.transcription import SpeechPool
 from portal.worker.loop import Worker
+from portal.worker.sweep import RecordingJanitor
+from portal.worker.transcribe import AttachmentTranscriber
 from tests.support import Portal
+
+# Выбор базы знаний в вопросе: прежние «общая», «общая и личная», документация CoGIS и все три.
+SHARED = KnowledgeSelection(frozenset({"shared"}))
+SHARED_AND_PERSONAL = KnowledgeSelection(frozenset({"shared", "personal"}))
+ALL_COLLECTIONS = KnowledgeSelection(frozenset({"shared", "personal", "ministries"}))
+COGIS = KnowledgeSelection(frozenset({"shared"}), cogis_only=True)
 
 
 class WordHashEmbedder:
@@ -69,6 +112,125 @@ class ScriptedRecognizer:
         ]
 
 
+class ProtocolModel:
+    """Подмена порта `ChatModel` для протоколов 0.15: отвечает по правилам заглушки стенда.
+
+    Переписывание — последний вопрос пользователя из истории и новый вопрос; пояснение —
+    «Контекстная справка <хеш фрагмента>.». `failures` — сколько ближайших запросов
+    закончатся сбоем `error`; `fail_when` — сбоем кончается всякий запрос с этой
+    подстрокой; `gate` — запрос ждёт, пока тест его не отпустит.
+    """
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self.failures = 0
+        self.fail_when: str | None = None
+        self.error: Exception = RuntimeError("model down")
+        self.answer: str | None = None
+        self.gate: asyncio.Event | None = None
+
+    def stream(
+        self, request: ChatRequest
+    ) -> AsyncIterator[ReasoningDelta | ContentDelta | Finished]:
+        raise NotImplementedError("в базе знаний модель вызывается только без потока")
+
+    async def complete(self, request: ChatRequest) -> str:
+        parts = request.messages[-1].parts
+        text = "".join(p.text for p in parts if isinstance(p, TextPart))
+        images = [p.data for p in parts if isinstance(p, ImagePart)]
+        self.prompts.append(text)
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.fail_when is not None and self.fail_when in text:
+            raise self.error
+        if self.failures:
+            self.failures -= 1
+            raise self.error
+        if self.answer is not None:
+            return self.answer
+        reply = replies.protocol_reply(replies.UserTurn(text, images))
+        assert reply is not None, "запрос не по протоколу §12.1"
+        return reply
+
+
+class WordOverlapReranker:
+    """Подмена порта `Reranker`: оценки заглушки стенда — доля слов запроса в документе.
+
+    `reverse` — оценка растёт с номером документа: реранкер переворачивает порядок.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str]]] = []
+        self.failures = 0
+        self.reverse = False
+
+    async def scores(self, query: str, documents: Sequence[str]) -> list[float]:
+        if self.failures:
+            self.failures -= 1
+            raise RerankUnavailableError
+        self.calls.append((query, list(documents)))
+        if self.reverse:
+            return [float(position) for position in range(len(documents))]
+        ranked = replies.rerank(query, documents)
+        by_index = {item["index"]: item["relevance_score"] for item in ranked}
+        return [by_index[index] for index in range(len(documents))]
+
+
+class FakeAudioTools:
+    """Подмена порта `AudioTools`: ffmpeg не запускается, итог задаёт тест.
+
+    `duration_ms` — длительность любой записи; `rejection` — отказ проверки; `failures` —
+    сколько ближайших извлечений звука кончатся сбоем.
+    """
+
+    def __init__(self) -> None:
+        self.duration_ms = 70_000
+        self.rejection: RejectionCode | None = None
+        self.failures = 0
+        self.probed: list[tuple[Path, RecordingType]] = []
+
+    async def probe(self, source: Path, media_type: RecordingType) -> AudioInfo:
+        assert source.is_file() and list(source.parent.iterdir()) == [source]
+        self.probed.append((source, media_type))
+        if self.rejection is not None:
+            raise MediaRejectedError(self.rejection)
+        return AudioInfo(self.duration_ms)
+
+    async def to_wav(self, source: Path, media_type: RecordingType, target: Path) -> None:
+        if self.failures:
+            self.failures -= 1
+            raise AudioToolsError("ffmpeg")
+        target.write_bytes(b"RIFF-wav")
+
+    async def to_opus(self, wav: Path, target: Path) -> None:
+        target.write_bytes(b"OggS" + bytes(range(96)))
+
+
+class ScriptedSpeech(StubSpeechRecognizer):
+    """Подмена порта `SpeechRecognizer`: текст заглушки стенда, сбои и тишина по сценарию.
+
+    `failures` — сколько ближайших вызовов кончатся сбоем; `fail_from_ms` — сбоем кончается
+    всякий участок записи, начинающийся не раньше этого момента.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int, int]] = []
+        self.failures = 0
+        self.fail_from_ms: int | None = None
+        self.silent = False
+
+    def transcribe(
+        self, wav: Path, start_ms: int, end_ms: int, threads: int
+    ) -> list[SpeechSegment]:
+        if self.failures:
+            self.failures -= 1
+            raise SpeechRecognitionError
+        if self.fail_from_ms is not None and start_ms >= self.fail_from_ms:
+            raise SpeechRecognitionError
+        self.calls.append((start_ms, end_ms, threads))
+        return [] if self.silent else super().transcribe(wav, start_ms, end_ms, threads)
+
+
 @dataclass
 class KbBench:
     """Портал, воркер и поиск на одной тестовой базе и одном локальном Qdrant."""
@@ -80,11 +242,37 @@ class KbBench:
     uow: SqlKbUnitOfWorkFactory
     embedder: WordHashEmbedder
     recognizer: ScriptedRecognizer
+    model: ProtocolModel
+    reranker: WordOverlapReranker
     reader: ContentDocumentReader
+    media: DiskMediaStorage
+    audio: FakeAudioTools
+    speech: ScriptedSpeech
+    transcripts: SqlAttachmentTranscripts
+    janitor: RecordingJanitor
+    transcriber: AttachmentTranscriber
     indexer: Indexer
+    contextualizer: Contextualizer
     worker: Worker
     reindexer: Reindexer
+    reprocessor: Reprocessor
+    estimator: RatioTokenEstimator
     knowledge: KnowledgeRetriever
+
+    def retriever(
+        self, settings: KbSettings | None = None, index: QdrantVectorIndex | None = None
+    ) -> KnowledgeRetriever:
+        """Поиск стенда с другими настройками или другой коллекцией."""
+        settings = settings or self.settings
+        return KnowledgeRetriever(
+            self.uow,
+            self.embedder,
+            index or self.index,
+            QueryRewriter(self.model, settings.rewrite),
+            self.reranker,
+            self.estimator,
+            settings,
+        )
 
     async def drain(self) -> int:
         """Выполнить все доступные сейчас задания по одному; вернуть их число."""
@@ -93,13 +281,42 @@ class KbBench:
             done += 1
         return done
 
+    def make_worker(
+        self,
+        *,
+        contextualizer: Contextualizer | None = None,
+        index: QdrantVectorIndex | None = None,
+        settings: KbWorkerSettings | None = None,
+    ) -> Worker:
+        """Воркер стенда с другим этапом контекста, другой коллекцией или настройками."""
+        return Worker(
+            self.uow,
+            self.indexer,
+            contextualizer or self.contextualizer,
+            self.transcriber,
+            self.transcripts,
+            self.media,
+            self.janitor,
+            index or self.index,
+            self.portal.clock,
+            settings or self.settings.worker,
+        )
+
+    def old_files(self, modified_before: datetime) -> list[str]:
+        """Файлы записей на диске, которые уборка считает старыми."""
+        return stale_recording_keys(self.portal.container.settings.files.root, modified_before)
+
     async def points(self) -> int:
         """Сколько точек в коллекции."""
         return (await self.qdrant.count(self.settings.qdrant.collection)).count
 
 
 def kb_settings(settings: Settings, tmp_path: Path, **kb: Any) -> Settings:
-    """Настройки теста: отметка воркера во временном каталоге, повторы без пауз."""
+    """Настройки теста: отметка воркера во временном каталоге, повторы без пауз.
+
+    Задание `context` по умолчанию выключено: тесты очереди считают задания индексации.
+    Тесты пояснений включают его сами (`context={"enabled": True}`).
+    """
     worker = settings.kb.worker.model_copy(
         update={
             "heartbeat_file": tmp_path / "worker.heartbeat",
@@ -107,15 +324,17 @@ def kb_settings(settings: Settings, tmp_path: Path, **kb: Any) -> Settings:
             **kb.pop("worker", {}),
         }
     )
+    explained = settings.kb.context.model_copy(update={"enabled": False, **kb.pop("context", {})})
     return settings.model_copy(
-        update={"kb": settings.kb.model_copy(update={"worker": worker, **kb})}
+        update={"kb": settings.kb.model_copy(update={"worker": worker, "context": explained, **kb})}
     )
 
 
 async def make_bench(portal: Portal, settings: Settings) -> KbBench:
     """Собрать воркер и поиск вручную: порты эмбеддингов и распознавания подменены."""
     kb = settings.kb
-    qdrant = AsyncQdrantClient(location=":memory:")
+    # Тот же локальный Qdrant, что у приложения: правка тегов из API видна поиску стенда.
+    qdrant = portal.container.qdrant
     index = QdrantVectorIndex(qdrant, kb)
     await index.ensure_collection()
     uow = SqlKbUnitOfWorkFactory(portal.container.engine, portal.clock)
@@ -124,10 +343,53 @@ async def make_bench(portal: Portal, settings: Settings) -> KbBench:
     reader = ContentDocumentReader(
         settings.files, settings.llm.image_max_side_px, kb.indexing.document_max_chars + 1
     )
+    storage = DiskFileStorage(settings.files.root)
+    media_settings = portal.container.settings.media
+    media = DiskMediaStorage(settings.files.root, media_settings)
+    audio = FakeAudioTools()
+    speech = ScriptedSpeech()
+    asr = media_settings.asr
+    model = ProtocolModel()
+    background_llm = asyncio.Semaphore(kb.worker.background_llm_parallel)
+    llm = settings.llm.model_copy(update={"recognition_retry_pause_seconds": 0})
     indexer = Indexer(
-        uow, DiskFileStorage(settings.files.root), reader, recognizer, embedder, index, kb, 2
+        uow,
+        storage,
+        media,
+        reader,
+        recognizer,
+        ImageCollector(uow, storage, reader, model, background_llm, kb.images, llm),
+        RecordingProcessor(
+            uow, media, audio, SpeechPool(speech, asr.threads - asr.chat_threads), media_settings
+        ),
+        embedder,
+        index,
+        portal.clock,
+        kb,
+        2,
     )
     estimator = RatioTokenEstimator(settings.llm.chars_per_token, settings.llm.tokens_per_image)
+    reranker = WordOverlapReranker()
+    explainer = FragmentExplainer(model, estimator, kb.context, background_llm)
+    contextualizer = Contextualizer(uow, explainer, embedder, index, kb)
+    transcripts = SqlAttachmentTranscripts(portal.container.engine)
+    janitor = RecordingJanitor(
+        uow,
+        media,
+        transcripts,
+        partial(stale_recording_keys, settings.files.root),
+        portal.clock,
+        media_settings,
+    )
+    transcriber = AttachmentTranscriber(
+        uow,
+        transcripts,
+        media,
+        audio,
+        SpeechPool(speech, asr.chat_threads),
+        portal.clock,
+        media_settings,
+    )
     return KbBench(
         portal=portal,
         settings=kb,
@@ -136,11 +398,35 @@ async def make_bench(portal: Portal, settings: Settings) -> KbBench:
         uow=uow,
         embedder=embedder,
         recognizer=recognizer,
+        model=model,
+        reranker=reranker,
         reader=reader,
+        media=media,
+        audio=audio,
+        speech=speech,
+        transcripts=transcripts,
+        janitor=janitor,
+        transcriber=transcriber,
         indexer=indexer,
-        worker=Worker(uow, indexer, index, portal.clock, kb.worker),
+        contextualizer=contextualizer,
+        worker=Worker(
+            uow,
+            indexer,
+            contextualizer,
+            transcriber,
+            transcripts,
+            media,
+            janitor,
+            index,
+            portal.clock,
+            kb.worker,
+        ),
         reindexer=Reindexer(uow, index, portal.clock),
-        knowledge=KnowledgeRetriever(uow, embedder, index, estimator, kb),
+        reprocessor=Reprocessor(uow, portal.clock),
+        estimator=estimator,
+        knowledge=KnowledgeRetriever(
+            uow, embedder, index, QueryRewriter(model, kb.rewrite), reranker, estimator, kb
+        ),
     )
 
 
@@ -150,12 +436,13 @@ async def add_document(
     content: bytes,
     scope: str = "shared",
     is_cogis: bool = False,
+    tags: Sequence[str] = (),
 ) -> httpx.Response:
     """Загрузить документ в базу знаний."""
     return await client.post(
         "/api/kb/documents",
         files={"file": (name, content, "application/octet-stream")},
-        data={"scope": scope, "is_cogis": "true" if is_cogis else "false"},
+        data={"scope": scope, "is_cogis": "true" if is_cogis else "false", "tags": list(tags)},
     )
 
 
@@ -165,9 +452,10 @@ async def added(
     content: bytes,
     scope: str = "shared",
     is_cogis: bool = False,
+    tags: Sequence[str] = (),
 ) -> str:
     """Загрузить документ и вернуть его идентификатор."""
-    response = await add_document(client, name, content, scope, is_cogis)
+    response = await add_document(client, name, content, scope, is_cogis, tags)
     assert response.status_code == 201, response.text
     document_id: str = response.json()["id"]
     return document_id

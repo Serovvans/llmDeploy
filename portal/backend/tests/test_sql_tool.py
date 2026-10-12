@@ -16,7 +16,14 @@ DDL = "CREATE TABLE parcels (id int, cadastral_number text, area numeric);"
 
 
 def _body(content: str, action: str = "write", **extra: Any) -> dict[str, Any]:
-    return {"content": content, "action": action, "dialect": "postgres", "schema_id": None, **extra}
+    return {
+        "content": content,
+        "action": action,
+        "dialect": "postgres",
+        "schema_id": None,
+        "test_run": False,
+        **extra,
+    }
 
 
 async def _schema(client: httpx.AsyncClient, name: str = "Кадастр", content: str = DDL) -> str:
@@ -171,7 +178,9 @@ async def test_write_action_uses_dialect_and_schema_and_checks_the_answer(portal
     # При действии «написать» вопрос не проверяется.
     assert question["sql_dangers"] is None and question["sql_check"] is None
     stored = await portal.rows("SELECT params FROM messages WHERE role = 'user'")
-    assert stored[0].params == {"action": "write", "dialect": "postgres", "schema_id": schema_id}
+    assert stored[0].params == {
+        "action": "write", "dialect": "postgres", "schema_id": schema_id, "test_run": False,
+    }  # fmt: skip
     assert (await client.get(f"/api/dialogs/{dialog_id}")).json()["title"] == "Название от модели"
 
 
@@ -293,7 +302,15 @@ async def test_sql_message_body_is_validated_after_the_dialog_is_found(portal: P
     client = await portal.employee()
     dialog_id = await new_tool_dialog(client, "sql")
     cases: list[tuple[dict[str, Any], tuple[str, str]]] = [
-        ({"content": "x", "action": "write", "dialect": "postgres"}, ("schema_id", "required")),
+        (
+            {"content": "x", "action": "write", "dialect": "postgres", "test_run": False},
+            ("schema_id", "required"),
+        ),
+        (
+            {"content": "x", "action": "write", "dialect": "postgres", "schema_id": None},
+            ("test_run", "required"),
+        ),
+        (_body("x", test_run="yes"), ("test_run", "invalid_format")),
         (_body("x", "translate"), ("action", "unknown_value")),
         (_body("x", dialect="oracle"), ("dialect", "unknown_value")),
         (_body("  "), ("content", "required")),

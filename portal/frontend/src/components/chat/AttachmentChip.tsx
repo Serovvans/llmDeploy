@@ -1,11 +1,13 @@
 import { IconDocTextRegular16 } from '@skbkontur/icons/IconDocTextRegular16';
+import { IconMediaAudioVolumeARegular16 } from '@skbkontur/icons/IconMediaAudioVolumeARegular16';
 import { IconWarningCircleRegular16 } from '@skbkontur/icons/IconWarningCircleRegular16';
 import { IconXRegular16 } from '@skbkontur/icons/IconXRegular16';
 import { Link, Spinner } from '@skbkontur/react-ui';
 import { useState } from 'react';
 
 import type { Attachment } from '../../api/types';
-import { texts } from '../../texts';
+import { isMediaAttachment } from '../../chat/files';
+import { formatDuration, texts } from '../../texts';
 import styles from './AttachmentChip.module.css';
 
 interface AttachmentChipProps {
@@ -53,14 +55,25 @@ function Thumbnail({ src }: { src: string }) {
   );
 }
 
-/** Вложение в панели запроса и в сообщении (концепция §5.5): имя, число страниц PDF, миниатюра изображения. */
+/**
+ * Вложение в панели запроса и в сообщении (концепция §5.5): имя, число страниц PDF, миниатюра изображения.
+ * Запись в отправленном вопросе — значок «звук», имя и длительность; она не нажимается.
+ */
 export function AttachmentChip({ name, attachment, fileUrl, failed, onRetry, onRemove, onOpenImage }: AttachmentChipProps) {
   const image = attachment && isImage(attachment) && fileUrl;
   const pages = attachment?.media_type === 'application/pdf' ? attachment.page_count : null;
+  const recording = attachment !== null && isMediaAttachment(attachment);
+  const duration = recording ? attachment.duration_seconds : null;
   const label = (
     <>
+      {recording && (
+        <span className={styles.sound} aria-hidden="true">
+          <IconMediaAudioVolumeARegular16 />
+        </span>
+      )}
       <span className={styles.name}>{name}</span>
       {pages !== null && <span className={styles.pages}> · {texts.chat.files.pages(pages)}</span>}
+      {duration !== null && <span className={styles.duration}> · {formatDuration(duration)}</span>}
     </>
   );
 

@@ -202,11 +202,30 @@ def create_app(chunk_delay_ms: int) -> Starlette:
             }
         )
 
+    async def rerank(request: Request) -> Response:
+        body = await _body(request)
+        if body is None:
+            return _error(400, "invalid json")
+        if body.get("model") != "rerank":
+            return _error(404, "model not found")
+        query, documents = body.get("query"), body.get("documents")
+        if (
+            not isinstance(query, str)
+            or not isinstance(documents, list)
+            or not all(isinstance(document, str) for document in documents)
+        ):
+            return _error(400, "query must be a string, documents — a list of strings")
+        # Пометка своя: на `[[stub:error]]` этот маршрут не отзывается (§12.2).
+        if replies.RERANK_ERROR_MARK in query:
+            return _error(503, "stub rerank error")
+        return JSONResponse({"results": replies.rerank(query, documents)})
+
     return Starlette(
         routes=[
             Route("/health", health),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/embeddings", embeddings, methods=["POST"]),
+            Route("/v1/rerank", rerank, methods=["POST"]),
         ],
         middleware=[Middleware(BearerAuth)],
     )
