@@ -54,7 +54,7 @@ make backup DIR=<каталог вне репозитория>      # резер
 ```
 
 Обновление работающего сервиса до версии портала 0.5 — не повтор этапа, а порядок релиза
-(runbook §4.6): `make release-prepare`, `make release-rehearse`, `make release-backup`,
+(по шагам — [`docs/release-0.5.md`](docs/release-0.5.md), пояснения — runbook §4.6): `make release-prepare`, `make release-rehearse`, `make release-backup`,
 `make portal`, при сбое — `make release-rollback`; затем переобработка документов —
 `make portal-reprocess-start` (runbook §3.10).
 
