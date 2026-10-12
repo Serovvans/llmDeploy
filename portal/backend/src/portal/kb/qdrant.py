@@ -1,13 +1,12 @@
 """Векторный индекс в Qdrant: коллекция, фильтр доступа, гибридный запрос (docs/portal-api.md §10).
 
-Фильтр доступа строится здесь из идентификатора пользователя и области поиска и стоит в
-каждом запросе пачки — в каждом `prefetch` и в корне; запроса к коллекции без него нет.
+Фильтр доступа строится здесь из идентификатора пользователя и выбора клиента и стоит в
+каждом запросе пачки — в каждом `prefetch` и в корне; запроса поиска без него нет.
 """
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from itertools import batched
-from typing import assert_never
 from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient, models
@@ -15,12 +14,15 @@ from qdrant_client.http.exceptions import ApiException
 
 from portal.core.settings import KbSettings
 from portal.kb.ports import (
+    Collection,
     CollectionMismatchError,
     FragmentPoint,
-    KnowledgeScope,
+    KnowledgeSelection,
+    SearchHits,
     SparseVector,
     VectorIndexUnavailableError,
 )
+from portal.kb.tags import selected_keys
 
 _DENSE = "dense"
 _LEXICAL = "lexical"
@@ -29,50 +31,74 @@ _PAYLOAD_INDEXES = (
     ("scope", models.PayloadSchemaType.KEYWORD),
     ("owner_id", models.PayloadSchemaType.KEYWORD),
     ("is_cogis", models.PayloadSchemaType.BOOL),
+    ("tags", models.PayloadSchemaType.KEYWORD),
+    ("pending", models.PayloadSchemaType.BOOL),
 )
+# Порядок ветвей фильтра — как в контракте (§10.3).
+_COLLECTIONS: tuple[Collection, ...] = ("shared", "ministries", "personal")
 
 
 def _match(key: str, value: str | bool) -> models.FieldCondition:
     return models.FieldCondition(key=key, match=models.MatchValue(value=value))
 
 
-def access_filter(user_id: UUID, scope: KnowledgeScope) -> models.Filter:
-    """Фильтр доступа (§10.3): один из трёх вариантов, других нет.
+def access_filter(user_id: UUID, selection: KnowledgeSelection) -> models.Filter:
+    """Фильтр доступа (§10.3): предел — общая ∪ «Министерства» ∪ личная пользователя.
 
-    Значения берутся только из сессии и вида диалога; неизвестная область — ошибка, а не
-    запрос без фильтра.
+    Выбор клиента предел только сужает: решает, какие из трёх ветвей войдут в фильтр и
+    добавится ли условие по тегам. Ветвь личной коллекции без `owner_id` из сессии не
+    существует. Точки запаса (`pending`) в поиск не попадают никогда.
     """
+    not_pending = [_match("pending", True)]
     shared = _match("scope", "shared")
-    if scope == "shared":
-        return models.Filter(must=[shared])
-    if scope == "cogis":
-        return models.Filter(must=[shared, _match("is_cogis", True)])
-    if scope == "shared_and_personal":
-        own = models.Filter(must=[_match("scope", "personal"), _match("owner_id", str(user_id))])
-        return models.Filter(must=[models.Filter(should=[shared, own])])
-    assert_never(scope)
+    if selection.cogis_only:
+        return models.Filter(must=[shared, _match("is_cogis", True)], must_not=not_pending)
+    branches: list[models.Condition] = []
+    for collection in _COLLECTIONS:
+        if collection not in selection.collections:
+            continue
+        if collection == "personal":
+            branches.append(
+                models.Filter(must=[_match("scope", "personal"), _match("owner_id", str(user_id))])
+            )
+        else:
+            branches.append(_match("scope", collection))
+    if not branches:
+        raise ValueError("в выборе нет ни одной известной коллекции")
+    must: list[models.Condition] = [models.Filter(should=branches)]
+    if keys := selected_keys(selection.tags):
+        must.append(models.FieldCondition(key="tags", match=models.MatchAny(any=keys)))
+    return models.Filter(must=must, must_not=not_pending)
 
 
-def _document_filter(document_id: UUID) -> models.Filter:
-    return models.Filter(must=[_match("document_id", str(document_id))])
+def _document_filter(
+    document_id: UUID, must_not: list[models.Condition] | None = None
+) -> models.Filter:
+    return models.Filter(must=[_match("document_id", str(document_id))], must_not=must_not)
 
 
 def _lexical(vector: SparseVector) -> models.SparseVector:
     return models.SparseVector(indices=list(vector.indices), values=list(vector.values))
 
 
-def _point(point: FragmentPoint) -> models.PointStruct:
+def _vectors(point: FragmentPoint) -> dict[str, list[float] | models.SparseVector]:
     vectors: dict[str, list[float] | models.SparseVector] = {_DENSE: list(point.dense)}
     if point.lexical.indices:
         vectors[_LEXICAL] = _lexical(point.lexical)
+    return vectors
+
+
+def _staged_point(point: FragmentPoint) -> models.PointStruct:
     return models.PointStruct(
         id=str(point.fragment_id),
-        vector=vectors,
+        vector=_vectors(point),
         payload={
             "document_id": str(point.document_id),
             "scope": point.scope,
             "owner_id": str(point.owner_id),
             "is_cogis": point.is_cogis,
+            "tags": list(point.tags),
+            "pending": True,
         },
     )
 
@@ -144,21 +170,62 @@ class QdrantVectorIndex:
         with _guard():
             await self._client.delete_collection(self._collection)
 
-    async def replace_document(self, document_id: UUID, points: Sequence[FragmentPoint]) -> None:
-        """Удалить прежние точки документа и записать новые пачками."""
-        await self.delete_document(document_id)
+    async def delete_document(self, document_id: UUID) -> None:
+        """Удалить все точки документа, включая запас."""
+        await self.prune_document(document_id, ())
+
+    async def prune_document(self, document_id: UUID, keep_ids: Sequence[UUID]) -> None:
+        """Уборка: удалить точки документа, которых нет в `keep_ids` (§10.6)."""
+        kept: list[models.Condition] = [
+            models.HasIdCondition(has_id=[str(fragment_id) for fragment_id in keep_ids])
+        ]
+        selected = _document_filter(document_id, kept if keep_ids else None)
+        with _guard():
+            await self._client.delete(
+                self._collection, points_selector=models.FilterSelector(filter=selected), wait=True
+            )
+
+    async def stage_document(self, document_id: UUID, points: Sequence[FragmentPoint]) -> None:
+        """Записать точки в запас пачками: с `pending`, поиск их не видит."""
         with _guard():
             for batch in batched(points, self._upsert_batch_size):
                 await self._client.upsert(
-                    self._collection, [_point(point) for point in batch], wait=True
+                    self._collection, [_staged_point(point) for point in batch], wait=True
                 )
 
-    async def delete_document(self, document_id: UUID) -> None:
-        """Удалить все точки документа."""
+    async def publish_document(self, document_id: UUID, tags: Sequence[str]) -> None:
+        """Выставить теги и снять `pending` у запаса; прежние точки не трогаются."""
+        staged = models.Filter(
+            must=[_match("document_id", str(document_id)), _match("pending", True)]
+        )
         with _guard():
-            await self._client.delete(
+            await self._client.set_payload(
+                self._collection, payload={"tags": list(tags)}, points=staged, wait=True
+            )
+            await self._client.delete_payload(
+                self._collection, keys=["pending"], points=staged, wait=True
+            )
+
+    async def update_vectors(self, points: Sequence[FragmentPoint]) -> None:
+        """Перезаписать векторы точек под теми же идентификаторами; payload не трогается."""
+        with _guard():
+            for batch in batched(points, self._upsert_batch_size):
+                await self._client.update_vectors(
+                    self._collection,
+                    [
+                        models.PointVectors(id=str(point.fragment_id), vector=_vectors(point))
+                        for point in batch
+                    ],
+                    wait=True,
+                )
+
+    async def set_tags(self, document_id: UUID, tags: Sequence[str]) -> None:
+        """Выставить ключи тегов у всех точек документа, включая запас (§10.6)."""
+        with _guard():
+            await self._client.set_payload(
                 self._collection,
-                points_selector=models.FilterSelector(filter=_document_filter(document_id)),
+                payload={"tags": list(tags)},
+                points=_document_filter(document_id),
                 wait=True,
             )
 
@@ -167,23 +234,21 @@ class QdrantVectorIndex:
         dense: Sequence[float],
         lexical: SparseVector,
         user_id: UUID,
-        scope: KnowledgeScope,
-        limit: int,
-    ) -> list[UUID]:
+        selection: KnowledgeSelection,
+        hybrid_limit: int,
+    ) -> SearchHits:
         """Поиск двумя запросами одной пачкой (§10.4); фильтр доступа — в каждом из них.
 
-        Сначала идут лучшие лексические совпадения (`kb.search.lexical_slots`), затем
-        результаты гибридного запроса без повторов — всего не больше `limit`.
+        Лучшие лексические совпадения (`kb.search.lexical_slots`) и до `hybrid_limit`
+        результатов слияния ветвей — по отдельности: выдачу собирает сценарий поиска.
         """
-        access = access_filter(user_id, scope)
-        requests = self._requests(list(dense), lexical, access, limit)
+        access = access_filter(user_id, selection)
+        requests = self._requests(list(dense), lexical, access, hybrid_limit)
         with _guard():
             responses = await self._client.query_batch_points(self._collection, requests)
-        # Запросы идут от лексического к гибридному: в этом же порядке собирается выдача.
-        found = dict.fromkeys(
-            UUID(str(point.id)) for response in responses for point in response.points
-        )
-        return list(found)[:limit]
+        found = [[UUID(str(point.id)) for point in response.points] for response in responses]
+        # Гибридный запрос — последний в пачке; перед ним лексический, если он был.
+        return SearchHits(lexical=found[0] if len(found) > 1 else [], hybrid=found[-1])
 
     def _requests(
         self, dense: list[float], lexical: SparseVector, access: models.Filter, limit: int

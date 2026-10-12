@@ -5,6 +5,7 @@
  *   npm ci && npm run browsers     один раз
  *   npm test                       все браузеры
  *   npm test -- --project=chromium один браузер
+ *   npm test -- --project=stand --no-deps  только проверки, меняющие состояние стенда
  *
  * Файлы тестов называются `*.e2e.ts`, а не `*.spec.ts`: иначе их подобрал бы vitest фронтенда.
  * HTML-отчёт не включён: его каталог содержит JS, на котором споткнулся бы `eslint .` фронтенда.
@@ -15,6 +16,11 @@ import { BASE_URL } from './support/stand';
 
 /** Тесты с этой меткой проверяют поведение самого браузера (просмотр PDF, скачивание DOCX). */
 const BROWSER_SPECIFIC = /@браузер/;
+/**
+ * Тесты с этой меткой меняют состояние всего стенда (остановка песочницы SQL, массовая переобработка
+ * базы знаний) и браузером не пользуются: идут один раз, проектом `stand`, после браузерных проектов.
+ */
+const STAND_WIDE = /@стенд/;
 
 export default defineConfig({
   testDir: './tests',
@@ -40,9 +46,14 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
+    {
+      name: 'chromium',
+      grepInvert: STAND_WIDE,
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } },
+    },
     {
       name: 'firefox',
+      grepInvert: STAND_WIDE,
       use: {
         ...devices['Desktop Firefox'],
         viewport: { width: 1440, height: 900 },
@@ -50,12 +61,18 @@ export default defineConfig({
         launchOptions: { firefoxUserPrefs: { 'pdfjs.disabled': false } },
       },
     },
-    { name: 'webkit', use: { ...devices['Desktop Safari'], viewport: { width: 1440, height: 900 } } },
+    {
+      name: 'webkit',
+      grepInvert: STAND_WIDE,
+      use: { ...devices['Desktop Safari'], viewport: { width: 1440, height: 900 } },
+    },
     // Установленный в системе Chrome: ближайшая замена Edge (тот же движок), с настоящим просмотром PDF.
     {
       name: 'chrome',
       grep: BROWSER_SPECIFIC,
       use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 } },
     },
+    // Зависимость задаёт порядок: проверки стенда не идут одновременно с браузерными тестами.
+    { name: 'stand', grep: STAND_WIDE, dependencies: ['chromium', 'firefox', 'webkit', 'chrome'] },
   ],
 });

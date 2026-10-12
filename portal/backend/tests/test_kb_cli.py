@@ -1,4 +1,4 @@
-"""Команды базы знаний: `worker-health`, `reindex`, `eval-search` (docs/portal-api.md §13.4)."""
+"""Команды базы знаний: `worker-health`, `reindex`, `reprocess`, `eval-search` (§13.4)."""
 
 import asyncio
 import os
@@ -122,6 +122,45 @@ async def test_reindex_command_requeues_documents(
     assert [(job.kind, job.attempts) for job in jobs] == [("index", 0), ("index", 0)]
 
 
+async def test_reprocess_commands_need_only_database_and_print_only_numbers(
+    bench: KbBench, monkeypatch: pytest.MonkeyPatch, environ: dict[str, str],
+    override_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    """Команды `portal reprocess` работают без ключей модели и Qdrant (§13.5)."""
+    client = await bench.portal.employee()
+    await added(client, "секретный договор.txt", "готовый документ".encode())
+    await bench.drain()
+    await bench.portal.execute(
+        "UPDATE kb_documents SET index_version = 1, reprocess_error = 'recognition_failed'"
+    )
+    only_database = {"PORTAL_DB_PASSWORD": environ["PORTAL_DB_PASSWORD"]}
+    tuned = kb_settings(load_settings(only_database, CONFIG_DIR, override_path), tmp_path)
+    monkeypatch.setattr(cli, "load_settings", lambda env: tuned)
+
+    assert await _in_thread("reprocess", "start") == 0
+    assert capsys.readouterr().out == "Документов поставлено на переобработку: 1\n"
+    assert await _in_thread("reprocess", "start", "--all") == 0
+    assert capsys.readouterr().out == "Документов поставлено на переобработку: 0\n"
+    assert await _in_thread("reprocess", "pause") == 0
+    capsys.readouterr()
+    assert await _in_thread("reprocess", "status") == 0
+    assert capsys.readouterr().out == (
+        "Документов с текущим индексом: 0\n"
+        "Заданий переобработки в очереди: 1\n"
+        "Заданий пояснений в очереди: 0\n"
+        "Документов со сбоем переобработки: 1\n"
+        "  recognition_failed: 1\n"
+        "Пауза: да\n"
+    )
+    # Команда ставит задание по системным часам, стенд живёт по своим.
+    await bench.portal.execute("UPDATE kb_jobs SET run_after = :now", now=bench.portal.clock.now())
+    assert await bench.drain() == 0
+    assert await _in_thread("reprocess", "resume") == 0
+    assert await bench.drain() == 1
+    rows = await bench.portal.rows("SELECT index_version, reprocess_error FROM kb_documents")
+    assert [tuple(row) for row in rows] == [(2, None)]
+
+
 async def test_reindex_recreate_collection_refuses_while_jobs_are_leased(
     bench: KbBench, command_line: Settings, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -166,18 +205,40 @@ async def test_eval_search_command_prints_report_and_leaves_no_collection(
     bench: KbBench, command_line: Settings, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:  # fmt: skip
-    """Команда целиком: настоящий клиент эмбеддингов против заглушки стенда."""
+    """Команда целиком: настоящие клиенты модели, эмбеддингов и реранкера против заглушки."""
     async with live_server(create_stub(chunk_delay_ms=0)) as url:
         llm = command_line.llm.model_copy(update={"base_url": f"{url}/v1"})
-        qdrant = _local_worker(monkeypatch, command_line.model_copy(update={"llm": llm}))
+        kb = command_line.kb
+        kb = kb.model_copy(
+            update={
+                "rerank": kb.rerank.model_copy(update={"url": f"{url}/v1/rerank"}),
+                # Флаг включён в конфигурации; стенд тестов выключает его для тестов очереди.
+                "context": kb.context.model_copy(update={"enabled": True}),
+            }
+        )
+        qdrant = _local_worker(monkeypatch, command_line.model_copy(update={"llm": llm, "kb": kb}))
 
         async def keep_open() -> None:
             """Команда закрывает клиент; тесту он ещё нужен, чтобы заглянуть в Qdrant."""
 
         monkeypatch.setattr(qdrant, "close", keep_open)
         assert await _in_thread("eval-search") == 0
-    output = capsys.readouterr().out
-    assert "все вопросы" in output and "hit@1" in output and "MRR" in output
-    assert "30 вопр." in output
+        full = capsys.readouterr().out
+        assert await _in_thread("eval-search", "--disable", "rerank", "--disable", "context") == 0
+        partial = capsys.readouterr().out
+        # Реранкер включён, но недоступен: числа были бы замером без него — команда отказывает.
+        no_rerank = kb.model_copy(
+            update={"rerank": kb.rerank.model_copy(update={"url": f"{url}/v1/absent"})}
+        )
+        broken = command_line.model_copy(update={"llm": llm, "kb": no_rerank})
+        monkeypatch.setattr(_local_worker(monkeypatch, broken), "close", keep_open)
+        assert await _in_thread("eval-search", "--disable", "context") == 1
+        refused = capsys.readouterr()
+    assert refused.out == "" and "не сработали ни на одном вопросе: rerank." in refused.err
+    assert "все вопросы" in full and "hit@1" in full and "MRR" in full and "nDCG@8" in full
+    assert "44 вопр." in full and "уточняющие" in full
+    assert "Включено: rewrite, context, rerank" in full and "recall@40" in full
+    # Замер «до и после» без правки конфигурации: улучшения выключаются на один прогон.
+    assert "Включено: rewrite\n" in partial and "recall@8" in partial
     # Рабочая коллекция не создавалась, а коллекция оценки удалена.
     assert (await qdrant.get_collections()).collections == []

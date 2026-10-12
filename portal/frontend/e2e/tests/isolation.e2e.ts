@@ -43,7 +43,7 @@ async function ownerData(owner: Member) {
 }
 
 function foreignCalls(data: Awaited<ReturnType<typeof ownerData>>): Record<string, Call> {
-  const message = { content: 'Чужой вопрос', mode: 'fast', knowledge: 'none' };
+  const message = { content: 'Чужой вопрос', mode: 'fast', collections: [] };
   const calls: Record<string, Call> = {};
   for (const [name, id] of [
     ['чат', data.chatId],

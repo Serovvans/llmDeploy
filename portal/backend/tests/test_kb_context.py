@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from portal.kb.context import fit_sources, knowledge_context
+from portal.kb.context import fit_sources, knowledge_context, neighbor_places, with_neighbors
 from portal.kb.domain import FoundFragment
 from portal.kb.ports import Source
 from portal.llm.estimator import RatioTokenEstimator
@@ -11,11 +11,13 @@ ESTIMATOR = RatioTokenEstimator(2.0, 3200)
 
 
 def _source(n: int, quote: str, title: str = "Договор.pdf", page: int | None = 2) -> Source:
-    return Source(n, uuid4(), title, "shared", page, uuid4(), quote)
+    return Source(n, uuid4(), title, "shared", page, None, None, uuid4(), quote)
 
 
 def _found(text: str, title: str = "Договор.pdf", page: int | None = 1) -> FoundFragment:
-    return FoundFragment(uuid4(), uuid4(), title, "shared", page, text)
+    return FoundFragment(
+        uuid4(), uuid4(), title, "shared", page, text, 0, 1, 0, len(text), None, None
+    )
 
 
 def test_each_source_starts_with_numbered_header_line() -> None:
@@ -83,3 +85,63 @@ def test_square_brackets_in_title_do_not_look_like_another_source_number() -> No
     assert header == "[1] Справка (3) Приказ (12).pdf, стр. 2"
     assert header.count("[") == header.count("]") == 1
     assert source.document_title == "Справка [3] Приказ [12].pdf"  # в карточке — как есть
+
+
+# --- соседние фрагменты (§8.4, шаг 7) ---
+
+PAGE = "Первый абзац договора. Второй абзац про срок аренды. Третий абзац про плату."
+
+
+def _piece(document_id: object, ordinal: int, start: int, end: int, page: int = 1) -> FoundFragment:
+    return FoundFragment(
+        uuid4(), document_id, "Договор.pdf", "shared", page, PAGE[start:end],  # type: ignore[arg-type]
+        ordinal, page, start, end, None, "пояснение, которое модель видеть не должна",
+    )  # fmt: skip
+
+
+def test_neighbors_extend_text_for_model_but_not_the_quote() -> None:
+    document = uuid4()
+    # Соседние фрагменты одной страницы перекрываются, как при разбиении.
+    before, chosen, after = (
+        _piece(document, 0, 0, 30),
+        _piece(document, 1, 23, 52),
+        _piece(document, 2, 45, len(PAGE)),
+    )
+    sources = fit_sources([chosen], "правила", 10_000, ESTIMATOR)
+    assert neighbor_places([chosen], 1) == [(document, 0), (document, 2)]
+    texts = with_neighbors(sources, [chosen], [after, before], 1, "правила", 10_000, ESTIMATOR)
+    # В порядке документа, перекрывающийся текст не повторяется.
+    assert texts == {chosen.fragment_id: PAGE}
+    context = knowledge_context(sources, texts)
+    assert f"<фрагмент>\n{PAGE}\n</фрагмент>" in context
+    assert sources[0].quote == PAGE[23:52]
+    assert "пояснение" not in context
+
+
+def test_neighbor_that_is_selected_itself_or_already_used_is_not_repeated() -> None:
+    document = uuid4()
+    first, middle, last = (
+        _piece(document, 0, 0, 22),
+        _piece(document, 1, 23, 52),
+        _piece(document, 2, 53, len(PAGE)),
+    )
+    extra = _piece(document, 3, 0, 5, page=2)
+    selected = [first, last]
+    sources = fit_sources(selected, "правила", 10_000, ESTIMATOR)
+    assert neighbor_places(selected, 1) == [(document, -1), (document, 1), (document, 3)]
+    texts = with_neighbors(sources, selected, [middle, extra], 1, "правила", 10_000, ESTIMATOR)
+    # Общий сосед достаётся первому по выдаче; фрагмент другой страницы — с новой строки.
+    assert texts == {
+        first.fragment_id: f"{first.text}\n{middle.text}",
+        last.fragment_id: f"{last.text}\n{extra.text}",
+    }
+    assert knowledge_context(sources, texts).count(middle.text) == 1
+
+
+def test_neighbors_take_only_what_is_left_of_the_budget() -> None:
+    document = uuid4()
+    chosen, after = _piece(document, 0, 0, 22), _piece(document, 1, 23, len(PAGE))
+    sources = fit_sources([chosen], "правила", 10_000, ESTIMATOR)
+    exact = ESTIMATOR.text("правила") + ESTIMATOR.text(knowledge_context(sources))
+    assert with_neighbors(sources, [chosen], [after], 1, "правила", exact, ESTIMATOR) == {}
+    assert with_neighbors(sources, [chosen], [after], 1, "правила", exact + 100, ESTIMATOR)

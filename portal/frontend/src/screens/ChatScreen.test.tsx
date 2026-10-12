@@ -1,8 +1,8 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { Attachment, Dialog, Message, Source } from '../api/types';
+import type { Attachment, Dialog, DocumentText, KbDocument, Message, Source } from '../api/types';
 import { CONFIG, fail, liveSse, mockApi, ok, session, sse } from '../test/mockApi';
 import { menuItems, renderApp } from '../test/renderApp';
 import { texts } from '../texts';
@@ -29,6 +29,7 @@ function message(patch: Partial<Message>): Message {
     sources: null,
     sources_found: null,
     sql_check: null,
+    sql_run: null,
     sql_dangers: null,
     dropped_messages: 0,
     created_at: '2026-10-05T09:01:00Z',
@@ -110,7 +111,7 @@ describe('чат: отправка и поток ответа', () => {
     expect(screen.getByText('Нужно найти срок в договоре…')).toBeInTheDocument();
 
     expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]).toMatchObject({
-      body: { content: 'Какой срок аренды?', attachment_ids: [], mode: 'fast', knowledge: 'none' },
+      body: { content: 'Какой срок аренды?', attachment_ids: [], mode: 'fast', collections: [] },
       headers: { 'X-Portal-Csrf': '1' },
     });
   });
@@ -567,8 +568,8 @@ describe('чат: ответ модели — недоверенные данн�
 });
 
 describe('чат: вложения', () => {
-  const PDF: Attachment = { id: 'f-1', file_name: 'договор.pdf', media_type: 'application/pdf', page_count: 3, image_count: 0, created_at: '' };
-  const PNG: Attachment = { id: 'f-2', file_name: 'скан.png', media_type: 'image/png', page_count: 1, image_count: 1, created_at: '' };
+  const PDF: Attachment = { id: 'f-1', file_name: 'договор.pdf', media_type: 'application/pdf', page_count: 3, image_count: 0, duration_seconds: null, transcription: null, created_at: '' };
+  const PNG: Attachment = { id: 'f-2', file_name: 'скан.png', media_type: 'image/png', page_count: 1, image_count: 1, duration_seconds: null, transcription: null, created_at: '' };
 
   function fileInput(): HTMLInputElement {
     return document.querySelector('input[type="file"]') as HTMLInputElement;
@@ -670,7 +671,7 @@ describe('чат: вложения', () => {
 
     await user.upload(fileInput(), new File(['x'], 'макет.dwg'));
     expect(screen.getByRole('alert')).toHaveTextContent(
-      'Файл „макет.dwg“ не подходит. Можно прикрепить изображения JPG и PNG, PDF, DOCX, TXT и MD',
+      'Файл „макет.dwg“ не подходит. Можно прикрепить изображения JPG и PNG, PDF, DOCX, TXT, MD, аудио- и видеозаписи',
     );
 
     const big = new File(['x'], 'скан.pdf');
@@ -681,7 +682,7 @@ describe('чат: вложения', () => {
   });
 
   it.each([
-    [415, 'unsupported_file_type', undefined, 'Файл „отчёт.pdf“ не подходит. Можно прикрепить изображения JPG и PNG, PDF, DOCX, TXT и MD'],
+    [415, 'unsupported_file_type', undefined, 'Файл „отчёт.pdf“ не подходит. Можно прикрепить изображения JPG и PNG, PDF, DOCX, TXT, MD, аудио- и видеозаписи'],
     [413, 'file_too_large', { max_bytes: 10485760 }, 'Файл „отчёт.pdf“ больше 10 МБ. Уменьшите его или разделите на части'],
     [422, 'too_many_pages', { max_pages: 150 }, 'В файле „отчёт.pdf“ больше 150 страниц. Разделите его на части'],
     [422, 'too_many_images', { max_images: 8 }, 'В файле „отчёт.pdf“ больше 8 страниц без текста, а модель видит не больше 8 изображений за раз. Откройте его в разделе „Документы“ или добавьте в базу знаний'],
@@ -734,6 +735,338 @@ describe('чат: вложения', () => {
       'Модель видит не больше 8 изображений и страниц сканов за раз. Уберите лишние вложения',
     );
     expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)).toHaveLength(0);
+  });
+
+  describe('записи', () => {
+    const MEDIA = `POST /api/dialogs/${ID}/attachments/media`;
+    const record = (id: string, name: string, status: 'queued' | 'processing' | 'ready' | 'error', patch: Partial<Attachment> = {}): Attachment => ({
+      id,
+      file_name: name,
+      media_type: 'audio/mpeg',
+      page_count: null,
+      image_count: 0,
+      duration_seconds: status === 'ready' ? 742 : null,
+      transcription: { status, error_code: null },
+      created_at: '',
+      ...patch,
+    });
+    const mp3 = (name: string) => new File(['ID3'], name, { type: 'audio/mpeg' });
+    const chip = (name: string) => screen.getByText(name).closest('span[class*="media"]') as HTMLElement;
+
+    async function ready() {
+      const setup = setupChat([]);
+      await waitFor(() => expect(screen.getByRole('button', { name: t.composer.attach })).toBeEnabled());
+      return setup;
+    }
+
+    it('загружаются строго по одной своим маршрутом; ход виден; расшифровка — опросом; до готовности отправки нет', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { server, user } = await ready();
+        const finish: (() => void)[] = [];
+        server.on(MEDIA, (_body, url) => new Promise((resolve) => finish.push(() => resolve(ok(record(`f-${finish.length}`, url.searchParams.get('file_name') ?? '', 'queued'), 201)))));
+        server.on(`POST /api/dialogs/${ID}/attachments`, () => ok({ ...record('f-9', 'договор.pdf', 'ready'), media_type: 'application/pdf', page_count: 3, transcription: null, duration_seconds: null }, 201));
+
+        await user.upload(fileInput(), [mp3('совещание.mp3'), mp3('планёрка.mp3'), new File(['%PDF-'], 'договор.pdf')]);
+        // Вторая запись ждёт; документ загружается как прежде, не дожидаясь записей.
+        await waitFor(() => expect(server.uploads).toHaveLength(1));
+        expect(server.uploads[0]?.path).toBe(`/api/dialogs/${ID}/attachments/media?file_name=%D1%81%D0%BE%D0%B2%D0%B5%D1%89%D0%B0%D0%BD%D0%B8%D0%B5.mp3`);
+        const upload = server.callsTo(MEDIA)[0];
+        expect(upload?.body).toBeInstanceOf(File);
+        expect(upload?.headers['X-Portal-Csrf']).toBe('1');
+        expect(chip('планёрка.mp3')).toHaveTextContent('Ждёт загрузки');
+        expect(await screen.findByText('· 3 стр.')).toBeInTheDocument();
+
+        act(() => server.uploads[0]?.progress(40, 100));
+        expect(chip('совещание.mp3')).toHaveTextContent('Загружается… 40 %');
+        await user.type(field(), 'Что решили?{Enter}');
+        expect(screen.getByRole('alert')).toHaveTextContent(t.composer.uploading);
+
+        finish[0]?.();
+        await waitFor(() => expect(chip('совещание.mp3')).toHaveTextContent('Ждёт расшифровки'));
+        await waitFor(() => expect(server.uploads).toHaveLength(2));
+        finish[1]?.();
+        await waitFor(() => expect(chip('планёрка.mp3')).toHaveTextContent('Ждёт расшифровки'));
+        // Файлы загрузились: просьба подождать под панелью больше не нужна.
+        await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+
+        await user.click(screen.getByRole('button', { name: t.composer.send }));
+        expect(screen.getByRole('alert')).toHaveTextContent(
+          'Запись ещё расшифровывается — отправить сообщение можно будет, когда она будет готова',
+        );
+        expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)).toHaveLength(0);
+
+        // Состояние перезапрашивается каждые 5 секунд, пока запись не готова.
+        server.on(`GET /api/dialogs/${ID}/attachments/f-1`, () => ok(record('f-1', 'совещание.mp3', 'processing')));
+        server.on(`GET /api/dialogs/${ID}/attachments/f-2`, () => ok(record('f-2', 'планёрка.mp3', 'ready')));
+        await vi.advanceTimersByTimeAsync(5100);
+        await waitFor(() => expect(chip('совещание.mp3')).toHaveTextContent('Расшифровывается…'));
+        expect(chip('планёрка.mp3')).toHaveTextContent('Расшифровано · 12 мин');
+        expect(within(chip('планёрка.mp3')).getByRole('status')).toHaveTextContent('Запись расшифрована');
+
+        server.on(`GET /api/dialogs/${ID}/attachments/f-1`, () => ok(record('f-1', 'совещание.mp3', 'ready')));
+        await vi.advanceTimersByTimeAsync(5100);
+        await waitFor(() => expect(chip('совещание.mp3')).toHaveTextContent('Расшифровано · 12 мин'));
+        await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+        // Готовые записи больше не опрашиваются.
+        const polls = server.calls.filter((call) => call.method === 'GET' && call.path.includes('/attachments/')).length;
+        await vi.advanceTimersByTimeAsync(11000);
+        expect(server.calls.filter((call) => call.method === 'GET' && call.path.includes('/attachments/'))).toHaveLength(polls);
+
+        server.on(`POST /api/dialogs/${ID}/messages`, () => sse([START, ['done', { status: 'complete' }]]));
+        await user.click(screen.getByRole('button', { name: t.composer.send }));
+        await waitFor(() =>
+          expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]?.body).toMatchObject({ attachment_ids: ['f-1', 'f-2', 'f-9'] }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      [415, 'unsupported_file_type', undefined, 'Файл „запись.mp3“ не подходит. Подойдут MP3, WAV, M4A, OGG, FLAC, MP4, MKV, WebM и MOV. Если формат верный — сохраните запись заново в MP3', false],
+      [413, 'file_too_large', { max_bytes: 2147483648 }, 'Файл „запись.mp3“ больше 2 ГБ. Сожмите запись или разделите её на части', false],
+      [507, 'media_quota_exceeded', { reason: 'free_space' }, 'На портале закончилось место для записей. Сообщите администратору', false],
+      [507, 'media_quota_exceeded', { reason: 'user' }, 'Вы заняли всё место, отведённое вам для записей. Удалите ненужные записи из базы знаний и повторите', false],
+      [429, 'too_many_uploads', undefined, 'Сейчас загружается слишком много записей. Повторите через несколько минут', true],
+      [408, 'upload_timeout', undefined, 'Сообщение сервера: upload_timeout.', true],
+    ] as const)('отказ загрузки %s %s — причина у вложения, отправка недоступна', async (status, code, details, text, retryable) => {
+      const { server, user } = await ready();
+      server.on(MEDIA, () => fail(status, code, { details }));
+
+      await user.upload(fileInput(), mp3('запись.mp3'));
+      await waitFor(() => expect(chip('запись.mp3')).toHaveTextContent(text));
+      expect(within(chip('запись.mp3')).queryByRole('button', { name: texts.common.retry }) !== null).toBe(retryable);
+      // Сам интерфейс загрузку не повторяет.
+      expect(server.callsTo(MEDIA)).toHaveLength(1);
+
+      await user.type(field(), 'Вопрос{Enter}');
+      expect(screen.getByRole('alert')).toHaveTextContent('Уберите запись с ошибкой — её можно прикрепить заново');
+      expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)).toHaveLength(0);
+    });
+
+    it('обрыв связи — «Повторить» начинает загрузку заново; отказ одной записи очередь не останавливает', async () => {
+      const { server, user } = await ready();
+      server.on(MEDIA, (_body, url) => {
+        if (url.searchParams.get('file_name') === 'первая.mp3') {
+          throw new TypeError('network error');
+        }
+        return ok(record('f-2', 'вторая.mp3', 'ready'), 201);
+      });
+
+      await user.upload(fileInput(), [mp3('первая.mp3'), mp3('вторая.mp3')]);
+      await waitFor(() => expect(chip('вторая.mp3')).toHaveTextContent('Расшифровано · 12 мин'));
+      expect(chip('первая.mp3')).toHaveTextContent('Загрузка оборвалась');
+
+      server.on(MEDIA, () => ok(record('f-1', 'первая.mp3', 'ready'), 201));
+      await user.click(within(chip('первая.mp3')).getByRole('button', { name: texts.common.retry }));
+      await waitFor(() => expect(chip('первая.mp3')).toHaveTextContent('Расшифровано · 12 мин'));
+      expect(server.callsTo(MEDIA)).toHaveLength(3);
+    });
+
+    it('крестик отменяет идущую загрузку и убирает ждущую из очереди; удаление загруженной снимает её на сервере', async () => {
+      const { server, user } = await ready();
+      server.on(MEDIA, (_body, url) =>
+        url.searchParams.get('file_name') === 'третья.mp3' ? ok(record('f-3', 'третья.mp3', 'queued'), 201) : new Promise(() => undefined),
+      );
+      server.on(`DELETE /api/dialogs/${ID}/attachments/f-3`, () => ok());
+
+      await user.upload(fileInput(), [mp3('первая.mp3'), mp3('вторая.mp3'), mp3('третья.mp3')]);
+      await waitFor(() => expect(server.uploads).toHaveLength(1));
+      await user.click(screen.getByRole('button', { name: 'Убрать файл вторая.mp3' }));
+      await user.click(screen.getByRole('button', { name: 'Убрать файл первая.mp3' }));
+      expect(server.uploads[0]?.aborted).toBe(true);
+
+      // Очередь идёт дальше: вторая не загружалась вовсе.
+      await waitFor(() => expect(chip('третья.mp3')).toHaveTextContent('Ждёт расшифровки'));
+      expect(server.uploads.map((upload) => upload.path)).toEqual([
+        expect.stringContaining(encodeURIComponent('первая.mp3')),
+        expect.stringContaining(encodeURIComponent('третья.mp3')),
+      ]);
+      expect(screen.queryByText('первая.mp3')).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: 'Убрать файл третья.mp3' }));
+      await waitFor(() => expect(server.callsTo(`DELETE /api/dialogs/${ID}/attachments/f-3`)).toHaveLength(1));
+    });
+
+    it('ошибка расшифровки: причина у вложения, повтора нет; запись длиннее предела — совет про базу знаний', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { server, user } = await ready();
+        server.on(MEDIA, () => ok(record('f-1', 'совещание.mp3', 'queued'), 201));
+        server.on(`GET /api/dialogs/${ID}/attachments/f-1`, () =>
+          ok(record('f-1', 'совещание.mp3', 'error', { transcription: { status: 'error', error_code: 'media_too_long' } })),
+        );
+
+        await user.upload(fileInput(), mp3('совещание.mp3'));
+        await waitFor(() => expect(chip('совещание.mp3')).toHaveTextContent('Ждёт расшифровки'));
+        await vi.advanceTimersByTimeAsync(5100);
+        await waitFor(() =>
+          expect(chip('совещание.mp3')).toHaveTextContent(
+            'Запись „совещание.mp3“ длиннее 20 минут — для вложения это слишком много. Добавьте её в базу знаний и задайте вопрос, отметив базу под полем ввода',
+          ),
+        );
+        expect(within(chip('совещание.mp3')).queryByRole('button', { name: texts.common.retry })).not.toBeInTheDocument();
+        // Запись с ошибкой больше не опрашивается.
+        await vi.advanceTimersByTimeAsync(11000);
+        expect(server.callsTo(`GET /api/dialogs/${ID}/attachments/f-1`)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('опрос расшифровки ответил отказом сервера: это не ошибка расшифровки — следующий опрос показывает готовую запись', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { server, user } = await ready();
+        server.on(MEDIA, () => ok(record('f-1', 'совещание.mp3', 'queued'), 201));
+        server.on(`GET /api/dialogs/${ID}/attachments/f-1`, () => fail(503, 'service_unavailable'));
+
+        await user.upload(fileInput(), mp3('совещание.mp3'));
+        await waitFor(() => expect(chip('совещание.mp3')).toHaveTextContent('Ждёт расшифровки'));
+        await vi.advanceTimersByTimeAsync(5100);
+        await waitFor(() => expect(server.callsTo(`GET /api/dialogs/${ID}/attachments/f-1`)).toHaveLength(1));
+        expect(chip('совещание.mp3')).toHaveTextContent('Ждёт расшифровки');
+
+        server.on(`GET /api/dialogs/${ID}/attachments/f-1`, () => ok(record('f-1', 'совещание.mp3', 'ready')));
+        await vi.advanceTimersByTimeAsync(5100);
+        await waitFor(() => expect(chip('совещание.mp3')).toHaveTextContent('Расшифровано · 12 мин'));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('вложения больше нет на сервере — запись с ошибкой, опрос прекращается', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { server, user } = await ready();
+        server.on(MEDIA, () => ok(record('f-1', 'совещание.mp3', 'queued'), 201));
+        server.on(`GET /api/dialogs/${ID}/attachments/f-1`, () => fail(404, 'not_found'));
+
+        await user.upload(fileInput(), mp3('совещание.mp3'));
+        await waitFor(() => expect(chip('совещание.mp3')).toHaveTextContent('Ждёт расшифровки'));
+        await vi.advanceTimersByTimeAsync(5100);
+        await waitFor(() => expect(chip('совещание.mp3')).not.toHaveTextContent('Ждёт расшифровки'));
+        await vi.advanceTimersByTimeAsync(11000);
+        expect(server.callsTo(`GET /api/dialogs/${ID}/attachments/f-1`)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('чат удалён во время загрузки записи: загрузка отменяется, ждавшая запись не отправляется', async () => {
+      const { server, user } = setupChat([QUESTION]);
+      await waitFor(() => expect(screen.getByRole('button', { name: t.composer.attach })).toBeEnabled());
+      server.on(MEDIA, () => new Promise(() => undefined));
+      server.on(`DELETE /api/dialogs/${ID}`, () => ok());
+      await user.upload(fileInput(), [mp3('совещание.mp3'), mp3('планёрка.mp3')]);
+      await waitFor(() => expect(server.uploads).toHaveLength(1));
+
+      const history = within(screen.getByRole('complementary', { name: t.history }));
+      await user.click(await history.findByRole('button', { name: 'Действия: Аренда участка под ЛЭП' }));
+      await user.click(await screen.findByText(t.menu.remove));
+      await user.click(await screen.findByRole('button', { name: t.remove.action }));
+      expect(await screen.findByText(t.remove.done)).toBeInTheDocument();
+
+      expect(server.uploads[0]?.aborted).toBe(true);
+      expect(server.uploads).toHaveLength(1);
+    });
+
+    it('очередь одна на чат и базу знаний: запись из окна добавления ждёт, пока загружается запись чата', async () => {
+      vi.stubGlobal(
+        'DataTransfer',
+        class {
+          items = { add: () => undefined };
+          files = null;
+        },
+      );
+      const { server, user } = await ready();
+      let finish: () => void = () => undefined;
+      server.on(MEDIA, () => new Promise((resolve) => (finish = () => resolve(ok(record('f-1', 'совещание.mp3', 'ready'), 201)))));
+      server.on('GET /api/kb/tags', () => ok({ items: [] }));
+      server.on('POST /api/kb/documents/media', () => new Promise(() => undefined));
+      await user.upload(fileInput(), mp3('совещание.mp3'));
+      await waitFor(() => expect(server.uploads).toHaveLength(1));
+
+      await user.click(screen.getByRole('link', { name: texts.nav.knowledge }));
+      await waitFor(() => expect(screen.getAllByRole('button', { name: texts.kb.add })[0]).toBeEnabled());
+      await user.click(screen.getAllByRole('button', { name: texts.kb.add })[0] as HTMLElement);
+      const modal = within(await screen.findByRole('dialog'));
+      fireEvent.change(document.querySelector('[role="dialog"] input[type="file"]') as HTMLInputElement, {
+        target: { files: [mp3('планёрка.mp3')] },
+      });
+      await user.click(modal.getByRole('button', { name: texts.kb.upload.submit }));
+      expect(await modal.findByText(texts.kb.upload.waiting)).toBeInTheDocument();
+      expect(server.uploads).toHaveLength(1);
+
+      finish();
+      await waitFor(() => expect(server.uploads).toHaveLength(2));
+      expect(server.uploads[1]?.path).toContain('/api/kb/documents/media?');
+    });
+
+    it('запись убрана до того, как создан новый чат: загрузка не начинается', async () => {
+      const user = userEvent.setup({ applyAccept: false });
+      let create: () => void = () => undefined;
+      const server = mockApi({
+        'GET /api/auth/session': () => ok(session('ready')),
+        'POST /api/dialogs': () => new Promise((resolve) => (create = () => resolve(ok(dialog({ title: null }), 201)))),
+        [MEDIA]: () => ok(record('f-1', 'совещание.mp3', 'queued'), 201),
+        [`POST /api/dialogs/${ID}/attachments`]: () => ok({ ...record('f-9', 'договор.pdf', 'ready'), media_type: 'application/pdf', page_count: 3, transcription: null, duration_seconds: null }, 201),
+      });
+      renderApp('/chat');
+      await waitFor(() => expect(screen.getByRole('button', { name: t.composer.attach })).toBeEnabled());
+
+      await user.upload(fileInput(), [mp3('совещание.mp3'), new File(['%PDF-'], 'договор.pdf')]);
+      await user.click(await screen.findByRole('button', { name: 'Убрать файл совещание.mp3' }));
+      create();
+
+      // Оставшийся файл загружается, убранная запись — нет.
+      expect(await screen.findByText('· 3 стр.')).toBeInTheDocument();
+      expect(screen.queryByText('совещание.mp3')).not.toBeInTheDocument();
+      expect(server.uploads).toHaveLength(0);
+      expect(server.callsTo(MEDIA)).toHaveLength(0);
+    });
+
+    it('размер записи проверяется до загрузки; при выключенном приёме запись — обычное «не подходит»', async () => {
+      const { server, user } = await ready();
+      const big = mp3('совещание.mp4');
+      Object.defineProperty(big, 'size', { value: 2147483649 });
+      await user.upload(fileInput(), big);
+      expect(screen.getByRole('alert')).toHaveTextContent('Файл „совещание.mp4“ больше 2 ГБ. Сожмите запись или разделите её на части');
+      expect(fileInput().accept).toContain('.mp3');
+      await user.hover(screen.getByRole('button', { name: t.composer.attach }));
+      expect(await screen.findByText(/Аудио- и видеозаписи с русской речью — до 20 минут\. Не больше 10 файлов/)).toBeInTheDocument();
+      expect(server.uploads).toHaveLength(0);
+    });
+
+    it('приём записей выключен: запись не предлагается и получает обычное «не подходит»', async () => {
+      const server = mockApi({
+        'GET /api/auth/session': () => ok(session('ready')),
+        'GET /api/config': () => ok({ ...CONFIG, media: { ...CONFIG.media, enabled: false } }),
+        [`GET /api/dialogs/${ID}/messages`]: () => ok({ items: [], next_cursor: null }),
+        [`GET /api/dialogs/${ID}`]: () => ok(dialog()),
+      });
+      renderApp(`/chat/${ID}`);
+      const user = userEvent.setup({ applyAccept: false });
+      await waitFor(() => expect(screen.getByRole('button', { name: t.composer.attach })).toBeEnabled());
+      await waitFor(() => expect(fileInput().accept).toContain('.pdf'));
+      expect(fileInput().accept).not.toContain('.mp3');
+
+      await user.upload(fileInput(), mp3('совещание.mp3'));
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Файл „совещание.mp3“ не подходит. Можно прикрепить изображения JPG и PNG, PDF, DOCX, TXT и MD',
+      );
+      expect(screen.getByRole('alert')).not.toHaveTextContent('записи');
+      expect(server.uploads).toHaveLength(0);
+    });
+
+    it('запись в отправленном вопросе: имя и длительность, не нажимается', async () => {
+      setupChat([message({ id: 'u-1', role: 'user', content: 'Что решили?', attachments: [record('f-1', 'совещание.mp3', 'ready')] })]);
+      const name = await screen.findByText('совещание.mp3');
+      expect(name.parentElement).toHaveTextContent('совещание.mp3 · 12 мин');
+      expect(name.closest('button')).toBeNull();
+      expect(screen.getByRole('main').querySelector('img')).toBeNull();
+    });
   });
 
   it('изображение в сообщении открывается в окне', async () => {
@@ -850,48 +1183,140 @@ describe('чат: база знаний', () => {
     document_title: `Договор аренды № 14-А, часть ${n}.pdf`,
     scope: 'shared',
     page: n + 1,
+    timecode_seconds: null,
+    image_id: null,
     fragment_id: `frag-${n}`,
     quote: `…сроком на 49 (сорок девять) лет, пункт ${n}…`,
     ...patch,
   });
 
-  const KB_DOC = {
+  const KB_DOC: KbDocument = {
     id: 'doc-1',
     title: 'Договор аренды № 14-А.pdf',
     scope: 'shared',
+    kind: 'document',
     is_cogis: false,
+    tags: [],
     author: { full_name: 'Петров Алексей Сергеевич', is_me: false },
     created_at: '2026-09-12T09:00:00Z',
     page_count: 14,
+    duration_seconds: null,
     status: 'ready',
     error_code: null,
     progress: null,
+    images_truncated: false,
+    reprocess_error: null,
+    reprocessing: false,
     can_delete: false,
   };
 
-  it('переключатель: значение уходит в запросе и запоминается; фаза «Ищу в базе знаний…»; вторая фраза пустого чата', async () => {
+  /** Текст страницы по контракту §8.3: отрезки — пары «текст, подсвечен ли». */
+  const pageText = (page: number | null, parts: [string, boolean][], patch: Partial<DocumentText> = {}): DocumentText => ({
+    page,
+    page_count: page === null ? null : 14,
+    recognized: false,
+    segments: parts.map(([text, highlight]) => ({ text, highlight, start_seconds: null })),
+    timecode_seconds: null,
+    image: null,
+    ...patch,
+  });
+
+  const textUrls = () => vi.mocked(fetch).mock.calls.map(([input]) => String(input)).filter((url) => url.includes('/text'));
+
+  it('выбор баз и тегов: набор уходит в запросе, базы запоминаются, теги — нет; ноль найденного — совет про теги', async () => {
     const { server, user } = setupChat([]);
     const live = liveSse();
     server.on(`POST /api/dialogs/${ID}/messages`, () => live.response);
+    server.on('GET /api/kb/tags', () => ok({ items: ['аренда', 'ЛЭП'] }));
     expect(await screen.findByText(/включите базу знаний под полем ввода/)).toBeInTheDocument();
 
-    await user.click(screen.getByText('База знаний: не использовать'));
-    await user.click(await screen.findByText('Общая и моя'));
-    expect(screen.getByText('База знаний: общая и моя')).toBeInTheDocument();
-    expect(window.localStorage.getItem('portal.chat.knowledge')).toBe('shared_and_personal');
+    const button = screen.getByRole('button', { name: 'База знаний: не используется' });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    await user.click(button);
+    const panel = await screen.findByRole('dialog', { name: 'База знаний' });
+    // Фокус — на первой отметке; пока не отмечена ни одна база, поле тегов недоступно.
+    await waitFor(() => expect(within(panel).getByRole('checkbox', { name: /^Общая —/ })).toHaveFocus());
+    expect(within(panel).getByRole('textbox')).toBeDisabled();
+    expect(within(panel).getByText('Сначала отметьте, где искать')).toBeInTheDocument();
+
+    // Отмечается любое сочетание; порядок в подписи и в запросе — как в панели, а не как нажимали.
+    await user.click(within(panel).getByRole('checkbox', { name: /^Министерства —/ }));
+    await user.click(within(panel).getByRole('checkbox', { name: /^Общая —/ }));
+    expect(window.localStorage.getItem('portal.chat.collections')).toBe('shared,ministries');
+
+    await user.click(within(panel).getByRole('textbox'));
+    await user.click(await screen.findByText('аренда'));
+    expect(String(vi.mocked(fetch).mock.calls.map(([input]) => String(input)).find((url) => url.includes('/api/kb/tags')))).toContain(
+      'scope=shared&scope=ministries',
+    );
+    expect(await screen.findByRole('button', { name: 'База знаний: Общая, Министерства, теги: 1' })).toHaveTextContent(
+      'База знаний: Общая, Министерства · теги: 1',
+    );
+
+    // Esc закрывает панель и возвращает фокус на кнопку.
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'База знаний' })).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /^База знаний:/ })).toHaveFocus();
 
     await user.type(field(), 'Какой срок аренды?{Enter}');
     live.push(START, ['search_started', {}]);
     expect((await screen.findAllByText(/Ищу в базе знаний/)).length).toBeGreaterThan(0);
-    expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]?.body).toMatchObject({ knowledge: 'shared_and_personal' });
+    expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]?.body).toMatchObject({
+      collections: ['shared', 'ministries'],
+      tags: ['аренда'],
+    });
+    // Теги живут, пока открыта вкладка: в браузере не сохраняются.
+    expect(JSON.stringify({ ...window.localStorage })).not.toContain('аренда');
 
-    // Ноль найденного виден сразу по событию `sources`.
+    // Ноль найденного виден сразу по событию `sources`; у вопроса с тегами — совет убрать их.
     live.push(['sources', { sources: [] }]);
-    expect(await screen.findByText(t.sources.nothingFound)).toBeInTheDocument();
+    expect(await screen.findByText(t.sources.nothingFound.withTags)).toBeInTheDocument();
     live.push(['delta', { text: 'В базе знаний об этом ничего нет.' }], ['done', { status: 'complete' }]);
     live.close();
     await screen.findByRole('button', { name: t.composer.send });
     expect(screen.queryByText(t.sources.notCited)).not.toBeInTheDocument();
+  });
+
+  it('выбор баз: прежний запомненный выбор переводится в набор; без тегов ноль найденного — текст про пустую базу', async () => {
+    window.localStorage.setItem('portal.chat.knowledge', 'shared_and_personal');
+    const { server, user } = setupChat([]);
+    server.on(`POST /api/dialogs/${ID}/messages`, () =>
+      sse([START, ['search_started', {}], ['sources', { sources: [] }], ['delta', { text: 'Ничего.' }], ['done', { status: 'complete' }]]),
+    );
+
+    expect(await screen.findByRole('button', { name: 'База знаний: Общая, Моя' })).toBeInTheDocument();
+    await user.type(field(), 'Вопрос{Enter}');
+    expect(await screen.findByText(t.sources.nothingFound.withoutTags)).toBeInTheDocument();
+    expect(server.callsTo(`POST /api/dialogs/${ID}/messages`)[0]?.body).toMatchObject({ collections: ['shared', 'personal'], tags: [] });
+  });
+
+  it('теги: предел числа из конфигурации — новый тег не принимается; подсказки не загрузились — заметка, базы выбираются', async () => {
+    window.localStorage.setItem('portal.chat.collections', 'shared');
+    const { server, user } = setupChat([]);
+    server.on('GET /api/config', () => ok({ ...CONFIG, kb: { ...CONFIG.kb, tags: { ...CONFIG.kb.tags, max_selected: 1 } } }));
+    server.on('GET /api/kb/tags', () => ok({ items: ['аренда', 'ЛЭП'] }));
+    await user.click(await screen.findByRole('button', { name: 'База знаний: Общая' }));
+    const panel = await screen.findByRole('dialog', { name: 'База знаний' });
+
+    await user.click(within(panel).getByRole('textbox'));
+    await user.click(await screen.findByText('ЛЭП'));
+    expect(await within(panel).findByText('Можно выбрать не больше 1 тега')).toBeInTheDocument();
+    // Предел достигнут: подсказок больше нет, запрос за ними не идёт.
+    const requests = server.callsTo('GET /api/kb/tags').length;
+    await user.type(within(panel).getByRole('textbox'), 'ар');
+    expect(screen.queryByText('аренда')).not.toBeInTheDocument();
+    expect(server.callsTo('GET /api/kb/tags')).toHaveLength(requests);
+
+    // Тег убран — строка о пределе исчезает; сбой подсказок базам не мешает.
+    server.on('GET /api/kb/tags', () => fail(503, 'service_unavailable'));
+    await user.clear(within(panel).getByRole('textbox'));
+    await user.keyboard('{Backspace}{Backspace}');
+    await waitFor(() => expect(within(panel).queryByText('Можно выбрать не больше 1 тега')).not.toBeInTheDocument());
+    await user.type(within(panel).getByRole('textbox'), 'а');
+    expect(await within(panel).findByText('Не удалось загрузить теги')).toBeInTheDocument();
+    expect(screen.queryByText('Такого тега нет')).not.toBeInTheDocument();
+    await user.click(within(panel).getByRole('checkbox', { name: /^Моя —/ }));
+    expect(window.localStorage.getItem('portal.chat.collections')).toBe('shared,personal');
   });
 
   it('по завершении ответа — кнопки-сноски и карточки только упомянутых источников; сноска в коде остаётся текстом', async () => {
@@ -939,11 +1364,12 @@ describe('чат: база знаний', () => {
   it.each([
     [{ sources: null, sources_found: null }, null],
     [{ sources: [], sources_found: 4 }, t.sources.notCited],
-    [{ sources: [], sources_found: 0 }, t.sources.nothingFound],
+    // В истории параметров вопроса нет: текст общий, без совета про теги.
+    [{ sources: [], sources_found: 0 }, t.sources.nothingFound.fromHistory],
   ] as const)('что под ответом после перезагрузки: %o', async (patch, text) => {
     setupChat([QUESTION, message({ content: 'Ответ без ссылок', ...patch, sources: patch.sources ? [] : null })]);
     await screen.findByText('Ответ без ссылок');
-    for (const line of [t.sources.notCited, t.sources.nothingFound]) {
+    for (const line of [t.sources.notCited, ...Object.values(t.sources.nothingFound)]) {
       if (line === text) {
         expect(screen.getByText(line)).toBeInTheDocument();
       } else {
@@ -984,17 +1410,18 @@ describe('чат: база знаний', () => {
     const { server, user } = setupChat([QUESTION, message({ content: 'Срок [1].', sources_found: 1, sources: [source(1)] })]);
     server.on('GET /api/kb/documents/doc-1/text', (_body, url) =>
       url.searchParams.get('page') === '3'
-        ? ok({ page: 3, page_count: 14, recognized: false, segments: [{ text: 'Третья страница', highlight: false }] })
-        : ok({
-            page: 2,
-            page_count: 14,
-            recognized: true,
-            segments: [
-              { text: '1.1. Арендодатель предоставляет участок ', highlight: false },
-              { text: 'сроком на 49 (сорок девять) лет', highlight: true },
-              { text: ' с даты регистрации…', highlight: false },
-            ],
-          }),
+        ? ok(pageText(3, [['Третья страница', false]]))
+        : ok(
+            pageText(
+              2,
+              [
+                ['1.1. Арендодатель предоставляет участок ', false],
+                ['сроком на 49 (сорок девять) лет', true],
+                [' с даты регистрации…', false],
+              ],
+              { recognized: true },
+            ),
+          ),
     );
     server.on('GET /api/kb/documents/doc-1', () => ok(KB_DOC));
 
@@ -1007,8 +1434,8 @@ describe('чат: база знаний', () => {
     expect(screen.getByText(/12\.09\.2026 · 14 стр\./)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: texts.viewer.openOriginal })).toHaveAttribute('href', '/api/kb/documents/doc-1/file#page=2');
     expect(screen.getByRole('link', { name: texts.viewer.openOriginal })).toHaveAttribute('target', '_blank');
-    const first = vi.mocked(fetch).mock.calls.map(([input]) => String(input)).find((url) => url.includes('/text'));
-    expect(first).toBe('/api/kb/documents/doc-1/text?fragment_id=frag-1');
+    // Страница — из карточки, вместе с цитатой: после повторной обработки документ откроется на прежнем месте.
+    expect(textUrls()[0]).toBe('/api/kb/documents/doc-1/text?page=2&fragment_id=frag-1');
     // Пока открыт просмотр, история скрыта, лента остаётся.
     expect(screen.queryByRole('complementary', { name: t.history })).not.toBeInTheDocument();
     expect(screen.getByText('Какой срок аренды?')).toBeInTheDocument();
@@ -1019,15 +1446,9 @@ describe('чат: база знаний', () => {
     expect(screen.getByRole('link', { name: texts.viewer.openOriginal })).toHaveAttribute('href', '/api/kb/documents/doc-1/file#page=3');
 
     // При листании цитата передаётся вместе со страницей: вернувшись, видим её подсвеченной.
-    const textUrls = () => vi.mocked(fetch).mock.calls.map(([input]) => String(input)).filter((url) => url.includes('/text'));
     expect(textUrls().at(-1)).toBe('/api/kb/documents/doc-1/text?page=3&fragment_id=frag-1');
     server.on('GET /api/kb/documents/doc-1/text', (_body, url) =>
-      ok({
-        page: 2,
-        page_count: 14,
-        recognized: true,
-        segments: [{ text: 'сроком на 49 (сорок девять) лет', highlight: url.searchParams.get('fragment_id') === 'frag-1' }],
-      }),
+      ok(pageText(2, [['сроком на 49 (сорок девять) лет', url.searchParams.get('fragment_id') === 'frag-1']], { recognized: true })),
     );
     await user.click(screen.getByRole('button', { name: texts.viewer.previous }));
     await waitFor(() => expect(textUrls().at(-1)).toBe('/api/kb/documents/doc-1/text?page=2&fragment_id=frag-1'));
@@ -1037,7 +1458,7 @@ describe('чат: база знаний', () => {
   it('документ без страниц: навигации нет; сведения не получены — шапка с одним названием', async () => {
     const { server, user } = setupChat([QUESTION, message({ content: 'Срок [1].', sources_found: 1, sources: [source(1, { page: null })] })]);
     server.on('GET /api/kb/documents/doc-1/text', () =>
-      ok({ page: null, page_count: null, recognized: false, segments: [{ text: 'Весь текст документа', highlight: false }] }),
+      ok(pageText(null, [['Весь текст документа', false]])),
     );
     server.on('GET /api/kb/documents/doc-1', () => fail(500, 'internal_error'));
 
@@ -1046,6 +1467,8 @@ describe('чат: база знаний', () => {
     expect(screen.queryByText(/Страница/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Общая база/)).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: texts.viewer.openOriginal })).toHaveAttribute('href', '/api/kb/documents/doc-1/file');
+    // У документа без страниц место не передаётся — только цитата.
+    expect(textUrls()[0]).toBe('/api/kb/documents/doc-1/text?fragment_id=frag-1');
   });
 
   it.each([
@@ -1084,9 +1507,9 @@ describe('чат: база знаний', () => {
 
   it('сбой при листании — заметка «Не удалось открыть страницу» с «Повторить»; удалённый документ закрывает панель', async () => {
     const { server, user } = setupChat([QUESTION, message({ content: 'Срок [1].', sources_found: 1, sources: [source(1)] })]);
-    const second = ok({ page: 2, page_count: 14, recognized: false, segments: [{ text: 'Вторая страница', highlight: false }] });
+    const second = ok(pageText(2, [['Вторая страница', false]]));
     server.on('GET /api/kb/documents/doc-1', () => ok(KB_DOC));
-    server.on('GET /api/kb/documents/doc-1/text', (_body, url) => (url.searchParams.has('page') ? fail(500, 'internal_error') : second));
+    server.on('GET /api/kb/documents/doc-1/text', (_body, url) => (url.searchParams.get('page') === '2' ? second : fail(500, 'internal_error')));
 
     await user.click(await screen.findByRole('button', { name: /Источник 1/ }));
     expect(await screen.findByText('Вторая страница')).toBeInTheDocument();
@@ -1098,22 +1521,176 @@ describe('чат: база знаний', () => {
 
     server.on('GET /api/kb/documents/doc-1/text', (_body, url) =>
       url.searchParams.get('page') === '3'
-        ? ok({ page: 3, page_count: 14, recognized: false, segments: [{ text: 'Третья страница', highlight: false }] })
+        ? ok(pageText(3, [['Третья страница', false]]))
         : second,
     );
     await user.click(screen.getByRole('button', { name: texts.common.retry }));
     expect(await screen.findByText('Третья страница')).toBeInTheDocument();
     expect(screen.queryByText('Не удалось открыть страницу')).not.toBeInTheDocument();
 
-    server.on('GET /api/kb/documents/doc-1/text', (_body, url) => (url.searchParams.has('page') ? fail(404, 'not_found') : second));
+    server.on('GET /api/kb/documents/doc-1/text', (_body, url) => (url.searchParams.get('page') === '2' ? fail(404, 'not_found') : second));
     await user.click(screen.getByRole('button', { name: texts.viewer.previous }));
     expect(await screen.findByText(texts.viewer.deleted)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText('Третья страница')).not.toBeInTheDocument());
     expect(screen.getByRole('complementary', { name: t.history })).toBeInTheDocument();
   });
 
+  it('источник-запись: момент в карточке и в имени сноски; просмотр открыт на моменте, звук — только по нажатию', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    const record = source(2, { document_id: 'rec-1', document_title: 'Совещание 03.10.mp3', scope: 'ministries', page: null, timecode_seconds: 760 });
+    const { server, user } = setupChat([QUESTION, message({ content: 'Продлеваем [2].', sources_found: 2, sources: [record] })]);
+    const part = (page: number, patch: Partial<DocumentText>): DocumentText => ({
+      page,
+      page_count: 3,
+      recognized: true,
+      segments: [
+        { text: 'По второму вопросу. ', highlight: false, start_seconds: 725 },
+        { text: 'Предлагаю так: ', highlight: false, start_seconds: 760 },
+        { text: 'срок аренды продлеваем', highlight: true, start_seconds: null },
+      ],
+      timecode_seconds: 760,
+      image: null,
+      ...patch,
+    });
+    server.on('GET /api/kb/documents/rec-1/text', (_body, url) =>
+      ok(url.searchParams.get('page') === '3' ? part(3, { segments: [], timecode_seconds: 1200 }) : part(2, {})),
+    );
+    server.on('GET /api/kb/documents/rec-1', () =>
+      ok({ ...KB_DOC, id: 'rec-1', title: 'Совещание 03.10.mp3', scope: 'ministries', kind: 'recording', page_count: null, duration_seconds: 4320 }),
+    );
+
+    const card = (await screen.findByText('Совещание 03.10.mp3')).closest('button') as HTMLElement;
+    expect(card).toHaveTextContent('с 12:40');
+    expect(card).toHaveTextContent('Министерства');
+    expect(card).not.toHaveTextContent('стр.');
+    await user.click(screen.getByRole('button', { name: 'Источник 2: Совещание 03.10.mp3, с 12 минут 40 секунд' }));
+
+    // У записи страницы нет: место — момент из карточки.
+    const listen = await screen.findByRole('button', { name: 'Слушать с 12:40' });
+    expect(textUrls()[0]).toBe('/api/kb/documents/rec-1/text?fragment_id=frag-2&timecode=760');
+    expect(await screen.findByText(/Министерства · добавил\(а\) Петров А\. С\./)).toBeInTheDocument();
+    expect(screen.getByText(/1 ч 12 мин/)).toBeInTheDocument();
+    expect(screen.getByText('Часть 2 из 3')).toBeInTheDocument();
+    expect(screen.getByText('срок аренды продлеваем').tagName).toBe('MARK');
+    // Оригинала у записи нет.
+    expect(screen.queryByRole('link', { name: texts.viewer.openOriginal })).not.toBeInTheDocument();
+    expect(screen.getByText(texts.viewer.noOriginal)).toBeInTheDocument();
+
+    // Проигрыватель встаёт на момент цитаты и ждёт нажатия: сам звук не включается.
+    const audio = screen.getByLabelText('Запись Совещание 03.10.mp3') as HTMLAudioElement;
+    expect(audio).toHaveAttribute('src', '/api/kb/documents/rec-1/audio');
+    expect(audio).not.toHaveAttribute('autoplay');
+    fireEvent.loadedMetadata(audio);
+    expect(audio.currentTime).toBe(760);
+    expect(play).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Слушать с 12 минут 5 секунд' }));
+    expect(audio.currentTime).toBe(725);
+    expect(play).toHaveBeenCalledTimes(1);
+    await user.click(listen);
+    expect(audio.currentTime).toBe(760);
+    expect(play).toHaveBeenCalledTimes(2);
+
+    // Листание частей: по номеру с той же цитатой, без момента; проигрыватель не переставляется.
+    await user.click(screen.getByRole('button', { name: texts.viewer.nextPart }));
+    expect(await screen.findByText(texts.viewer.noSpeech)).toBeInTheDocument();
+    expect(textUrls().at(-1)).toBe('/api/kb/documents/rec-1/text?page=3&fragment_id=frag-2');
+    expect(screen.getByRole('button', { name: 'Слушать с 20:00' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Запись Совещание 03.10.mp3')).toBe(audio);
+    expect(audio.currentTime).toBe(760);
+
+    // Звук не загрузился: заметка с «Повторить», моменты остаются текстом.
+    fireEvent.error(audio);
+    expect(await screen.findByText(texts.viewer.audioFailed)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Слушать с/ })).not.toBeInTheDocument();
+  });
+
+  it('источник-запись: цитата на нескольких строках — в видимую часть прокручивается её начало', async () => {
+    const record = source(2, { document_id: 'rec-1', document_title: 'Совещание 03.10.mp3', page: null, timecode_seconds: 760 });
+    const { server, user } = setupChat([QUESTION, message({ content: 'Продлеваем [2].', sources_found: 2, sources: [record] })]);
+    const text: DocumentText = {
+      page: 1,
+      page_count: 1,
+      recognized: true,
+      segments: [
+        { text: 'По второму вопросу.', highlight: false, start_seconds: 725 },
+        { text: 'срок аренды', highlight: true, start_seconds: 760 },
+        { text: 'продлеваем', highlight: true, start_seconds: 770 },
+        { text: 'до конца 2027 года', highlight: true, start_seconds: 780 },
+      ],
+      timecode_seconds: 760,
+      image: null,
+    };
+    server.on('GET /api/kb/documents/rec-1/text', () => ok(text));
+    server.on('GET /api/kb/documents/rec-1', () => ok({ ...KB_DOC, id: 'rec-1', kind: 'recording', page_count: null, duration_seconds: 4320 }));
+
+    await user.click(await screen.findByRole('button', { name: 'Источник 2: Совещание 03.10.mp3, с 12 минут 40 секунд' }));
+    expect(await screen.findByText('до конца 2027 года')).toBeInTheDocument();
+    const scrolledTo = () => vi.mocked(Element.prototype.scrollIntoView).mock.contexts.filter((element) => (element as Element).tagName === 'MARK');
+    await waitFor(() => expect(scrolledTo().length).toBeGreaterThan(0));
+    expect(new Set(scrolledTo())).toEqual(new Set([screen.getByText('срок аренды')]));
+  });
+
+  it('источник-картинка: адрес строит интерфейс; под ответом — один раз; не загрузилась — убрана из ряда', async () => {
+    const figure = { document_id: 'doc-3', document_title: 'Межевой план.pdf', page: 4, image_id: 'img-1', quote: 'Схема границ: пять точек' };
+    const content = [
+      'Границы — на схеме [3], она же [4], и чертёж [5].',
+      // Картинки, которые написала сама модель, не загружаются — ни по внешнему адресу, ни по адресу портала.
+      '![подлог](/api/kb/documents/doc-9/images/evil) ![пиксель](https://evil.example/p.png)',
+    ].join('\n\n');
+    const { server, user } = setupChat([
+      QUESTION,
+      message({
+        content,
+        sources_found: 5,
+        sources: [source(3, figure), source(4, { ...figure, fragment_id: 'frag-4' }), source(5, { image_id: 'img-2', quote: 'Чертёж <b>сетки</b>' })],
+      }),
+    ]);
+    server.on('GET /api/kb/documents/doc-3', () => ok({ ...KB_DOC, id: 'doc-3', title: 'Межевой план.pdf' }));
+    server.on('GET /api/kb/documents/doc-3/text', (_body, url) =>
+      ok(
+        pageText(Number(url.searchParams.get('page')), [['Текст страницы', false]], {
+          image: url.searchParams.get('page') === '4' ? { id: 'img-1', description: 'Схема **границ** <img src=x onerror="window.hacked = true">' } : null,
+        }),
+      ),
+    );
+
+    const row = (await screen.findByRole('heading', { name: t.sources.figures })).parentElement as HTMLElement;
+    const sources = () => Array.from(screen.getByRole('main').querySelectorAll('img')).map((img) => img.getAttribute('src'));
+    // Две сноски на одну картинку — одна картинка в ряду; в карточках — у каждой своя.
+    expect(within(row).getAllByRole('button')).toHaveLength(2);
+    expect(new Set(sources())).toEqual(new Set(['/api/kb/documents/doc-3/images/img-1', '/api/kb/documents/doc-5/images/img-2']));
+    expect(screen.getByRole('main')).toHaveTextContent('подлог — /api/kb/documents/doc-9/images/evil');
+    const picture = within(row).getByRole('button', { name: 'Картинка из документа Межевой план.pdf, источник 3' });
+    expect(within(picture).getByAltText('Схема границ: пять точек')).toHaveAttribute('loading', 'lazy');
+    expect(row).toHaveTextContent('[3] Межевой план.pdf, стр. 4');
+
+    // Картинка не загрузилась: из ряда убирается, карточка остаётся со строкой «Картинка недоступна».
+    for (const broken of screen.getAllByAltText('Чертёж <b>сетки</b>')) {
+      fireEvent.error(broken);
+    }
+    expect(within(row).getAllByRole('button')).toHaveLength(1);
+    expect(screen.getByText(t.sources.imageUnavailable).closest('button')).toHaveTextContent('Договор аренды № 14-А, часть 5.pdf');
+
+    // Просмотр: картинка вместо текста страницы, описание — данные, а не разметка.
+    await user.click(picture);
+    expect(await screen.findByRole('heading', { name: texts.viewer.imageDescription })).toBeInTheDocument();
+    expect(textUrls()[0]).toBe('/api/kb/documents/doc-3/text?page=4&fragment_id=frag-3');
+    expect(screen.getByAltText('Картинка из документа Межевой план.pdf')).toHaveAttribute('src', '/api/kb/documents/doc-3/images/img-1');
+    expect(screen.getByText('Схема **границ** <img src=x onerror="window.hacked = true">')).toBeInTheDocument();
+    expect(document.querySelector('img[src="x"]')).toBeNull();
+    expect(screen.queryByText('Текст страницы')).not.toBeInTheDocument();
+
+    fireEvent.error(screen.getByAltText('Картинка из документа Межевой план.pdf'));
+    expect(await screen.findByText(texts.viewer.imageFailed)).toBeInTheDocument();
+    // На других страницах — обычный текст страницы.
+    await user.click(screen.getByRole('button', { name: texts.viewer.next }));
+    expect(await screen.findByText('Текст страницы')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: texts.viewer.imageDescription })).not.toBeInTheDocument();
+  });
+
   it('миниатюра: отложенная загрузка, заданные размеры; не загрузившаяся заменяется значком', async () => {
-    const png = { id: 'f-2', file_name: 'скан.png', media_type: 'image/png', page_count: 1, image_count: 1, created_at: '' };
+    const png = { id: 'f-2', file_name: 'скан.png', media_type: 'image/png', page_count: 1, image_count: 1, duration_seconds: null, transcription: null, created_at: '' };
     setupChat([message({ id: 'u-1', role: 'user', content: 'Что на скане?', attachments: [png] })]);
 
     await screen.findByText('скан.png');
@@ -1130,7 +1707,7 @@ describe('чат: база знаний', () => {
 });
 
 describe('чат: настройки портала не загрузились', () => {
-  const PNG: Attachment = { id: 'f-2', file_name: 'скан.png', media_type: 'image/png', page_count: 1, image_count: 1, created_at: '' };
+  const PNG: Attachment = { id: 'f-2', file_name: 'скан.png', media_type: 'image/png', page_count: 1, image_count: 1, duration_seconds: null, transcription: null, created_at: '' };
 
   it('вопрос и вставленная картинка уходят без проверки в браузере — пределы проверяет сервер', async () => {
     const { server, user } = setupChat([]);

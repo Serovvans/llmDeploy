@@ -8,6 +8,10 @@
 #   make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=corp    этап 2: внешний доступ
 #   make portal                                            этап 3: портал сотрудников
 #
+# Релиз на работающей ВМ (docs/portal-design.md §8.2) — цели release-*: все запускаются
+# из отдельного клона релизного коммита с LIVE=<рабочий клон>; порядок шагов — в
+# заголовке scripts/release.sh.
+#
 # `make help` — список целей. Цели работают с docker, systemd и deploy/.env, поэтому
 # сами подставляют sudo, если Makefile запущен не от root.
 
@@ -59,18 +63,29 @@ ONLY_ERRORS ?=
 # Резервная копия: куда писать (make backup DIR=...) и откуда восстанавливать (FROM=...).
 DIR ?=
 FROM ?=
+# Релиз: доля видеопамяти основной модели (с профилем rerank — 0.81), каталог рабочего
+# клона для целей release-* (они запускаются из релизного клона), доступ ключа к
+# реранкеру (make key RERANK=1).
+GPU_MEM_UTIL ?=
+LIVE ?=
+RERANK ?=
+# Переобработка: ALL=1 — все готовые документы, а не только с прежним индексом.
+ALL ?=
 # Сквозные тесты: один браузер из playwright.config.ts (make dev-test PROJECT=chromium).
 PROJECT ?=
 # Эти значения попадают в команды только через окружение ("$$NAME"), а не подстановкой
 # в текст рецепта: апостроф или пробел в ФИО и пути не ломают команду.
-export LOGIN NAME SINCE EVENT LIMIT DIR FROM
+export LOGIN NAME SINCE EVENT LIMIT DIR FROM LIVE
 
 .PHONY: help host preflight model cert cert-renew gateway smoke-model smoke bench key keys revoke \
+        key-rerank \
         portal smoke-portal portal-admin portal-reset-2fa portal-unlock-login portal-audit \
         portal-reindex \
-        portal-reindex-recreate portal-eval-search backup restore \
+        portal-reindex-recreate portal-eval-search \
+        portal-reprocess-start portal-reprocess-pause portal-reprocess-resume portal-reprocess-status \
+        release-prepare release-rehearse release-backup release-rollback backup restore \
         up down restart ps logs preload \
-        dev-up dev-reset dev-down dev-test-install dev-test check
+        dev-up dev-reset dev-down dev-test-install dev-test dev-check-stand check
 
 help: ## Показать список целей
 	@echo "Развёртывание LLM-сервиса. Использование: make <цель> [ПАРАМЕТР=значение]"
@@ -79,7 +94,8 @@ help: ## Показать список целей
 	@echo
 	@echo "Этап 1 (модель):  make preflight && make model [PROFILES=monitoring]"
 	@echo "Этап 2 (доступ):  make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=corp|internal (для corp с Let's Encrypt сначала make cert)"
-	@echo "Этап 3 (портал):  make key NAME=portal, ключ — в PORTAL_LLM_API_KEY в deploy/.env, затем make portal"
+	@echo "Этап 3 (портал):  make key NAME=portal RERANK=1, ключ — в PORTAL_LLM_API_KEY в deploy/.env, затем make portal"
+	@echo "Релиз портала:    make release-prepare, release-rehearse, release-backup, release-rollback — из клона релизного коммита с LIVE=<рабочий клон>; make portal — в рабочем клоне; порядок в scripts/release.sh"
 
 # --- подготовка ВМ ---
 
@@ -91,8 +107,9 @@ preflight: ## Проверить готовность ВМ (GPU, драйвер,
 
 # --- этап 1: модель ---
 
-model: ## Этап 1: развернуть модель (vLLM на 127.0.0.1:8000), без внешнего доступа
-	$(INSTALL) --stage model $(if $(PROFILES),--profiles $(PROFILES))
+model: ## Этап 1: развернуть модель (vLLM на 127.0.0.1:8000), без внешнего доступа ([PROFILES=embeddings,rerank GPU_MEM_UTIL=0.81])
+	$(INSTALL) --stage model $(if $(PROFILES),--profiles $(PROFILES)) \
+		$(if $(GPU_MEM_UTIL),--gpu-mem-util $(GPU_MEM_UTIL))
 
 smoke-model: ## Этап 1: смоук-тест модели напрямую (текст, зрение, json_schema, tool call)
 	$(WITH_ENV) bash -c 'LLM_API_KEY="$$VLLM_API_KEY" exec uv run smoke_test.py --direct $(ARGS)'
@@ -110,21 +127,23 @@ cert: ## Этап 2: выпустить сертификат Let's Encrypt дл�
 cert-renew: ## Продлить сертификат, если до конца срока меньше 30 дней; Caddy перечитывает его без перезапуска ([MANUAL=1])
 	$(SUDO) bash $(SCRIPTS_DIR)/cert.sh renew $(if $(MANUAL),--manual)
 
-gateway: ## Этап 2: добавить Caddy и Bifrost (LLM_HOSTNAME=... TLS_MODE=corp|internal)
+gateway: ## Этап 2: добавить Caddy и Bifrost (LLM_HOSTNAME=... TLS_MODE=corp|internal [PROFILES=... GPU_MEM_UTIL=0.81])
 	$(INSTALL) --stage gateway --skip-preflight \
 		$(if $(LLM_HOSTNAME),--hostname $(LLM_HOSTNAME)) \
 		$(if $(TLS_MODE),--tls $(TLS_MODE)) \
-		$(if $(PROFILES),--profiles $(PROFILES))
+		$(if $(PROFILES),--profiles $(PROFILES)) \
+		$(if $(GPU_MEM_UTIL),--gpu-mem-util $(GPU_MEM_UTIL))
 
 smoke: ## Этап 2: смоук-тест через HTTPS (KEY=sk-bf-... [CA=<PEM корневого CA>] [LLM_BASE_URL=https://<имя>:18443/v1])
 	@[[ -n "$(KEY)" ]] || { echo "укажите KEY=sk-bf-... (создать: make key NAME=smoke)" >&2; exit 1; }
 	$(WITH_ENV) env LLM_API_KEY='$(KEY)' $(if $(CA),LLM_CA_CERT='$(CA)') \
 		$(if $(LLM_BASE_URL),LLM_BASE_URL='$(LLM_BASE_URL)') uv run smoke_test.py $(ARGS)
 
-key: ## Создать ключ клиента (NAME=app-crm [REQUESTS=600 TOKENS=500000])
+key: ## Создать ключ клиента (NAME=app-crm [REQUESTS=600 TOKENS=500000]; ключу портала — RERANK=1)
 	@[[ -n "$(NAME)" ]] || { echo "укажите NAME=<имя ключа>" >&2; exit 1; }
 	$(WITH_ENV) uv run keys.py create --name '$(NAME)' \
-		$(if $(REQUESTS),--requests $(REQUESTS)) $(if $(TOKENS),--tokens $(TOKENS))
+		$(if $(REQUESTS),--requests $(REQUESTS)) $(if $(TOKENS),--tokens $(TOKENS)) \
+		$(if $(RERANK),--rerank)
 
 keys: ## Показать выданные ключи, их лимиты и расход
 	$(WITH_ENV) uv run keys.py list
@@ -133,12 +152,17 @@ revoke: ## Отозвать ключ (ID=<id из make keys>)
 	@[[ -n "$(ID)" ]] || { echo "укажите ID=<id ключа> (список: make keys)" >&2; exit 1; }
 	$(WITH_ENV) uv run keys.py revoke '$(ID)'
 
+key-rerank: ## Выдать уже выпущенному ключу портала доступ к реранкеру (ID=<id из make keys>)
+	@[[ -n "$(ID)" ]] || { echo "укажите ID=<id ключа> (список: make keys)" >&2; exit 1; }
+	$(WITH_ENV) uv run keys.py grant-rerank '$(ID)'
+
 # --- этап 3: портал сотрудников ---
 
-portal: ## Этап 3: добавить портал (нужны gateway, embeddings и PORTAL_LLM_API_KEY в deploy/.env)
-	$(INSTALL) --stage portal --skip-preflight $(if $(PROFILES),--profiles $(PROFILES))
+portal: ## Этап 3: добавить или обновить портал (нужны gateway, embeddings и PORTAL_LLM_API_KEY; [PROFILES=embeddings,rerank GPU_MEM_UTIL=0.81])
+	$(INSTALL) --stage portal --skip-preflight $(if $(PROFILES),--profiles $(PROFILES)) \
+		$(if $(GPU_MEM_UTIL),--gpu-mem-util $(GPU_MEM_UTIL))
 
-smoke-portal: ## Этап 3: что отдаёт сайт через 443 и здоровы ли сервисы; без запросов к модели ([CA=...] [LLM_BASE_URL=...])
+smoke-portal: ## Этап 3: что отдаёт сайт через 443, здоровы ли сервисы, отвечает ли реранкер; без запросов к основной модели ([CA=...] [LLM_BASE_URL=...])
 	$(WITH_ENV) env $(if $(CA),LLM_CA_CERT='$(CA)') $(if $(LLM_BASE_URL),LLM_BASE_URL='$(LLM_BASE_URL)') uv run smoke_test.py --site-only --compose-file $(COMPOSE_FILE)
 
 # Временный пароль печатается один раз и только на экран: команда не выводится (@) и
@@ -173,6 +197,41 @@ portal-reindex-recreate: ## Пересоздать коллекцию Qdrant и 
 
 portal-eval-search: ## Оценить поиск базы знаний на контрольном наборе
 	$(COMPOSE) exec -T portal-worker portal eval-search
+
+# Массовая переобработка после релиза (docs/portal-design.md §8.2): документ остаётся в
+# поиске с прежним индексом, пока не готов новый. Не путать с portal-reindex.
+portal-reprocess-start: ## Поставить документы на переобработку без выпадения из поиска ([ALL=1] — все готовые)
+	$(COMPOSE) exec -T portal-worker portal reprocess start $(if $(ALL),--all)
+
+portal-reprocess-pause: ## Приостановить массовую переобработку
+	$(COMPOSE) exec -T portal-worker portal reprocess pause
+
+portal-reprocess-resume: ## Возобновить массовую переобработку
+	$(COMPOSE) exec -T portal-worker portal reprocess resume
+
+portal-reprocess-status: ## Ход переобработки: очередь, сбои, пауза
+	$(COMPOSE) exec -T portal-worker portal reprocess status
+
+# --- релиз на работающей ВМ (docs/portal-design.md §8.2) ---
+
+# Из отдельного клона релизного коммита; аргументы — те же, что получит make portal в окне.
+release-prepare: ## Релиз, до окна: место на диске, образы, веса, тег отката; стек не меняется (LIVE=<рабочий клон> [PROFILES=... GPU_MEM_UTIL=0.81])
+	@[[ -n "$$LIVE" ]] || { echo "укажите LIVE=<каталог рабочего клона>; цель запускается из отдельного клона релизного коммита" >&2; exit 1; }
+	$(INSTALL) --prepare-from "$$LIVE" $(if $(PROFILES),--profiles $(PROFILES)) \
+		$(if $(GPU_MEM_UTIL),--gpu-mem-util $(GPU_MEM_UTIL))
+
+release-rehearse: ## Релиз, до окна: миграции релиза на копии рабочей базы (LIVE=<рабочий клон>)
+	@[[ -n "$$LIVE" ]] || { echo "укажите LIVE=<каталог рабочего клона>; цель запускается из клона, где прошёл make release-prepare" >&2; exit 1; }
+	$(SUDO) bash $(SCRIPTS_DIR)/release.sh rehearse "$$LIVE"
+
+# Из того же релизного клона: в рабочем клоне на прежнем коммите целей release-* нет.
+release-backup: ## Релиз, в окне, из релизного клона: резервная копия в каталог вне диска / (LIVE=<рабочий клон> DIR=<каталог>)
+	@[[ -n "$$LIVE" && -n "$$DIR" ]] || { echo "укажите LIVE=<каталог рабочего клона> DIR=<каталог для копий на диске, отличном от />; цель запускается из клона релизного коммита" >&2; exit 1; }
+	$(SUDO) bash $(SCRIPTS_DIR)/release.sh backup "$$LIVE" "$$DIR"
+
+release-rollback: ## Откат релиза, из релизного клона, после git checkout прежнего коммита в рабочем (LIVE=<рабочий клон> [FROM=<каталог копии>] — с восстановлением данных)
+	@[[ -n "$$LIVE" ]] || { echo "укажите LIVE=<каталог рабочего клона>; цель запускается из клона релизного коммита" >&2; exit 1; }
+	$(SUDO) bash $(SCRIPTS_DIR)/release.sh rollback "$$LIVE" $(if $(FROM),"$$FROM")
 
 # --- эксплуатация ---
 
@@ -234,6 +293,11 @@ dev-test: ## Сквозные тесты на поднятом стенде ([PR
 	@[[ -d $(E2E_DIR)/node_modules ]] || { echo "нет зависимостей сквозных тестов: сначала make dev-test-install" >&2; exit 1; }
 	cd $(E2E_DIR) && npm test $(if $(PROJECT),-- --project=$(PROJECT))
 
+# Изоляция песочницы SQL, журнал Caddy, ffmpeg в образе воркера — на настоящих образах.
+# В make check не входит: нужен поднятый стенд.
+dev-check-stand: ## Проверки образов на поднятом стенде (make dev-up): песочница SQL, журнал Caddy, ffmpeg
+	cd $(PORTAL_DIR)/dev && uv run pytest stand
+
 # Запускать без sudo: тесты бэкенда портала поднимают PostgreSQL, а он от root не стартует.
 # Первому запуску нужна сеть (uv sync, npm ci).
 check: ## Локальные проверки: docker compose config, ruff, mypy, pytest, shellcheck, портал; не одновременно с make dev-test
@@ -241,7 +305,9 @@ check: ## Локальные проверки: docker compose config, ruff, mypy
 		sed -e 's/^\([A-Za-z_]*\)=$$/\1=placeholder/' $(DEPLOY_DIR)/.env.example >"$$tmp"; \
 		for profiles in "" "gateway" "gateway,embeddings,monitoring" \
 				"gateway,embeddings,portal" "gateway,embeddings,monitoring,portal" \
-				"gateway,embeddings,monitoring,portal,cert"; do \
+				"gateway,embeddings,monitoring,portal,cert" \
+				"embeddings,rerank" "gateway,embeddings,rerank,portal" \
+				"gateway,embeddings,monitoring,rerank,portal,cert"; do \
 			echo "==> docker compose config COMPOSE_PROFILES=$$profiles"; \
 			COMPOSE_PROFILES="$$profiles" docker compose -f $(COMPOSE_FILE) --env-file "$$tmp" config -q || exit 1; \
 		done; \

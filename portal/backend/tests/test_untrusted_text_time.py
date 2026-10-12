@@ -107,6 +107,8 @@ _SOURCE_FIELDS: dict[str, Any] = {
     "document_id": uuid4(),
     "scope": "shared",
     "page": 1,
+    "timecode_seconds": None,
+    "image_id": None,
     "fragment_id": uuid4(),
 }
 

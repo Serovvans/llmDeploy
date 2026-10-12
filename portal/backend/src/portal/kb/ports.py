@@ -6,10 +6,11 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, get_args
 from uuid import UUID
 
-KnowledgeScope = Literal["shared", "shared_and_personal", "cogis"]
+Collection = Literal["shared", "personal", "ministries"]
+COLLECTIONS: frozenset[Collection] = frozenset(get_args(Collection))
 
 
 class Embedder(Protocol):
@@ -38,11 +39,44 @@ class FragmentPoint:
 
     fragment_id: UUID
     document_id: UUID
-    scope: Literal["shared", "personal"]
+    scope: Collection
     owner_id: UUID
     is_cogis: bool
+    tags: Sequence[str]  # ключи тегов документа (§8.5)
     dense: Sequence[float]
     lexical: SparseVector
+
+
+@dataclass(frozen=True)
+class KnowledgeSelection:
+    """Выбор клиента: коллекции и теги. Предел доступа он может только сузить (§10.3).
+
+    `tags` — теги как прислал клиент; ключи строит порт. `cogis_only` — только
+    документация CoGIS общей базы: выбор клиента в таком поиске не участвует.
+    """
+
+    collections: frozenset[Collection]
+    tags: frozenset[str] = frozenset()
+    cogis_only: bool = False
+
+    def __post_init__(self) -> None:
+        """Пустой набор и неизвестная коллекция — ошибка, а не поиск без ветви фильтра."""
+        if not self.collections or not self.collections <= COLLECTIONS:
+            raise ValueError("набор коллекций пуст или содержит неизвестное значение")
+        if self.cogis_only and (self.collections != {"shared"} or self.tags):
+            raise ValueError("документация CoGIS ищется только в общей базе и без тегов")
+
+
+@dataclass(frozen=True)
+class SearchHits:
+    """Кандидаты поиска (§10.4)."""
+
+    lexical: Sequence[UUID]  # лучшие лексические совпадения, по порядку
+    hybrid: Sequence[UUID]  # слияние ветвей, по порядку
+
+    def ordered(self) -> list[UUID]:
+        """Все кандидаты без повторов: сначала лексические совпадения, затем слияние ветвей."""
+        return list(dict.fromkeys([*self.lexical, *self.hybrid]))
 
 
 class VectorIndex(Protocol):
@@ -59,12 +93,31 @@ class VectorIndex(Protocol):
         """Удалить коллекцию со всеми точками; отсутствие — не ошибка."""
         ...
 
-    async def replace_document(self, document_id: UUID, points: Sequence[FragmentPoint]) -> None:
-        """Заменить все точки документа: прежние удаляются, новые записываются."""
+    async def delete_document(self, document_id: UUID) -> None:
+        """Удалить все точки документа, включая запас."""
         ...
 
-    async def delete_document(self, document_id: UUID) -> None:
-        """Удалить все точки документа."""
+    async def prune_document(self, document_id: UUID, keep_ids: Sequence[UUID]) -> None:
+        """Уборка (§10.6): удалить точки документа, которых нет в `keep_ids`.
+
+        `keep_ids` — текущие `kb_fragments`; пустой список — удаляются все точки документа.
+        """
+        ...
+
+    async def stage_document(self, document_id: UUID, points: Sequence[FragmentPoint]) -> None:
+        """Записать точки в запас: с `pending`, поиск их не видит."""
+        ...
+
+    async def publish_document(self, document_id: UUID, tags: Sequence[str]) -> None:
+        """Выставить теги и снять `pending` у запаса; прежние точки не трогаются."""
+        ...
+
+    async def update_vectors(self, points: Sequence[FragmentPoint]) -> None:
+        """Перезаписать векторы существующих точек; payload не меняется (этап контекста, §10.6)."""
+        ...
+
+    async def set_tags(self, document_id: UUID, tags: Sequence[str]) -> None:
+        """Выставить ключи тегов у всех точек документа (правка тегов, §8.5)."""
         ...
 
     async def search(
@@ -72,10 +125,18 @@ class VectorIndex(Protocol):
         dense: Sequence[float],
         lexical: SparseVector,
         user_id: UUID,
-        scope: KnowledgeScope,
-        limit: int,
-    ) -> list[UUID]:
-        """Гибридный поиск; фильтр доступа (§10.3) строится внутри, по `user_id` и `scope`."""
+        selection: KnowledgeSelection,
+        hybrid_limit: int,
+    ) -> SearchHits:
+        """Гибридный поиск; фильтр §10.3 строится внутри, по `user_id` и `selection`."""
+        ...
+
+
+class Reranker(Protocol):
+    """Модель переранжирования; протокол — §12.1."""
+
+    async def scores(self, query: str, documents: Sequence[str]) -> list[float]:
+        """Оценки в порядке документов. Сбой — `RerankUnavailableError`."""
         ...
 
 
@@ -98,8 +159,10 @@ class Source:
     n: int
     document_id: UUID
     document_title: str
-    scope: Literal["shared", "personal"]
+    scope: Collection
     page: int | None
+    timecode_seconds: int | None  # фрагмент расшифровки записи
+    image_id: UUID | None  # источник-картинка
     fragment_id: UUID
     quote: str
 
@@ -113,10 +176,24 @@ class Retrieval:
     context: str
 
 
+@dataclass(frozen=True)
+class DialogTurn:
+    """Сообщение истории диалога: по истории порт переписывает запрос для поиска."""
+
+    role: Literal["user", "assistant"]
+    text: str
+
+
 class KnowledgeBase(Protocol):
     """База знаний для диалогов; обязательства — §13.3."""
 
-    async def retrieve(self, query: str, user_id: UUID, scope: KnowledgeScope) -> Retrieval:
+    async def retrieve(
+        self,
+        query: str,
+        user_id: UUID,
+        selection: KnowledgeSelection,
+        history: Sequence[DialogTurn] = (),
+    ) -> Retrieval:
         """Найти места для ответа на `query`. Любой сбой — `KnowledgeUnavailableError`."""
         ...
 
@@ -140,6 +217,10 @@ class RecognitionFailedError(Exception):
         """Запомнить причину."""
         super().__init__(cause)
         self.cause = cause
+
+
+class RerankUnavailableError(Exception):
+    """Реранкер недоступен: поиск продолжается в прежнем порядке (§8.4)."""
 
 
 class EmbeddingsUnavailableError(Exception):

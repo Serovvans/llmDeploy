@@ -105,7 +105,7 @@ test('блокировка обрывает идущий ответ модели
   const employee = await newMember();
   const dialogId = await createDialog(employee.api, 'chat');
   const stream = employee.api.post(`/api/dialogs/${dialogId}/messages`, {
-    data: { content: 'Долгий ответ [[stub:slow]]', mode: 'fast', knowledge: 'none' },
+    data: { content: 'Долгий ответ [[stub:slow]]', mode: 'fast', collections: [] },
   });
   // Блокируем, когда ответ уже формируется: у диалога появилось сообщение в состоянии «streaming».
   const observer = await signIn(employee.account);

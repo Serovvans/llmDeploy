@@ -109,6 +109,19 @@
   background: var(--p-surface-2);
 }
 
+/* Итог проверки на тестовых данных, для которого блок кода в ответе не нашёлся (концепция §5.7). */
+.orphanRun {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.orphanNote {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
 /* Черта в конце дописываемого текста; при prefers-reduced-motion — неподвижная. */
 .streaming > :last-child::after {
   content: '';

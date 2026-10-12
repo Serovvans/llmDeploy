@@ -1,0 +1,177 @@
+/* Блок проверки SQL на тестовых данных (концепция §5.7, §7.3): только переменные темы. */
+.line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 20px;
+}
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 16px 16px;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: var(--p-bg);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.frame p {
+  margin: 0;
+}
+
+.headline {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--p-text);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.headline .icon {
+  height: 24px;
+}
+
+.ok {
+  color: var(--p-text);
+}
+
+.warning {
+  color: var(--p-warning-icon);
+}
+
+.error {
+  color: var(--p-error-text);
+}
+
+.muted {
+  color: var(--p-text-muted);
+}
+
+.part {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.label {
+  font-weight: 600;
+}
+
+.tableName {
+  font-size: 14px;
+}
+
+.message {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--p-surface-2);
+  color: var(--p-text);
+  font-family: var(--p-font-mono);
+  font-size: 14px;
+  line-height: 22px;
+  font-variant-ligatures: none;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* Таблицы — как таблицы ответа (§4.2): шапка закреплена, прокрутка внутри блока по обеим осям. */
+.scroll {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+}
+
+.scroll:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.table {
+  min-width: 100%;
+  border-collapse: collapse;
+  background: var(--p-bg);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--p-line);
+  background: var(--p-bg);
+  color: var(--p-text-muted);
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--p-line);
+  font-family: var(--p-font-mono);
+  font-variant-ligatures: none;
+  white-space: pre;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table tbody tr:hover {
+  background: var(--p-surface-2);
+}
+
+.null {
+  color: var(--p-text-muted);
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  margin-left: -4px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.toggle:hover {
+  background: var(--p-surface-2);
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.fixture {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}

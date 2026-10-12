@@ -46,6 +46,9 @@ async def test_each_supported_type_is_detected_by_content(portal: Portal) -> Non
             "media_type": media_type,
             "page_count": page_count,
             "image_count": image_count,
+            # Не запись: длительности и расшифровки нет (§5.1).
+            "duration_seconds": None,
+            "transcription": None,
             "created_at": "2026-10-05T09:00:00Z",
         }
     keys = [row.storage_key for row in await portal.rows("SELECT storage_key FROM attachments")]
@@ -95,6 +98,7 @@ async def test_unreadable_files_are_refused(portal: Portal) -> None:
     for name, content in (
         ("битый.pdf", b"%PDF-1.4\nnot a document"),
         ("битый.png", truncated_png),
+        ("блок.png", samples.png_with_huge_text_chunk()),
         ("битый.docx", _zip_with_bad_document()),
     ):
         response = await upload(client, dialog_id, name, content)

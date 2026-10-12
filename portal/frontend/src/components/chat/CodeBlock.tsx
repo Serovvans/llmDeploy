@@ -97,22 +97,25 @@ interface CodeBlockProps {
   language: string | null;
   /** Итог проверки — только у блока `sql` в ответе SQL-помощника. */
   check?: SqlBlockCheck;
+  /** Запрос не выполнился на тестовых данных, исправленный показан ниже: блок отмечен, чтобы его не скопировали по привычке. */
+  superseded?: boolean;
 }
 
 /** Блок кода (концепция §4.2): шапка с названием языка и «Скопировать», длинные строки не переносятся. */
-export function CodeBlock({ code, language, check }: CodeBlockProps) {
+export function CodeBlock({ code, language, check, superseded = false }: CodeBlockProps) {
   const copy = useCopy();
   const { title, nodes } = highlight(code, language);
   const errorLine = check?.error?.line;
   return (
     <>
-    <div className={styles.block}>
+    <div className={superseded ? `${styles.block} ${styles.superseded}` : styles.block}>
       <div className={styles.header}>
         <span>{title}</span>
         <Link component="button" onClick={() => void copy.copy(code)}>
           {copy.label}
         </Link>
       </div>
+      {superseded && <p className={styles.supersededNote}>{texts.sql.run.superseded}</p>}
       <pre className={styles.code} tabIndex={0}>
         {/* Строка с ошибкой отмечена полосой слева. */}
         {errorLine !== undefined && (

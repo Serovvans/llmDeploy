@@ -218,3 +218,25 @@ def test_inconsistent_knowledge_base_settings_stop_startup(
 ) -> None:
     with pytest.raises(ConfigError):
         load_settings(ENVIRON, CONFIG_DIR, _override(tmp_path, {"kb": kb}))
+
+
+def test_sandbox_passwords_are_required_only_on_demand_and_must_differ() -> None:
+    """Без флага проверки SQL пароли песочницы порталу не нужны (§13.5)."""
+    assert load_settings(ENVIRON, CONFIG_DIR, Path("нет")).sql.sandbox.enabled is False
+    cases = [
+        {},
+        {"SQL_SANDBOX_PASSWORD": "run"},
+        {"SQL_SANDBOX_PASSWORD": "same", "SQL_SANDBOX_CONTROL_PASSWORD": "same"},
+    ]
+    for extra in cases:
+        with pytest.raises(ConfigError):
+            load_settings(
+                {**ENVIRON, **extra}, CONFIG_DIR, Path("нет")
+            ).require_sql_sandbox_passwords()
+    loaded = load_settings(
+        {**ENVIRON, "SQL_SANDBOX_PASSWORD": "пароль-1", "SQL_SANDBOX_CONTROL_PASSWORD": "пароль-2"},
+        CONFIG_DIR,
+        Path("нет"),
+    )
+    assert loaded.require_sql_sandbox_passwords() == ("пароль-1", "пароль-2")
+    assert "пароль-" not in repr(loaded)

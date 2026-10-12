@@ -109,8 +109,8 @@ async def test_mode_selects_reasoning_effort_and_answer_limit(portal: Portal) ->
     ]
     stored = await portal.rows("SELECT params FROM messages WHERE role = 'user' ORDER BY position")
     assert [row.params for row in stored] == [
-        {"mode": "fast", "knowledge": "none"},
-        {"mode": "thorough", "knowledge": "none"},
+        {"mode": "fast", "collections": [], "tags": []},
+        {"mode": "thorough", "collections": [], "tags": []},
     ]
 
 
@@ -118,9 +118,17 @@ async def test_message_body_is_validated(portal: Portal) -> None:
     client = await portal.employee()
     dialog_id = await new_dialog(client)
     cases: list[tuple[dict[str, Any], tuple[str, str]]] = [
-        ({"content": "x", "knowledge": "none"}, ("mode", "required")),
+        ({"content": "x", "collections": []}, ("mode", "required")),
+        ({"content": "x", "mode": "fast"}, ("collections", "required")),
         ({**CHAT_BODY, "mode": "slow"}, ("mode", "unknown_value")),
-        ({**CHAT_BODY, "knowledge": "all"}, ("knowledge", "unknown_value")),
+        ({**CHAT_BODY, "collections": ["all"]}, ("collections.0", "unknown_value")),
+        ({**CHAT_BODY, "collections": ["shared", "shared"]}, ("collections", "invalid_format")),
+        # Прежнее поле снято (§5.3): как любое лишнее поле.
+        ({**CHAT_BODY, "knowledge": "shared"}, ("knowledge", "invalid_format")),
+        ({**CHAT_BODY, "tags": [f"т{n}" for n in range(21)]}, ("tags", "too_many")),
+        ({**CHAT_BODY, "tags": ["т" * 51]}, ("tags", "too_long")),
+        ({**CHAT_BODY, "tags": ["  "]}, ("tags", "invalid_format")),
+        ({**CHAT_BODY, "tags": ["две\nстроки"]}, ("tags", "invalid_format")),
         ({**CHAT_BODY, "action": "write"}, ("action", "invalid_format")),
         ({**CHAT_BODY, "content": "  "}, ("content", "required")),
         ({**CHAT_BODY, "content": "я" * 32001}, ("content", "too_long")),

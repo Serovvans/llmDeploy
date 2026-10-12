@@ -45,6 +45,16 @@
             "url": "http://vllm-embed:8001",
             "model_name": "embeddings"
           }
+        },
+        {
+          "name": "vllm-rerank",
+          "value": "env.VLLM_API_KEY",
+          "models": ["rerank"],
+          "weight": 1.0,
+          "vllm_key_config": {
+            "url": "http://vllm-rerank:8002",
+            "model_name": "rerank"
+          }
         }
       ]
     }

@@ -5,7 +5,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import type { Dialog, QuestionParams, Source } from '../../api/types';
 import { useDialogs } from '../../chat/ChatProvider';
 import { exportDocx } from '../../chat/exportDocx';
-import { attachHint } from '../../chat/files';
+import { attachExtensions, attachHint } from '../../chat/files';
 import { EMPTY_DRAFT } from '../../chat/state';
 import { useFocusReturn } from '../../hooks/useFocusReturn';
 import { usePageTitle } from '../../hooks/usePageTitle';
@@ -65,7 +65,7 @@ function TitleEditor({ initial, onSave, onDone }: TitleEditorProps) {
   };
 
   return (
-    <header className={styles.editor}>
+    <div className={styles.editor}>
       <h1 className="p-visually-hidden">{initial}</h1>
       <Input
         width={400}
@@ -94,7 +94,7 @@ function TitleEditor({ initial, onSave, onDone }: TitleEditorProps) {
           {error}
         </span>
       )}
-    </header>
+    </div>
   );
 }
 
@@ -107,7 +107,11 @@ interface DialogScreenProps {
   /** Заголовок, пока диалог не открыт; у чата — «Новый чат». */
   sectionTitle: string;
   empty: { title: string; text: string };
-  /** Строка действий и настроек над лентой (концепция §1.2). */
+  /** Настройки вопроса в строке заголовка, справа от названия (SQL-помощник, концепция §5.7). */
+  headerSettings?: React.ReactNode;
+  /** Свой элемент строки управления панели запроса (действие SQL-помощника). */
+  composerControls?: React.ReactNode;
+  /** Строка действий над лентой (концепция §1.2). */
   toolbar?: React.ReactNode;
   /** Постоянное предупреждение над лентой. */
   banner?: React.ReactNode;
@@ -146,10 +150,17 @@ export function DialogScreen(props: DialogScreenProps) {
   const viewer = useDocumentViewer();
   const { open: openViewer, close: closeViewer } = viewer;
 
+  // Место — из самой карточки: оно переживает повторную обработку документа, а `fragment_id` — нет (концепция §4.4).
   const openSource = useCallback(
     (source: Source, openerId: string) =>
       openViewer(
-        { documentId: source.document_id, title: source.document_title, fragmentId: source.fragment_id },
+        {
+          documentId: source.document_id,
+          title: source.document_title,
+          fragmentId: source.fragment_id,
+          page: source.page ?? undefined,
+          timecode: source.timecode_seconds ?? undefined,
+        },
         `[data-opener="${openerId}"]`,
       ),
     [openViewer],
@@ -277,6 +288,7 @@ export function DialogScreen(props: DialogScreenProps) {
     );
   }
 
+  const renaming = dialog !== undefined && renamingId === dialog.id;
   const usable = view?.status !== 'not_found' && view?.status !== 'failed';
   const lastAnswer = last?.role === 'assistant' ? last : undefined;
 
@@ -297,29 +309,34 @@ export function DialogScreen(props: DialogScreenProps) {
       />
       )}
       <div className={styles.area}>
-        {dialog && renamingId === dialog.id ? (
-          <TitleEditor
-            key={dialog.id}
-            initial={title}
-            onSave={(next) => chat.rename(dialog.id, next)}
-            onDone={() => setRenamingId(null)}
-          />
-        ) : (
-          <PageHeader title={title}>
-            {dialog && (
-              <span data-opener="header">
-                {/* Подсказка — слева: сверху ей нет места, а снизу она закрыла бы открытое меню. */}
-                <Hint text={texts.users.actions} pos="left">
-                  <Kebab aria-label={`${texts.users.actions}: ${title}`}>
-                    <MenuItem onClick={() => startRename(dialog, 'header')}>{t.menu.rename}</MenuItem>
-                    <MenuItem onClick={() => void exportDocx(dialog.id)}>{t.menu.exportDocx}</MenuItem>
-                    <MenuItem onClick={() => startRemove(dialog, 'header')}>{t.menu.remove}</MenuItem>
-                  </Kebab>
-                </Hint>
-              </span>
-            )}
-          </PageHeader>
-        )}
+        {/* На время правки названия настройки остаются в заголовке (концепция §5.7). */}
+        <PageHeader
+          title={title}
+          settings={props.headerSettings}
+          editor={
+            dialog && renaming ? (
+              <TitleEditor
+                key={dialog.id}
+                initial={title}
+                onSave={(next) => chat.rename(dialog.id, next)}
+                onDone={() => setRenamingId(null)}
+              />
+            ) : undefined
+          }
+        >
+          {dialog && !renaming && (
+            <span data-opener="header">
+              {/* Подсказка — слева: сверху ей нет места, а снизу она закрыла бы открытое меню. */}
+              <Hint text={texts.users.actions} pos="left">
+                <Kebab aria-label={`${texts.users.actions}: ${title}`}>
+                  <MenuItem onClick={() => startRename(dialog, 'header')}>{t.menu.rename}</MenuItem>
+                  <MenuItem onClick={() => void exportDocx(dialog.id)}>{t.menu.exportDocx}</MenuItem>
+                  <MenuItem onClick={() => startRemove(dialog, 'header')}>{t.menu.remove}</MenuItem>
+                </Kebab>
+              </Hint>
+            </span>
+          )}
+        </PageHeader>
         {props.toolbar}
         {props.banner && <div className={styles.banner}>{props.banner}</div>}
         <div className={styles.body}>{body}</div>
@@ -343,14 +360,18 @@ export function DialogScreen(props: DialogScreenProps) {
               mono={props.mono}
               note={props.note}
               sendPending={props.sendPending}
+              controls={props.composerControls}
               chat={
                 kind === 'chat'
                   ? {
                       mode: chat.mode,
-                      knowledge: chat.knowledge,
-                      attach: config ? { hint: attachHint(config.chat), extensions: config.chat.attachment_extensions } : null,
+                      collections: chat.collections,
+                      tags: chat.tags,
+                      maxTags: config?.kb.tags.max_selected ?? null,
+                      attach: config ? { hint: attachHint(config), extensions: attachExtensions(config) } : null,
                       onModeChange: chat.setMode,
-                      onKnowledgeChange: chat.setKnowledge,
+                      onCollectionsChange: chat.setCollections,
+                      onTagsChange: chat.setTags,
                       onAddFiles: (files) => chat.addFiles(key, files, onCreated),
                       onRetryFile: (fileKey) => chat.retryFile(key, fileKey),
                       onRemoveFile: (fileKey) => chat.removeFile(key, fileKey),

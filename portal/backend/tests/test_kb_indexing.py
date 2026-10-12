@@ -17,8 +17,8 @@ from portal.kb.reindex import WorkerRunningError
 from portal.worker.health import heartbeat_is_fresh
 from portal.worker.loop import Worker
 from tests import samples
-from tests.conftest import close_portal, make_portal
-from tests.kb_support import KbBench, added, kb_settings, make_bench
+from tests.conftest import close_portal, make_kb_bench
+from tests.kb_support import KbBench, added, kb_settings
 
 pytestmark = pytest.mark.anyio
 
@@ -207,7 +207,7 @@ async def test_text_volume_is_limited_by_configuration(settings: Settings, tmp_p
         tmp_path,
         indexing=settings.kb.indexing.model_copy(update={"document_max_chars": 500}),
     )
-    bench = await make_bench(await make_portal(tuned), tuned)
+    bench = await make_kb_bench(tuned)
     try:
         client = await bench.portal.employee()
         fits = await added(client, "малый.txt", b"a" * 500)
@@ -222,7 +222,6 @@ async def test_text_volume_is_limited_by_configuration(settings: Settings, tmp_p
         total = await bench.portal.rows("SELECT sum(char_length(text)) AS chars FROM kb_pages")
         assert total[0].chars <= 500 + 400
     finally:
-        await bench.qdrant.close()
         await close_portal(bench.portal)
 
 
@@ -540,7 +539,7 @@ async def test_large_text_file_is_not_decoded_whole_to_hit_the_limit(
         tmp_path,
         indexing=settings.kb.indexing.model_copy(update={"document_max_chars": limit}),
     )
-    bench = await make_bench(await make_portal(tuned), tuned)
+    bench = await make_kb_bench(tuned)
     try:
         client = await bench.portal.employee()
         document_id = await added(client, "большой.txt", "строка текста\n".encode() * 400_000)
@@ -557,7 +556,6 @@ async def test_large_text_file_is_not_decoded_whole_to_hit_the_limit(
         assert decoded and max(decoded) <= (limit + 1) * 4 + 1  # из 9 МБ файла — единицы килобайт
         assert await bench.portal.rows("SELECT 1 FROM kb_pages") == []
     finally:
-        await bench.qdrant.close()
         await close_portal(bench.portal)
 
 
@@ -568,16 +566,16 @@ async def test_delete_arriving_during_final_write_wins(
     portal = bench.portal
     client = await portal.employee()
     document_id = await added(client, "документ.txt", "текст документа".encode())
-    original = bench.index.replace_document
+    original = bench.index.publish_document
     deletion: list[asyncio.Task[Any]] = []
 
-    async def replace(target: UUID, points: Any) -> None:
+    async def publish(target: UUID, tags: Any) -> None:
         deletion.append(asyncio.create_task(client.delete(f"/api/kb/documents/{document_id}")))
         await asyncio.sleep(0.2)  # удаление упирается в блокировку строки
         assert not deletion[0].done()
-        await original(target, points)
+        await original(target, tags)
 
-    monkeypatch.setattr(bench.index, "replace_document", replace)
+    monkeypatch.setattr(bench.index, "publish_document", publish)
     assert await bench.worker.run_once() is True
     assert (await deletion[0]).status_code == 204
     assert await bench.points() == 1
@@ -603,7 +601,7 @@ async def _run_worker(worker: Worker, until: Any, timeout: float = 20.0) -> None
 
 def _fast_worker(bench: KbBench, **overrides: Any) -> Worker:
     settings = bench.settings.worker.model_copy(update={"poll_seconds": 0.05, **overrides})
-    return Worker(bench.uow, bench.indexer, bench.index, bench.portal.clock, settings)
+    return bench.make_worker(settings=settings)
 
 
 async def test_worker_loop_respects_concurrency_limit(
@@ -709,13 +707,7 @@ async def test_lease_is_renewed_and_withdrawn_job_stops_working(
 async def test_worker_does_not_start_on_collection_with_other_parameters(bench: KbBench) -> None:
     embeddings = bench.settings.embeddings.model_copy(update={"dimension": 768})
     other = bench.settings.model_copy(update={"embeddings": embeddings})
-    worker = Worker(
-        bench.uow,
-        bench.indexer,
-        QdrantVectorIndex(bench.qdrant, other),
-        bench.portal.clock,
-        bench.settings.worker,
-    )
+    worker = bench.make_worker(index=QdrantVectorIndex(bench.qdrant, other))
     with pytest.raises(CollectionMismatchError):
         await worker.run(asyncio.Event())
 

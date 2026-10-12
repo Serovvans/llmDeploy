@@ -18,6 +18,17 @@ SLOW_PARTS = 100
 _WORDS_PER_PART = 3
 _QUESTION_CHARS = 200
 _REPLY_MARK = re.compile(r"\[\[stub:reply\]\](.*?)\[\[/stub:reply\]\]", re.DOTALL)
+# Протоколы 0.15 (docs/portal-api.md §12.1): запрос узнаётся по первой строке сообщения.
+REWRITE_PROMPT = "Перепиши вопрос для поиска."
+IMAGE_PROMPT = "Опиши изображение из документа."
+CONTEXT_PROMPT = "Поясни место фрагмента в документе."
+SQL_DATA_PROMPT = "Подготовь тестовые данные."
+SQL_FIX_PROMPT = "Исправь запрос."
+RERANK_ERROR_MARK = "[[stub:rerank-error]]"
+_SQL_DATA_MARK = re.compile(r"\[\[stub:sql-data\]\](.*?)\[\[/stub:sql-data\]\]", re.DOTALL)
+_SQL_FIX_MARK = re.compile(r"\[\[stub:sql-fix\]\](.*?)\[\[/stub:sql-fix\]\]", re.DOTALL)
+_NO_SQL_DATA = '{"statements": []}'
+_WORD = re.compile(r"[^\W_]+")
 
 
 @dataclass(frozen=True)
@@ -77,15 +88,49 @@ def schema_instance(schema: Mapping[str, Any], name: str = "") -> Any:
     return f"заглушка: {name}"
 
 
+def _block(text: str, tag: str) -> str:
+    """Текст последнего закрытого блока `<tag>…</tag>` без пробелов по краям; нет блока — пусто."""
+    found = re.search(rf".*<{tag}>(.*?)</{tag}>", text, re.DOTALL)
+    return found.group(1).strip() if found else ""
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:8]
+
+
+def protocol_reply(turn: UserTurn) -> str | None:
+    """Ответ на запрос одного из протоколов 0.15; `None` — это не такой запрос.
+
+    Проверяется раньше остальных правил: пометка `[[stub:reply]]` из вопроса теста,
+    попавшего в блок запроса, его ответ не подменяет.
+    """
+    first_line = turn.text.partition("\n")[0]
+    if first_line == REWRITE_PROMPT:
+        asked = _block(_block(turn.text, "диалог"), "пользователь")
+        return " ".join(part for part in (asked, _block(turn.text, "вопрос")) if part)
+    if first_line == IMAGE_PROMPT and len(turn.images) == 1:
+        return f"Описание изображения-заглушки {_digest(turn.images[0])}."
+    if first_line == CONTEXT_PROMPT:
+        return f"Контекстная справка {_digest(_block(turn.text, 'фрагмент').encode())}."
+    if first_line == SQL_DATA_PROMPT:
+        marked = _SQL_DATA_MARK.search(turn.text)
+        return marked.group(1) if marked else _NO_SQL_DATA
+    if first_line == SQL_FIX_PROMPT:
+        marked = _SQL_FIX_MARK.search(turn.text)
+        return marked.group(1) if marked else f"```sql\n{_block(turn.text, 'запрос')}\n```"
+    return None
+
+
 def reply_text(
     turn: UserTurn, response_format: Mapping[str, Any] | None, images_in_request: int
 ) -> str:
-    """Текст ответа: первое подходящее правило контракта, сверху вниз."""
+    """Текст ответа: протоколы 0.15, затем первое подходящее правило контракта, сверху вниз."""
+    if (by_protocol := protocol_reply(turn)) is not None:
+        return by_protocol
     if (marked := _REPLY_MARK.search(turn.text)) is not None:
         return marked.group(1)
     if turn.text == RECOGNITION_PROMPT and len(turn.images) == 1:
-        digest = hashlib.sha256(turn.images[0]).hexdigest()[:8]
-        return f"Текст страницы-заглушки {digest}."
+        return f"Текст страницы-заглушки {_digest(turn.images[0])}."
     if response_format is not None and response_format.get("type") == "json_schema":
         schema = response_format.get("json_schema", {}).get("schema", {})
         return json.dumps(schema_instance(schema), ensure_ascii=False)
@@ -122,3 +167,18 @@ def embedding(text: str) -> list[float] | None:
         vector[int.from_bytes(digest[:4], "big") % EMBEDDING_DIMENSION] += 1.0
     norm = math.sqrt(sum(value * value for value in vector))
     return [value / norm for value in vector] if norm else vector
+
+
+def rerank(query: str, documents: Sequence[str]) -> list[dict[str, Any]]:
+    """Оценки реранкера: доля слов запроса, которые есть в документе.
+
+    Слова — отрезки из букв и цифр в нижнем регистре; запрос без слов — оценка 0.
+    Записи идут по убыванию оценки, при равенстве — по возрастанию `index`.
+    """
+    wanted = set(_WORD.findall(query.lower()))
+    scores = [
+        len(wanted & set(_WORD.findall(document.lower()))) / len(wanted) if wanted else 0.0
+        for document in documents
+    ]
+    order = sorted(range(len(documents)), key=lambda index: (-scores[index], index))
+    return [{"index": index, "relevance_score": scores[index]} for index in order]

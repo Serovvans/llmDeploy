@@ -10,6 +10,7 @@ import { must } from '../support/must';
 import { answerText, askChat, chatWithAnswer, createDialog, eventsOf, expectError } from '../support/portal';
 import {
   attachFiles,
+  chooseKnowledge,
   composer,
   expectAnswerReady,
   send,
@@ -103,7 +104,7 @@ test('неподходящий файл и скан длиннее восьми 
     attachmentIds.push((await uploaded.json()).id);
   }
   const rejected = await member.api.post(`/api/dialogs/${dialogId}/messages`, {
-    data: { content: 'Что на сканах?', mode: 'fast', knowledge: 'none', attachment_ids: attachmentIds },
+    data: { content: 'Что на сканах?', mode: 'fast', collections: [], attachment_ids: attachmentIds },
   });
   await expectError(rejected, 422, 'too_many_images');
 });
@@ -138,7 +139,7 @@ test('режим ответа: «Вдумчиво» уходит на серве
   await page.getByRole('switch', { name: 'Вдумчиво' }).click();
   const request = page.waitForRequest((candidate) => /\/api\/dialogs\/[^/]+\/messages$/.test(candidate.url()));
   await send(page, 'Подумай как следует');
-  expect((await request).postDataJSON()).toMatchObject({ mode: 'thorough', knowledge: 'none' });
+  expect((await request).postDataJSON()).toMatchObject({ mode: 'thorough', collections: [] });
   await expectAnswerReady(page);
 
   const thinking = page.getByRole('button', { name: /^Размышления/ });
@@ -193,17 +194,16 @@ test('чат переименовывается и удаляется из ис�
   await expectError(await member.api.get(`/api/dialogs/${dialogId}`), 404, 'not_found');
 });
 
-test('выбор базы знаний запоминается в браузере, по умолчанию — «Не использовать»', async ({ newMember, pageAs }) => {
+test('выбор баз знаний запоминается в браузере, по умолчанию база не используется', async ({ newMember, pageAs }) => {
   const member = await newMember();
   const page = await pageAs(member);
-  await expect(page.getByRole('button', { name: 'База знаний: не использовать' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'База знаний: не используется' })).toBeVisible();
 
-  await page.getByRole('button', { name: 'База знаний: не использовать' }).click();
-  await page.locator('[data-tid~="MenuItem__root"]').filter({ hasText: /^Общая и моя$/ }).click();
-  await expect(page.getByRole('button', { name: 'База знаний: общая и моя' })).toBeVisible();
+  await chooseKnowledge(page, ['Общая', 'Министерства']);
+  await expect(page.getByRole('button', { name: 'База знаний: Общая, Министерства' })).toBeVisible();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: 'База знаний: общая и моя' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'База знаний: Общая, Министерства' })).toBeVisible();
 });
 
 test('ответ с разметкой: таблица, список, блок кода с кнопкой «Скопировать»; HTML не исполняется', async ({

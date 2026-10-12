@@ -144,9 +144,12 @@ class BifrostChatModel:
             "model": self._settings.chat_model,
             "messages": messages,
             "stream": stream,
-            "reasoning_effort": request.reasoning_effort,
             "max_tokens": request.max_tokens,
         }
+        # `xhigh` — уровень шаблона модели по умолчанию. Bifrost переписывает его в `high`,
+        # которого шаблон не знает (ответ 400), поэтому поле в этом случае не передаётся.
+        if request.reasoning_effort != "xhigh":
+            payload["reasoning_effort"] = request.reasoning_effort
         if request.json_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",

@@ -89,6 +89,12 @@
   line-height: 20px;
 }
 
+/* Действие, недоступное на время проверки SQL: вид недоступного, но фокус получает. */
+.unavailable {
+  color: var(--p-text-muted);
+  cursor: default;
+}
+
 .earlier {
   padding-left: 64px;
   font-size: 14px;

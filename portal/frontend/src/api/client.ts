@@ -98,6 +98,12 @@ async function parseError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, { code: codes[response.status] ?? 'internal_error', message: '' });
 }
 
+function notifySession(error: ApiError): void {
+  if (error.code === 'unauthenticated' || error.code === 'login_step_required') {
+    sessionSignalListener?.(error.code);
+  }
+}
+
 interface SendOptions {
   json?: unknown;
   form?: FormData;
@@ -135,15 +141,53 @@ async function send(method: Method, path: string, options: SendOptions = {}): Pr
     return response;
   }
   const error = await parseError(response);
-  if (error.code === 'unauthenticated' || error.code === 'login_step_required') {
-    sessionSignalListener?.(error.code);
-  }
+  notifySession(error);
   throw error;
 }
 
 async function request<T>(method: Method, path: string, json?: unknown): Promise<T> {
   const response = await send(method, path, { json });
   return (response.status === 204 ? undefined : await response.json()) as T;
+}
+
+/**
+ * Загрузка записи (контракт §1.6): тело запроса — сам файл, длину браузер называет сам. Через `XMLHttpRequest`,
+ * а не `fetch`: только он сообщает ход отправки. Отказ — `ApiError`, обрыв — `NetworkError`,
+ * отмена через `signal` — ошибка отмены (`isAbort`).
+ */
+function uploadBody<T>(path: string, file: File, onProgress: (percent: number) => void, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    const settle = (finish: () => void) => {
+      signal.removeEventListener('abort', abort);
+      finish();
+    };
+    xhr.open('POST', path);
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('X-Portal-Csrf', '1');
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress(Math.floor((event.loaded / event.total) * 100));
+      }
+    };
+    xhr.onload = () =>
+      settle(() => {
+        const response = new Response(xhr.responseText, { status: xhr.status });
+        if (response.ok) {
+          resolve(JSON.parse(xhr.responseText) as T);
+          return;
+        }
+        void parseError(response).then((error) => {
+          notifySession(error);
+          reject(error);
+        });
+      });
+    xhr.onerror = () => settle(() => reject(new NetworkError()));
+    xhr.onabort = () => settle(() => reject(new DOMException('Загрузка отменена', 'AbortError')));
+    signal.addEventListener('abort', abort);
+    xhr.send(file);
+  });
 }
 
 /** Открытые потоки ответа: их закрывают «Остановить», выход и добровольная смена пароля (концепция §5.12). */
@@ -342,25 +386,50 @@ export const api = {
     return (await response.json()) as Attachment;
   },
 
+  /** Запись (аудио, видео) во вложении: `onProgress` — ход отправки в процентах (контракт §5.8). */
+  uploadMediaAttachment: (dialogId: string, file: File, onProgress: (percent: number) => void, signal: AbortSignal) =>
+    uploadBody<Attachment>(
+      `/api/dialogs/${dialogId}/attachments/media?${new URLSearchParams({ file_name: file.name }).toString()}`,
+      file,
+      onProgress,
+      signal,
+    ),
+
+  /** Состояние вложения: расшифровка записи узнаётся опросом (контракт §5.8). */
+  getAttachment: (dialogId: string, attachmentId: string) =>
+    request<Attachment>('GET', `/api/dialogs/${dialogId}/attachments/${attachmentId}`),
+
   deleteAttachment: (dialogId: string, attachmentId: string) =>
     request<undefined>('DELETE', `/api/dialogs/${dialogId}/attachments/${attachmentId}`),
 
-  listKbDocuments: ({ scope, page, q, sort, order }: KbListQuery) => {
+  listKbDocuments: ({ scope, page, q, tags, sort, order }: KbListQuery) => {
     const params = new URLSearchParams({ scope, page: String(page), page_size: String(KB_PAGE_SIZE), sort, order });
     if (q) {
       params.set('q', q);
     }
+    tags.forEach((tag) => params.append('tags', tag));
     return request<Page<KbDocument>>('GET', `/api/kb/documents?${params.toString()}`);
   },
 
-  uploadKbDocument: async (file: File, scope: KbScope, isCogis: boolean) => {
+  uploadKbDocument: async (file: File, target: KbUploadTarget & { isCogis: boolean }, signal: AbortSignal) => {
     const form = new FormData();
     form.append('file', file);
-    form.append('scope', scope);
-    form.append('is_cogis', String(isCogis));
-    const response = await send('POST', '/api/kb/documents', { form });
+    form.append('scope', target.scope);
+    form.append('is_cogis', String(target.isCogis));
+    target.tags.forEach((tag) => form.append('tags', tag));
+    const response = await send('POST', '/api/kb/documents', { form, signal });
     return (await response.json()) as KbDocument;
   },
+
+  /** Запись (аудио, видео) в базу знаний: тело — сам файл, остальное — в строке запроса (контракт §8.1). */
+  uploadKbMedia: (file: File, target: KbUploadTarget, onProgress: (percent: number) => void, signal: AbortSignal) => {
+    const params = new URLSearchParams({ file_name: file.name, scope: target.scope });
+    target.tags.forEach((tag) => params.append('tags', tag));
+    return uploadBody<KbDocument>(`/api/kb/documents/media?${params.toString()}`, file, onProgress, signal);
+  },
+
+  /** Заменяет список тегов документа целиком; `[]` — снять все (контракт §8.5). */
+  setKbDocumentTags: (id: string, tags: string[]) => request<KbDocument>('PUT', `/api/kb/documents/${id}/tags`, { tags }),
 
   getKbDocument: (id: string) => request<KbDocument>('GET', `/api/kb/documents/${id}`),
 
@@ -368,8 +437,11 @@ export const api = {
 
   retryKbDocument: (id: string) => request<KbDocument>('POST', `/api/kb/documents/${id}/retry`),
 
-  /** Текст страницы: по номеру `page`, иначе страница фрагмента `fragmentId`, иначе первая (контракт §8.3). */
-  getKbDocumentText: (id: string, target: { page?: number; fragmentId?: string }) => {
+  /**
+   * Текст страницы: по номеру `page`, иначе страница фрагмента `fragmentId`, иначе у записи — часть,
+   * в которую попадает момент `timecode`, иначе первая (контракт §8.3).
+   */
+  getKbDocumentText: (id: string, target: { page?: number; fragmentId?: string; timecode?: number }) => {
     const params = new URLSearchParams();
     if (target.page !== undefined) {
       params.set('page', String(target.page));
@@ -377,8 +449,20 @@ export const api = {
     if (target.fragmentId) {
       params.set('fragment_id', target.fragmentId);
     }
+    if (target.timecode !== undefined) {
+      params.set('timecode', String(target.timecode));
+    }
     const query = params.toString();
     return request<DocumentText>('GET', `/api/kb/documents/${id}/text${query ? `?${query}` : ''}`);
+  },
+
+  /** Подсказки тегов: теги документов выбранных коллекций, видимых пользователю (контракт §8.5). */
+  listKbTags: (scopes: KbScope[], q: string) => {
+    const params = new URLSearchParams(scopes.map((scope) => ['scope', scope]));
+    if (q) {
+      params.set('q', q);
+    }
+    return request<{ items: string[] }>('GET', `/api/kb/tags?${params.toString()}`);
   },
 };
 
@@ -390,8 +474,16 @@ export interface KbListQuery {
   scope: KbScope;
   page: number;
   q: string;
+  /** Отбор: документы, у которых есть хотя бы один из тегов. */
+  tags: string[];
   sort: 'created_at' | 'title';
   order: SortOrder;
+}
+
+/** Куда и с какими тегами добавляется файл базы знаний. */
+export interface KbUploadTarget {
+  scope: KbScope;
+  tags: string[];
 }
 
 /** Адрес оригинала документа базы знаний; `page` — открыть PDF на странице (контракт §8.2). */
@@ -402,4 +494,14 @@ export function kbFileUrl(documentId: string, page: number | null): string {
 /** Адрес файла вложения на портале: оригинал и миниатюра изображения (контракт §5.8). */
 export function attachmentFileUrl(dialogId: string, attachmentId: string): string {
   return `/api/dialogs/${dialogId}/attachments/${attachmentId}/file`;
+}
+
+/** Адрес картинки документа: его строит интерфейс по источнику, в тексте ответа адресов нет (контракт §8.6). */
+export function kbImageUrl(documentId: string, imageId: string): string {
+  return `/api/kb/documents/${documentId}/images/${imageId}`;
+}
+
+/** Адрес сжатого звука записи для проигрывателя (контракт §8.7). */
+export function kbAudioUrl(documentId: string): string {
+  return `/api/kb/documents/${documentId}/audio`;
 }

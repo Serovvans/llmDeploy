@@ -1,14 +1,14 @@
-"""Порты модуля диалогов: хранилище и единица работы.
+"""Порты модуля диалогов: хранилище, единица работы, вложение-запись для воркера.
 
 Каждый метод с пользовательскими данными принимает идентификатор владельца и включает
 условие `dialogs.owner_id = :owner` в сам запрос (docs/portal-api.md §9.15).
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from portal.dialogs.context import Turn
@@ -21,7 +21,8 @@ from portal.dialogs.domain import (
     MessageStatus,
     SummaryStatus,
 )
-from portal.kb.ports import KnowledgeScope
+from portal.files.ports import RecordingType
+from portal.kb.ports import KnowledgeSelection
 from portal.llm.ports import ReasoningEffort
 
 
@@ -120,6 +121,12 @@ class DialogRepository(Protocol):
         """Сохранить ответ с итоговым состоянием."""
         ...
 
+    async def set_sql_run(
+        self, owner_id: UUID, message_id: UUID, sql_run: Mapping[str, Any]
+    ) -> None:
+        """Дописать итог проверки на тестовых данных в уже сохранённый ответ (§5.5, шаг 6)."""
+        ...
+
     async def interrupt_answer(self, owner_id: UUID, message_id: UUID) -> None:
         """Перевести ответ `streaming`, который никто не формирует, в `error`/`interrupted`."""
         ...
@@ -206,6 +213,14 @@ class DialogRepository(Protocol):
         """Привязать вложения к отправленному вопросу."""
         ...
 
+    async def queued_recordings(self) -> list[Attachment]:
+        """Все вложения-записи, ждущие расшифровки: служебная сверка при старте (§5.8)."""
+        ...
+
+    async def fail_queued_recordings(self, attachment_ids: Sequence[UUID]) -> None:
+        """Перевести ждущие записи без задания в `error` с кодом `internal_error`."""
+        ...
+
 
 class DialogUnitOfWork(Protocol):
     """Хранилище одной транзакции."""
@@ -229,25 +244,38 @@ class DialogUnitOfWorkFactory(Protocol):
 class AnswerPlan:
     """Из чего собирается запрос к модели на один вопрос (§5.4).
 
-    `scope` — область поиска в базе знаний, `None` — поиск не выполняется. `sql_dialect`
-    задан у диалога `sql`: по нему проверяются блоки `sql` готового ответа.
+    `selection` — выбор для поиска в базе знаний, `None` — поиск не выполняется. `sql_dialect`
+    задан у диалога `sql`: по нему проверяются блоки `sql` готового ответа. `sql_test_schema`
+    — текст схемы, по которой запросы ответа проверяются на тестовых данных (§7.4);
+    `None` — проверки нет.
     """
 
     system: str
     question: Turn
     effort: ReasoningEffort
     max_tokens: int
-    scope: KnowledgeScope | None = None
+    selection: KnowledgeSelection | None = None
     sql_dialect: str | None = None
+    sql_test_schema: str | None = None
 
 
 class DialogTool(Protocol):
     """Правила вида диалога, отличного от чата: `sql`, `cogis`, `docparse` (§5.3, §7)."""
 
     async def accept(
-        self, owner_id: UUID, dialog_id: UUID, content: str, params: Mapping[str, Any]
+        self,
+        owner_id: UUID,
+        dialog_id: UUID,
+        content: str,
+        params: Mapping[str, Any],
+        *,
+        regenerate: bool = False,
     ) -> list[str] | None:
-        """Проверки до открытия потока; вернуть `sql_dangers` вопроса (`None` — нечего)."""
+        """Проверки до открытия потока; вернуть `sql_dangers` вопроса (`None` — нечего).
+
+        `regenerate` — ответ формируется заново на сохранённый вопрос: отказы, которые
+        бывают только у нового вопроса, не поднимаются (§5.6).
+        """
         ...
 
     async def plan(
@@ -258,4 +286,66 @@ class DialogTool(Protocol):
 
     async def review(self, plan: AnswerPlan, content: str) -> Mapping[str, Any] | None:
         """Проверка готового ответа (`SqlCheck`); `None` — у этого вида её нет."""
+        ...
+
+    async def test_run(
+        self,
+        owner_id: UUID,
+        plan: AnswerPlan,
+        content: str,
+        report: Callable[[Mapping[str, Any]], None],
+    ) -> None:
+        """Проверить запросы сохранённого ответа на тестовых данных (§7.4).
+
+        Вызывается только при `plan.sql_test_schema`. `report` получает `SqlRun` целиком
+        при каждой смене состояния; в последнем нет блоков `pending` и `running` — и
+        тогда, когда задача отменена (остановка, потеря сессии).
+        """
+        ...
+
+
+TranscriptionError = Literal[
+    "media_invalid",
+    "media_no_audio",
+    "media_too_long",
+    "no_text",
+    "transcription_failed",
+    "internal_error",
+]
+
+
+@dataclass(frozen=True)
+class RecordingAttachment:
+    """Вложение-запись глазами воркера: где лежит исходник и какого он типа."""
+
+    storage_key: str
+    media_type: RecordingType
+
+
+class AttachmentTranscripts(Protocol):
+    """Расшифровка вложений-записей: вызывает воркер (`portal/worker`), §5.8, §13.3.
+
+    Владельца вложения порт не раскрывает и текст расшифровки обратно не отдаёт.
+    """
+
+    async def begin(self, attachment_id: UUID) -> RecordingAttachment | None:
+        """Вложение → `processing`; `None` — вложения уже нет, задание выполнять незачем."""
+        ...
+
+    async def complete(self, attachment_id: UUID, text: str, duration_seconds: int) -> None:
+        """Сохранить расшифровку: вложение → `ready`."""
+        ...
+
+    async def fail(
+        self, attachment_id: UUID, code: TranscriptionError, duration_seconds: int | None
+    ) -> None:
+        """Вложение → `error` с причиной."""
+        ...
+
+    async def requeue(self, attachment_id: UUID) -> None:
+        """Вернуть вложение из `processing` в `queued`: воркер остановлен, задание ждёт."""
+        ...
+
+    async def source_keys(self) -> set[str]:
+        """Ключи хранения всех вложений-записей — для уборки файлов без строки (§1.6, §8.7)."""
         ...

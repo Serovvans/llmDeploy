@@ -22,6 +22,13 @@ RUN useradd --system --user-group --uid 10001 --no-create-home portal \
 # config/, alembic.ini и migrations/ бэкенд ищет относительно рабочего каталога.
 WORKDIR /app
 COPY --from=build /app/.venv .venv
+# ffmpeg и ffprobe для записей (docs/portal-design.md §8.1): воркер запускает их на
+# недоверенных файлах, поэтому версия закреплена и обновляется вместе с образом.
+# Статическая сборка — два файла без зависимостей: пакет ffmpeg из Debian потянул бы в
+# общий с portal-api образ сотни библиотек. ONNX Runtime приходит из uv.lock.
+# Дайджест индекса: тег стороннего образа можно перевыложить с другим содержимым, а
+# сборка должна брать ровно те файлы, что проверялись. Меняется вместе с версией.
+COPY --from=mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 /ffmpeg /ffprobe /usr/local/bin/
 COPY alembic.ini ./
 COPY config/ config/
 COPY migrations/ migrations/

@@ -30,14 +30,13 @@
   padding: 8px 32px 0;
 }
 
+/* Поле правки названия — на месте названия в строке заголовка. */
 .editor {
-  flex: none;
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 56px;
-  padding: 0 24px;
-  border-bottom: 1px solid var(--p-line);
+  min-width: 0;
 }
 
 .editorError {

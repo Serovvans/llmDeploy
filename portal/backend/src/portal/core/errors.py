@@ -2,11 +2,12 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 _FIELD_MESSAGES = {
     "required": "Заполните поле.",
     "too_long": "Слишком длинное значение.",
+    "too_many": "Слишком много значений.",
     "invalid_format": "Неверный формат.",
     "unknown_value": "Недопустимое значение.",
 }
@@ -77,9 +78,30 @@ def forbidden() -> AppError:
     return AppError(403, "forbidden", "Недостаточно прав для этого действия.")
 
 
+def feature_disabled() -> AppError:
+    """Функция выключена флагом конфигурации (§13.6)."""
+    return AppError(403, "feature_disabled", "Эта функция сейчас отключена.")
+
+
 def not_found() -> AppError:
     """Ресурса нет или он чужой."""
     return AppError(404, "not_found", "Не найдено.")
+
+
+def upload_timeout(reason: Literal["idle", "total"]) -> AppError:
+    """Приём записи оборван по сроку: простой или общий срок приёма (§1.6)."""
+    messages = {
+        "idle": "Загрузка прервалась: данные перестали поступать. Повторите загрузку.",
+        "total": (
+            "Загрузка шла слишком долго и была прервана. Повторите её при более быстром соединении."
+        ),
+    }
+    return AppError(408, "upload_timeout", messages[reason])
+
+
+def length_required() -> AppError:
+    """У загрузки записи нет заголовка `Content-Length` или он не число (§1.6)."""
+    return AppError(411, "length_required", "Не указан размер загружаемого файла.")
 
 
 def request_too_large(max_bytes: int) -> AppError:
@@ -123,6 +145,13 @@ def validation_error(fields: Sequence[FieldError]) -> AppError:
     return AppError(422, "validation_error", "Проверьте заполнение полей.", fields=fields)
 
 
+def too_many_uploads() -> AppError:
+    """Мест загрузки записей нет либо у сотрудника уже идёт загрузка записи (§1.6)."""
+    return AppError(
+        429, "too_many_uploads", "Сейчас загружаются другие записи. Повторите загрузку позже."
+    )
+
+
 def internal_error() -> AppError:
     """Необработанный сбой."""
     return AppError(500, "internal_error", "Внутренняя ошибка. Повторите попытку позже.")
@@ -133,3 +162,13 @@ def service_unavailable() -> AppError:
     return AppError(
         503, "service_unavailable", "Сервис временно недоступен. Повторите попытку позже."
     )
+
+
+def media_quota_exceeded(reason: Literal["total", "user", "free_space"]) -> AppError:
+    """Квота записей или свободное место тома исчерпаны (§1.6); размеры не раскрываются."""
+    message = (
+        "Место под ваши записи закончилось: освободите место, удалив свои записи."
+        if reason == "user"
+        else "Место под записи закончилось, обратитесь к администратору."
+    )
+    return AppError(507, "media_quota_exceeded", message, details={"reason": reason})

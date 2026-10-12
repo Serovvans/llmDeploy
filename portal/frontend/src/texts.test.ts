@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ApiError, NetworkError } from './api/client';
-import { errorText, lockedUntil, retryAfter, texts } from './texts';
+import { errorText, lockedUntil, retryAfter, spokenTimecode, texts } from './texts';
 
 describe('тексты', () => {
   it('срок блокировки округляется вверх до минут и склоняется', () => {
@@ -16,6 +16,14 @@ describe('тексты', () => {
     expect(texts.login.loginLocked(300)).toBe(
       'Слишком много неудачных попыток. Попробуйте снова через 5 минут или попросите администратора портала снять блокировку',
     );
+  });
+
+  it('момент записи для экранного чтения — в родительном падеже, после «с»', () => {
+    expect(texts.chat.sources.markTimecode(spokenTimecode(61))).toBe('с 1 минуты 1 секунды');
+    expect(texts.viewer.listenFromSpoken(spokenTimecode(122))).toBe('Слушать с 2 минут 2 секунд');
+    expect(spokenTimecode(4861)).toBe('1 часа 21 минуты 1 секунды');
+    expect(spokenTimecode(760)).toBe('12 минут 40 секунд');
+    expect(spokenTimecode(0)).toBe('0 секунд');
   });
 
   it('срок блокировки входа: сегодня — время, в другой день — дата и время', () => {

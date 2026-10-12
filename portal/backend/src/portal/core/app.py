@@ -18,9 +18,10 @@ from portal.core.container import Container
 from portal.core.db import ping
 from portal.core.middleware import BODY_REFUSAL_KEY, BodyLimit, PortalMiddleware, error_response
 from portal.core.validation import validation_failure
-from portal.dialogs.routes import ATTACHMENT_UPLOAD_PATH
+from portal.dialogs.routes import ATTACHMENT_UPLOAD_PATH, RECORDING_UPLOAD_PATH
 from portal.dialogs.routes import router as dialogs_router
 from portal.kb.routes import DOCUMENT_UPLOAD_PATH
+from portal.kb.routes import RECORDING_UPLOAD_PATH as KB_RECORDING_UPLOAD_PATH
 from portal.kb.routes import router as kb_router
 from portal.tools.routes import DOCPARSE_UPLOAD_PATH
 from portal.tools.routes import router as tools_router
@@ -53,8 +54,17 @@ async def _on_http_error(request: Request, error: Exception) -> Response:
 
 
 def _body_limits(container: Container) -> tuple[BodyLimit, list[tuple[re.Pattern[str], BodyLimit]]]:
-    """Пределы тела запроса (§1.3): общий и свои у маршрутов загрузки файла."""
+    """Пределы тела запроса (§1.3): общий и свои у маршрутов загрузки файла.
+
+    У двух маршрутов загрузки записей тело — сам файл: предел `media.max_bytes` без запаса,
+    и без `Content-Length` тело не принимается (§1.6).
+    """
     server = container.settings.server
+    recording = BodyLimit(
+        container.settings.media.max_bytes,
+        errors.file_too_large(container.settings.media.max_bytes),
+        length_required=True,
+    )
     attachment_limit = container.settings.chat.attachment_max_bytes
     document_limit = container.settings.kb.document_max_bytes
     docparse_limit = container.settings.docparse.document_max_bytes
@@ -83,6 +93,8 @@ def _body_limits(container: Container) -> tuple[BodyLimit, list[tuple[re.Pattern
                 errors.file_too_large(docparse_limit),
             ),
         ),
+        (RECORDING_UPLOAD_PATH, recording),
+        (KB_RECORDING_UPLOAD_PATH, recording),
     ]
     return default, uploads
 
@@ -95,6 +107,9 @@ def create_app(container: Container) -> FastAPI:
         # Процесс один (§13.5): всё, что осталось «формируется», никем не формируется.
         await container.dialogs.reset_interrupted()
         await container.dialogs.purge_empty()
+        # Недописанные загрузки записей остались от прежнего процесса (§1.6).
+        await container.media_storage.clean(uploads=True, scratch=False)
+        await container.dialogs.align_recordings()
         yield
         await container.generation.shutdown()
         await container.docparse.shutdown()

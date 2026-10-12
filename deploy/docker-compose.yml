@@ -5,6 +5,7 @@
 # запускается и значений ещё нет; их проверяет install.sh при включении профиля gateway.
 # То же с PORTAL_LLM_API_KEY: ключ портала выдаёт Bifrost, до второго этапа взять его
 # неоткуда. SITE_MODE пустым не бывает: без значения Caddy работает в режиме api.
+# SQL_SANDBOX_ROLES — не секрет со значением по умолчанию из docs/portal-api.md §7.4.
 
 # Фиксированное имя проекта: имена volumes (llm_bifrost-data и т. д.) не зависят от
 # имени каталога — на них ссылаются бэкап и runbook.
@@ -183,11 +184,42 @@ services:
       - "8192"
       - --port
       - "8001"
-      # 0.85 + 0.06 = 0.91 ≤ 0.92 — запас на CUDA-контексты двух процессов (§3.6, §5).
+      # Сумма долей всех экземпляров ≤ 0.92 — запас на CUDA-контексты (§3.6, §5):
+      # 0.85 + 0.06 без реранкера, ~0.81 + 0.06 + ~0.04 с ним (§3.9).
       - --gpu-memory-utilization
       - "0.06"
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20m
+
+  # Реранкер поиска по базе знаний портала (§3.9). Наружу не открыт: портал ходит к нему
+  # через Bifrost по docker-сети, маршрута /v1/rerank в Caddyfile нет.
+  vllm-rerank:
+    <<: *vllm
+    profiles: [rerank]
+    depends_on:
+      # Строго по очереди: основная модель → эмбеддинги → реранкер (§3.9). Зависимость
+      # от vllm-embed делает профиль embeddings обязательным для профиля rerank.
+      vllm-embed:
+        condition: service_healthy
+    command:
+      - ${RERANK_MODEL_ID:?}
+      # Стабильный алиас: config.json Bifrost и kb.rerank.model портала не меняются при
+      # смене RERANK_MODEL_ID.
+      - --served-model-name
+      - rerank
+      # Явно, как у эмбеддингов: модель не генеративная.
+      - --runner
+      - pooling
+      - --port
+      - "8002"
+      - --gpu-memory-utilization
+      - ${RERANK_GPU_MEM_UTIL:?}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -279,7 +311,10 @@ services:
     # интернет и не видит остальные сервисы стека.
 
   # Третий этап развёртывания: портал сотрудников (§3.8, docs/portal-design.md §3).
+  # Образы портала помечаются коммитом релиза: предыдущие остаются на ВМ под своим тегом
+  # и служат путём отката без пересборки (docs/portal-design.md §8.2).
   portal-web:
+    image: llm-portal-web:${PORTAL_IMAGE_TAG:?}
     build: ../portal/frontend
     profiles: [portal]
     restart: unless-stopped
@@ -294,6 +329,7 @@ services:
       start_period: 10s
 
   portal-api:
+    image: llm-portal-api:${PORTAL_IMAGE_TAG:?}
     build: ../portal/backend
     profiles: [portal]
     restart: unless-stopped
@@ -310,6 +346,19 @@ services:
       QDRANT_API_KEY: ${QDRANT_API_KEY:?}
       # Та же переменная, с которой запущен vLLM: контекст модели портал берёт только из неё.
       MAX_MODEL_LEN: ${MAX_MODEL_LEN:?}
+      # Пароли ролей песочницы SQL; портал требует их только при sql.sandbox.enabled.
+      SQL_SANDBOX_PASSWORD: ${SQL_SANDBOX_PASSWORD:?}
+      SQL_SANDBOX_CONTROL_PASSWORD: ${SQL_SANDBOX_CONTROL_PASSWORD:?}
+      # Только для запасной схемы доступа к реранкеру (docs/portal-api.md §12.1); пустое
+      # значение портал считает незаданным и ходит с ключом портала.
+      PORTAL_RERANK_API_KEY: ${PORTAL_RERANK_API_KEY:-}
+    # Одну строку результата и одно сообщение СУБД из песочницы драйвер принимает
+    # целиком, а их размер ограничен только памятью песочницы (512 МБ). Предел оставляет
+    # место под две такие проверки разом — сырые байты и строка после разбора — сверх
+    # обычного потребления (docs/portal-api.md §7.4). Подкачка запрещена: с ней предел
+    # не был бы границей. Значение уточнить на ВМ.
+    mem_limit: 4g
+    memswap_limit: 4g
     volumes:
       - portal-files:/data/files
       # Каталогом, а не файлом: накладка config.override.yaml необязательна, и bind
@@ -318,6 +367,9 @@ services:
     networks:
       - edge
       - portal
+      # От песочницы portal-api не зависит (depends_on нет): без неё проверка SQL
+      # получает статус «недоступно», остальное работает.
+      - sandbox
     healthcheck:
       # curl и wget в образе нет; /healthz отвечает 503, если база недоступна.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
@@ -328,6 +380,7 @@ services:
 
   portal-worker:
     # Тот же образ, что у portal-api, с другой командой (docs/portal-design.md §3).
+    image: llm-portal-worker:${PORTAL_IMAGE_TAG:?}
     build: ../portal/backend
     profiles: [portal]
     restart: unless-stopped
@@ -347,9 +400,32 @@ services:
       PORTAL_DB_PASSWORD: ${PORTAL_DB_PASSWORD:?}
       PORTAL_LLM_API_KEY: ${PORTAL_LLM_API_KEY:-}
       QDRANT_API_KEY: ${QDRANT_API_KEY:?}
+      PORTAL_RERANK_API_KEY: ${PORTAL_RERANK_API_KEY:-}
+    # Воркер разбирает чужие файлы и запускает на них ffmpeg под своим пользователем
+    # (docs/portal-design.md §8.1).
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Без дампов памяти: при падении ffmpeg в дампе было бы содержимое чужой записи, при
+    # падении воркера — пароль базы и ключи; обработчик хоста положил бы его на диск ВМ.
+    # Процессы ffmpeg наследуют предел.
+    ulimits:
+      core: 0
+    # Число потоков распознавания речи — настройка библиотеки, а не граница
+    # (docs/portal-design.md §3.4). 10 CPU: 8 потоков речи (media.asr.threads) и 2 —
+    # ffmpeg (media.ffmpeg.threads); остальные 6 из 16 vCPU остаются серверам vLLM, базе
+    # и бэкенду. 8 ГБ: два экземпляра модели речи по 1–2 ГБ, ffmpeg до 1 ГБ, разбор
+    # документов и эмбеддинги документа в памяти. Значения уточнить на ВМ.
+    cpus: 10
+    mem_limit: 8g
+    memswap_limit: 8g
     volumes:
       - portal-files:/data/files
       - ./portal:/etc/portal:ro
+      # Веса модели речи (media.asr.model_dir) загружает установка этапа; в работе воркер
+      # их только читает и в интернет за ними не обращается.
+      - asr-models:/models/asr:ro
     networks:
       # edge — только ради Bifrost: распознавание сканов и эмбеддинги.
       - edge
@@ -406,11 +482,65 @@ services:
       retries: 5
       start_period: 30s
 
+  # Песочница проверки SQL (docs/portal-design.md §3.3, §8.1; docs/portal-api.md §7.4).
+  # Поднимается вместе с порталом и при выключенном флаге sql.sandbox.enabled.
+  # Параметры сервера, роли и отключённый вывод сервера — в образе (sql-sandbox/).
+  sql-sandbox:
+    image: llm-sql-sandbox:${PORTAL_IMAGE_TAG:?}
+    build: ./sql-sandbox
+    profiles: [portal]
+    # Сервер завершается при сбое любого сеанса (restart_after_crash=off); контейнер
+    # стартует заново, и tmpfs с каталогом данных создаётся пустым.
+    restart: unless-stopped
+    # Вывод сервера отключён в образе, журнал контейнера пуст: текст проверяемых
+    # операторов не должен оседать на диске ВМ.
+    logging: *logging
+    environment:
+      SQL_SANDBOX_PASSWORD: ${SQL_SANDBOX_PASSWORD:?}
+      SQL_SANDBOX_CONTROL_PASSWORD: ${SQL_SANDBOX_CONTROL_PASSWORD:?}
+      # Число ролей проверки; не меньше sql.sandbox.max_parallel в конфигурации портала.
+      SQL_SANDBOX_ROLES: ${SQL_SANDBOX_ROLES:-2}
+    read_only: true
+    tmpfs:
+      # Данные живут только в памяти и только до перезапуска. uid и gid 999 —
+      # пользователь postgres образа: без привилегий сменить владельца нечем.
+      - /var/lib/postgresql/data:size=256m,uid=999,gid=999,mode=0700,noexec,nosuid,nodev
+      - /var/run/postgresql:size=1m,uid=999,gid=999,mode=0775,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Без дампов памяти: PANIC при заполненном tmpfs — это abort(), и дамп с текстом
+    # оператора и данными обработчик хоста положил бы на диск ВМ в обход отключённого
+    # вывода сервера.
+    ulimits:
+      core: 0
+    # Жёсткая граница — пределы контейнера, а не параметры сервера: их роль меняет сама.
+    # В память входит tmpfs; от неё же зависит предел памяти portal-api. Подкачка
+    # запрещена: с ней предел памяти не был бы границей.
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1
+    pids_limit: 64
+    networks:
+      - sandbox
+    healthcheck:
+      # По TCP: во время инициализации временный сервер слушает только сокет. Имя роли —
+      # чтобы запрос попадал в строку pg_hba.conf; пароль pg_isready не нужен.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "sandbox_ctl", "-d", "sandbox"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 networks:
   edge:
   inference:
   # internal: базе и Qdrant выход за пределы сети не нужен (docs/portal-design.md §8).
   portal:
+    internal: true
+  # Только portal-api и песочница SQL; выхода наружу нет (docs/portal-design.md §8.1).
+  sandbox:
     internal: true
 
 volumes:
@@ -421,3 +551,5 @@ volumes:
   portal-db-data:
   qdrant-data:
   portal-files:
+  # Веса модели речи: восстановимы загрузкой, в резервную копию не входят.
+  asr-models:

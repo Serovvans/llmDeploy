@@ -12,8 +12,9 @@ from starlette.datastructures import UploadFile
 from starlette.responses import FileResponse, StreamingResponse
 
 from portal.core.access import ContainerDep, Employee, ReadySession
-from portal.core.errors import field_error, not_found, validation_error
+from portal.core.errors import feature_disabled, field_error, not_found, validation_error
 from portal.core.sse import event_stream_response
+from portal.core.uploads import receive_recording
 from portal.core.validation import validation_failure
 from portal.dialogs.domain import DialogKind
 from portal.dialogs.generation import UNSET, QuestionInput, _Unset
@@ -39,6 +40,8 @@ router = APIRouter(prefix="/api/dialogs")
 
 # Маршрут загрузки файла: у него свой предел размера тела (§1.3).
 ATTACHMENT_UPLOAD_PATH = re.compile(r"/api/dialogs/[^/]+/attachments")
+# Маршрут загрузки записи: тело — сам файл, предел — `media.max_bytes` (§1.6).
+RECORDING_UPLOAD_PATH = re.compile(r"/api/dialogs/[^/]+/attachments/media")
 
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 _TEXT_CONTENT_TYPE = "text/plain; charset=utf-8"
@@ -135,13 +138,23 @@ def _question(kind: DialogKind, body: dict[str, Any]) -> QuestionInput:
     try:
         if kind == "chat":
             chat = ChatMessageRequest.model_validate(body)
-            params = {"mode": chat.mode, "knowledge": chat.knowledge}
+            params = {
+                "mode": chat.mode,
+                "collections": list(chat.collections),
+                "tags": list(chat.tags),
+            }
             return QuestionInput(chat.content, params, chat.attachment_ids)
         if kind == "sql":
             sql = SqlMessageRequest.model_validate(body)
             schema_id = None if sql.schema_id is None else str(sql.schema_id)
             return QuestionInput(
-                sql.content, {"action": sql.action, "dialect": sql.dialect, "schema_id": schema_id}
+                sql.content,
+                {
+                    "action": sql.action,
+                    "dialect": sql.dialect,
+                    "schema_id": schema_id,
+                    "test_run": sql.test_run,
+                },
             )
         if kind == "cogis":
             cogis = CogisMessageRequest.model_validate(body)
@@ -236,6 +249,39 @@ async def upload_attachment(
     return AttachmentOut.of(attachment)
 
 
+@router.post("/{id}/attachments/media", status_code=201)
+async def upload_recording(
+    request: Request,
+    target: DialogId,
+    user: Employee,
+    session: ReadySession,
+    container: ContainerDep,
+    file_name: str | None = None,
+) -> AttachmentOut:
+    """Загрузить запись (аудио или видео) телом запроса; расшифровка идёт в очереди (§5.8).
+
+    Порядок проверок до чтения тела — §1.6: флаг функции, диалог, параметры строки запроса.
+    """
+    if not container.settings.media.enabled:
+        raise feature_disabled()
+    await container.dialogs.require_chat(user.id, target)
+    if not file_name:
+        raise validation_error([field_error("file_name", "required")])
+    recording = await receive_recording(request, container, session)
+    attachment = await container.dialogs.add_recording(
+        user.id, session.session_id, target, file_name, recording
+    )
+    return AttachmentOut.of(attachment)
+
+
+@router.get("/{id}/attachments/{attachment_id}")
+async def get_attachment(
+    target: DialogId, attachment: AttachmentId, user: Employee, container: ContainerDep
+) -> AttachmentOut:
+    """Вложение диалога: по нему интерфейс следит за расшифровкой записи (§5.8)."""
+    return AttachmentOut.of(await container.dialogs.get_attachment(user.id, target, attachment))
+
+
 @router.delete("/{id}/attachments/{attachment_id}", status_code=204)
 async def delete_attachment(
     target: DialogId, attachment: AttachmentId, user: Employee, container: ContainerDep
@@ -250,7 +296,7 @@ async def attachment_file(
     target: DialogId, attachment: AttachmentId, user: Employee, container: ContainerDep
 ) -> FileResponse:
     """Оригинал вложения владельцу диалога (§1.5)."""
-    found, path = await container.dialogs.get_attachment(user.id, target, attachment)
+    found, path = await container.dialogs.attachment_file(user.id, target, attachment)
     is_text = found.media_type.startswith("text/")
     disposition = "attachment" if found.media_type == DOCX else "inline"
     return FileResponse(

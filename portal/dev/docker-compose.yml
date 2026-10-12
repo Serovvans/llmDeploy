@@ -1,6 +1,7 @@
 # Стенд портала без GPU (docs/portal-design.md §9): тот же набор сервисов, что в профиле
 # portal на ВМ, но вместо Bifrost и vLLM — заглушка под именем bifrost
-# (docs/portal-api.md §12.2). Открывается как https://localhost:8443: cookie сессии
+# (docs/portal-api.md §12.2); она же отвечает за реранкер. Песочница SQL — настоящая.
+# Открывается как https://localhost:8443: cookie сессии
 # всегда Secure, а сертификат выпускает собственный CA Caddy (браузер предупредит).
 # Определения сервисов повторяют deploy/docker-compose.yml: при правке там — править и здесь.
 
@@ -88,12 +89,18 @@ services:
       QDRANT_API_KEY: ${QDRANT_API_KEY:?}
       # Контекст настоящей модели (docs/portal-api.md §13.5).
       MAX_MODEL_LEN: "65536"
+      SQL_SANDBOX_PASSWORD: ${SQL_SANDBOX_PASSWORD:?}
+      SQL_SANDBOX_CONTROL_PASSWORD: ${SQL_SANDBOX_CONTROL_PASSWORD:?}
+    # Тот же предел, что на ВМ: на него опираются проверки чтения из песочницы.
+    mem_limit: 4g
+    memswap_limit: 4g
     volumes:
       - portal-files:/data/files
       - ./config.override.yaml:/etc/portal/config.override.yaml:ro
     networks:
       - edge
       - portal
+      - sandbox
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
       interval: 10s
@@ -121,9 +128,21 @@ services:
       PORTAL_DB_PASSWORD: ${PORTAL_DB_PASSWORD:?}
       PORTAL_LLM_API_KEY: ${PORTAL_LLM_API_KEY:?}
       QDRANT_API_KEY: ${QDRANT_API_KEY:?}
+    # Как на ВМ: стенд проверяет, что воркер без привилегий стартует и обрабатывает
+    # документ и запись (docs/portal-api.md §13.5). Пределов CPU и памяти здесь нет:
+    # значения ВМ (10 CPU) Docker отвергает на машине с меньшим числом ядер.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      core: 0
     volumes:
       - portal-files:/data/files
       - ./config.override.yaml:/etc/portal/config.override.yaml:ro
+      # Пуст, пока на стенде подмена модели речи (media.asr.engine: stub); для настоящей
+      # модели веса кладут в этот том.
+      - asr-models:/models/asr:ro
     networks:
       # edge — только ради Bifrost: распознавание сканов и эмбеддинги.
       - edge
@@ -177,9 +196,44 @@ services:
       retries: 5
       start_period: 30s
 
+  # Тот же образ и те же ограничения, что на ВМ: проверки изоляции песочницы
+  # (docs/portal-design.md §10, п. 18) идут на стенде.
+  sql-sandbox:
+    build: ../../deploy/sql-sandbox
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      SQL_SANDBOX_PASSWORD: ${SQL_SANDBOX_PASSWORD:?}
+      SQL_SANDBOX_CONTROL_PASSWORD: ${SQL_SANDBOX_CONTROL_PASSWORD:?}
+      SQL_SANDBOX_ROLES: "2"
+    read_only: true
+    tmpfs:
+      - /var/lib/postgresql/data:size=256m,uid=999,gid=999,mode=0700,noexec,nosuid,nodev
+      - /var/run/postgresql:size=1m,uid=999,gid=999,mode=0775,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      core: 0
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1
+    pids_limit: 64
+    networks:
+      - sandbox
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "sandbox_ctl", "-d", "sandbox"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 networks:
   edge:
   portal:
+    internal: true
+  sandbox:
     internal: true
 
 volumes:
@@ -187,3 +241,4 @@ volumes:
   portal-db-data:
   qdrant-data:
   portal-files:
+  asr-models:

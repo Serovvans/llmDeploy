@@ -245,6 +245,16 @@ class SqlDialogRepository:
             )
         )
 
+    async def set_sql_run(
+        self, owner_id: UUID, message_id: UUID, sql_run: Mapping[str, Any]
+    ) -> None:
+        """Дописать итог проверки на тестовых данных в сохранённый ответ."""
+        await self._connection.execute(
+            sa.update(messages)
+            .where(messages.c.id == message_id, messages.c.dialog_id.in_(_owned(owner_id)))
+            .values(sql_run=dict(sql_run))
+        )
+
     async def interrupt_answer(self, owner_id: UUID, message_id: UUID) -> None:
         """Перевести ответ `streaming`, который никто не формирует, в `error`/`interrupted`."""
         await self._connection.execute(
@@ -451,6 +461,29 @@ class SqlDialogRepository:
                     attachments.c.dialog_id.in_(_owned(owner_id)),
                 )
                 .values(message_id=message_id)
+            )
+
+    async def queued_recordings(self) -> list[Attachment]:
+        """Все вложения-записи, ждущие расшифровки.
+
+        Служебный запрос без условия владельца, как `reset_streaming`: выполняется при
+        старте процесса и никому ничего не отдаёт.
+        """
+        rows = await self._connection.execute(
+            sa.select(attachments).where(attachments.c.transcription_status == "queued")
+        )
+        return [_attachment(row) for row in rows]
+
+    async def fail_queued_recordings(self, attachment_ids: Sequence[UUID]) -> None:
+        """Перевести ждущие записи без задания в `error` с кодом `internal_error`."""
+        if attachment_ids:
+            await self._connection.execute(
+                sa.update(attachments)
+                .where(
+                    attachments.c.id.in_(attachment_ids),
+                    attachments.c.transcription_status == "queued",
+                )
+                .values(transcription_status="error", transcription_error="internal_error")
             )
 
 

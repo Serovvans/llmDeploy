@@ -197,7 +197,7 @@ def test_validate_schema_checks_array_items() -> None:
 )
 def test_payloads_use_default_model_and_low_reasoning(payload: dict[str, Any]) -> None:
     assert payload["model"] == "default"
-    # §3.1: high у Qwen3.8 даёт HTTP 500, xhigh (по умолчанию) слишком долог для смоук-теста.
+    # §3.1: high у Qwen3.8 даёт HTTP 400, xhigh (по умолчанию) слишком долог для смоук-теста.
     assert payload["reasoning_effort"] == "low"
 
 
@@ -255,6 +255,56 @@ def test_check_thinking_disabled_fails_when_reasoning_present(field: str) -> Non
         pytest.raises(st.SmokeTestError, match=f"{field}.*chat_template_kwargs"),
     ):
         st.check_thinking_disabled(client)
+
+
+# --- без reasoning_effort («Вдумчиво») ---------------------------------------
+
+
+def test_thinking_default_payload_omits_reasoning_effort() -> None:
+    # Bifrost превращает xhigh в high, а шаблон на high отвечает 400: поле не передаётся.
+    payload = st.thinking_default_payload()
+    assert payload["model"] == "default"
+    assert "reasoning_effort" not in payload
+    assert "chat_template_kwargs" not in payload
+
+
+@pytest.mark.parametrize(
+    ("message", "detail"),
+    [
+        ({"content": None, "reasoning": " Считаю: 2+2... "}, "reasoning: Считаю: 2+2..."),
+        ({"content": None, "reasoning_content": "Считаю"}, "reasoning_content: Считаю"),
+        ({"content": "4", "reasoning": "Считаю"}, "reasoning: Считаю"),
+    ],
+)
+def test_check_thinking_default_accepts_truncated_reasoning(
+    message: dict[str, Any], detail: str
+) -> None:
+    recorder = Recorder([chat_response(message, finish_reason="length")])
+    with recorder.client() as client:
+        assert st.check_thinking_default(client) == detail
+    assert "reasoning_effort" not in recorder.payload()
+
+
+@pytest.mark.parametrize(
+    ("response", "fragment"),
+    [
+        (chat_response({"content": "", "reasoning": None}), "нет рассуждения"),
+        # Ответ без рассуждения: «Вдумчиво» через шлюз не думает — так баг и выглядел.
+        (chat_response({"content": "4", "reasoning": None}), "нет рассуждения"),
+        (chat_response({"content": "4", "reasoning_content": "  "}), "нет рассуждения"),
+        (chat_response({"content": "4"}), "нет рассуждения"),
+        (
+            httpx.Response(400, json={"error": {"message": "high is not supported"}}),
+            "HTTP 400 high is not supported",
+        ),
+    ],
+)
+def test_check_thinking_default_failures(response: httpx.Response, fragment: str) -> None:
+    with (
+        Recorder([response]).client() as client,
+        pytest.raises(st.SmokeTestError, match=fragment),
+    ):
+        st.check_thinking_default(client)
 
 
 # --- изображение -------------------------------------------------------------
@@ -416,6 +466,7 @@ def test_check_v1_closed_routes_sends_each_route_without_key() -> None:
         ("GET", "/v1/"),
         ("POST", "/v1/async/chat/completions"),
         ("POST", "/v1/mcp/tool/execute"),
+        ("POST", "/v1/rerank"),
     ]
     assert all("Authorization" not in request.headers for request in recorder.requests)
 
@@ -428,6 +479,8 @@ def test_check_v1_closed_routes_sends_each_route_without_key() -> None:
         # Запрос дошёл до Bifrost, а не остановлен Caddy.
         (5, 401, "POST /v1/async/chat/completions → HTTP 401"),
         (6, 200, "POST /v1/mcp/tool/execute → HTTP 200"),
+        # Реранкер наружу не открыт: к нему ходит только портал по docker-сети.
+        (7, 401, "POST /v1/rerank → HTTP 401"),
     ],
 )
 def test_check_v1_closed_routes_reports_routes_reaching_bifrost(
@@ -577,8 +630,9 @@ def portal_error(status: int, code: str) -> httpx.Response:
     return httpx.Response(status, json={"error": {"code": code, "message": "текст"}})
 
 
-@pytest.mark.parametrize(("value", "expected"), [(None, "api"), ("", "api"), ("portal", "portal")])
-def test_settings_site_mode(value: str | None, expected: str) -> None:
+@pytest.mark.parametrize(("value", "expected"), [(None, None), ("", "api"), ("portal", "portal")])
+def test_settings_site_mode(value: str | None, expected: str | None) -> None:
+    """Пустое значение — режим api, как в deploy/.env; без переменной режим неизвестен."""
     env = {"LLM_BASE_URL": "https://llm.example/v1", "LLM_API_KEY": "sk-bf-test"}
     if value is not None:
         env["SITE_MODE"] = value
@@ -800,7 +854,14 @@ def test_run_compose_reports_missing_docker(monkeypatch: pytest.MonkeyPatch) -> 
 
 # --- состав проверок ----------------------------------------------------------
 
-MODEL_CHECKS = ["text", "thinking_disabled", "image", "json_schema", "tool_call"]
+MODEL_CHECKS = [
+    "text",
+    "thinking_disabled",
+    "thinking_default",
+    "image",
+    "json_schema",
+    "tool_call",
+]
 PORTAL_CHECKS = [
     "v1_closed_routes",
     "portal_page",
@@ -825,7 +886,20 @@ def test_build_checks_portal_mode_replaces_closed_paths() -> None:
 def test_build_checks_site_only_makes_no_model_requests() -> None:
     assert _check_names(direct=False, site_only=True) == ["no_key", *API_CHECKS]
     names = _check_names(direct=False, site_only=True, site_mode="portal", compose_file="c.yml")
-    assert names == ["no_key", *PORTAL_CHECKS, "services"]
+    assert names == ["no_key", *PORTAL_CHECKS, "services", "sql_sandbox"]
+
+
+def test_build_checks_portal_smoke_covers_services_of_release_05() -> None:
+    access = st.RerankAccess("http://127.0.0.1:8081", "sk-bf-portal")
+    portal: dict[str, Any] = {"site_only": True, "site_mode": "portal"}
+    names = _check_names(direct=False, **portal, compose_file="c.yml", rerank=access)
+    assert names == ["no_key", *PORTAL_CHECKS, "services", "sql_sandbox", "rerank"]
+    # Реранкер выключен — шага нет; без compose-файла (не на ВМ) нет обоих.
+    names = _check_names(direct=False, **portal, compose_file="c.yml")
+    assert names[-2:] == ["services", "sql_sandbox"]
+    assert _check_names(direct=False, **portal, rerank=access) == ["no_key", *PORTAL_CHECKS]
+    api = _check_names(direct=False, site_only=True, compose_file="c.yml", rerank=access)
+    assert api == ["no_key", *API_CHECKS, "services"]
 
 
 def test_build_checks_direct_mode_ignores_site_mode() -> None:
@@ -859,3 +933,167 @@ def test_main_site_only_runs_without_key(
     monkeypatch.setattr(st, "build_client", lambda settings: real_build_client(settings, transport))
     assert st.main(["--site-only"]) == 0
     assert "ИТОГ: PASS" in capsys.readouterr().out
+
+
+# --- режим сайта без SITE_MODE (запуск с рабочей станции) -----------------------
+
+
+def run_site_only(
+    monkeypatch: pytest.MonkeyPatch, responses: list[httpx.Response], site_mode: str | None
+) -> int:
+    for name in ("LLM_HOSTNAME", "LLM_API_KEY", "LLM_CA_CERT", "COMPOSE_PROFILES", "SITE_MODE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    if site_mode is not None:
+        monkeypatch.setenv("SITE_MODE", site_mode)
+    transport = httpx.MockTransport(Recorder(responses))
+    real_build_client = st.build_client
+    monkeypatch.setattr(st, "build_client", lambda settings: real_build_client(settings, transport))
+    return st.main(["--site-only"])
+
+
+def portal_site_responses() -> list[httpx.Response]:
+    return [
+        httpx.Response(401, json={"error": {"message": "vk"}}),
+        *[httpx.Response(404) for _ in st.V1_CLOSED_ROUTES],
+        page_response(),
+        page_response(),
+        *closed_path_responses(),
+        portal_error(401, "unauthenticated"),
+        portal_error(403, "csrf_check_failed"),
+    ]
+
+
+def test_portal_domain_passes_without_site_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Домен, где на / отвечает портал: шаг closed_paths («/ → 404») к нему неприменим."""
+    responses = [page_response(), *portal_site_responses()]
+    assert run_site_only(monkeypatch, responses, site_mode=None) == 0
+    out = capsys.readouterr().out
+    assert "PASS  portal_page" in out
+    assert "closed_paths" not in out.replace("portal_closed_paths", "")
+
+
+def test_api_site_is_detected_without_site_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    responses = [
+        httpx.Response(404),
+        httpx.Response(401, json={"error": {"message": "vk"}}),
+        *[httpx.Response(404) for _ in st.V1_CLOSED_ROUTES],
+        *[httpx.Response(404) for _ in st.CLOSED_PATHS],
+    ]
+    assert run_site_only(monkeypatch, responses, site_mode=None) == 0
+    assert "PASS  closed_paths" in capsys.readouterr().out
+
+
+def test_portal_answering_on_api_stage_still_fails_on_the_vm(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """На ВМ режим задаёт deploy/.env (пустое значение — api): портал на / — ошибка."""
+    responses = [
+        httpx.Response(401, json={"error": {"message": "vk"}}),
+        *[httpx.Response(404) for _ in st.V1_CLOSED_ROUTES],
+        httpx.Response(404),
+        httpx.Response(404),
+        page_response(),
+    ]
+    assert run_site_only(monkeypatch, responses, site_mode="") == 1
+    assert "FAIL  closed_paths" in capsys.readouterr().out
+
+
+def test_unreadable_root_without_site_mode_is_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_site_only(monkeypatch, [httpx.Response(502)], site_mode=None) == 1
+    assert "ИТОГ" not in capsys.readouterr().out
+
+
+# --- сервисы пакета 0.5: песочница SQL и реранкер --------------------------------
+
+ACCESS = st.RerankAccess(bifrost_url="http://127.0.0.1:8081", api_key="sk-bf-portal")
+
+
+def rerank_response(*scores: float) -> httpx.Response:
+    results = [{"index": index, "relevance_score": score} for index, score in enumerate(scores)]
+    return httpx.Response(200, json={"results": results})
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"COMPOSE_PROFILES": "gateway,embeddings,portal"}, None),
+        (
+            {"COMPOSE_PROFILES": "gateway,embeddings,rerank,portal", "PORTAL_LLM_API_KEY": "k"},
+            st.RerankAccess("http://127.0.0.1:8081", "k"),
+        ),
+        (
+            {"COMPOSE_PROFILES": "embeddings,rerank", "BIFROST_ADMIN_URL": "http://h:9/"},
+            st.RerankAccess("http://h:9", ""),
+        ),
+    ],
+)
+def test_settings_rerank_follows_compose_profiles(
+    env: dict[str, str], expected: st.RerankAccess | None
+) -> None:
+    settings = st.load_settings({"LLM_HOSTNAME": "h", **env}, site_only=True)
+    assert settings.rerank == expected
+
+
+def test_check_rerank_asks_bifrost_the_way_portal_does() -> None:
+    recorder = Recorder([rerank_response(0.98, 0.02)])
+    with recorder.client() as client:
+        assert st.check_rerank(client, ACCESS) == "оценки: 0.980 > 0.020"
+    request = recorder.requests[0]
+    assert (request.method, str(request.url)) == ("POST", "http://127.0.0.1:8081/v1/rerank")
+    # Ключ портала, а не ключ смоук-теста: проверяется и доступ ключа к модели.
+    assert request.headers["Authorization"] == "Bearer sk-bf-portal"
+    payload = recorder.payload()
+    assert payload["model"] == "rerank"
+    assert len(payload["documents"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("response", "fragment"),
+    [
+        (
+            httpx.Response(400, json={"error": {"message": "could not auto resolve a provider"}}),
+            "make key-rerank",
+        ),
+        (httpx.Response(502), "HTTP 502"),
+        (rerank_response(0.1, 0.9), "не выше постороннего"),
+        (rerank_response(0.5), "неожиданная форма ответа"),
+        (httpx.Response(200, json={"results": [{"index": 0}, {"index": 1}]}), "неожиданная форма"),
+        (httpx.Response(200, json=[]), "неожиданная форма"),
+    ],
+)
+def test_check_rerank_failures(response: httpx.Response, fragment: str) -> None:
+    with (
+        Recorder([response]).client() as client,
+        pytest.raises(st.SmokeTestError, match=fragment),
+    ):
+        st.check_rerank(client, ACCESS)
+
+
+def test_check_rerank_needs_portal_key() -> None:
+    recorder = Recorder([])
+    with (
+        recorder.client() as client,
+        pytest.raises(st.SmokeTestError, match="PORTAL_LLM_API_KEY"),
+    ):
+        st.check_rerank(client, st.RerankAccess("http://127.0.0.1:8081", ""))
+    assert recorder.requests == []
+
+
+def compose_ps(state: str, health: str) -> st.ComposeRunner:
+    row = {"Service": "sql-sandbox", "State": state, "Health": health}
+    return lambda compose_file, args: json.dumps(row)
+
+
+def test_check_service_healthy_reports_sandbox_state() -> None:
+    healthy = st.check_service_healthy("c.yml", "sql-sandbox", compose_ps("running", "healthy"))
+    assert healthy == "healthy: sql-sandbox"
+    for runner in (compose_ps("running", "unhealthy"), lambda compose_file, args: ""):
+        with pytest.raises(st.SmokeTestError, match="sql-sandbox"):
+            st.check_service_healthy("c.yml", "sql-sandbox", runner)

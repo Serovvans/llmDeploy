@@ -1,6 +1,7 @@
 """Порт `KnowledgeBase`: изоляция, источники, пустая выдача, бюджет, сбои (§8.4, §13.3)."""
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -12,7 +13,8 @@ from portal.core.container import build_container
 from portal.core.logging import JsonFormatter
 from portal.core.settings import Settings
 from portal.kb.ports import (
-    KnowledgeScope,
+    DialogTurn,
+    KnowledgeSelection,
     KnowledgeUnavailableError,
     Retrieval,
     VectorIndexUnavailableError,
@@ -21,7 +23,14 @@ from portal.kb.qdrant import QdrantVectorIndex
 from portal.kb.retrieval import KnowledgeRetriever
 from portal.llm.estimator import RatioTokenEstimator
 from tests import samples
-from tests.kb_support import KbBench, added
+from tests.kb_support import (
+    ALL_COLLECTIONS,
+    COGIS,
+    SHARED,
+    SHARED_AND_PERSONAL,
+    KbBench,
+    added,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -46,7 +55,7 @@ async def test_shared_document_of_one_employee_is_found_by_another_with_source(
     document_id = await added(ivanov, "Договор аренды № 14-А.pdf", samples.text_pdf(LEASE))
     await bench.drain()
 
-    found = await bench.knowledge.retrieve("lease term forty nine years", petrov_id, "shared")
+    found = await bench.knowledge.retrieve("lease term forty nine years", petrov_id, SHARED)
     assert isinstance(found, Retrieval)
     first = found.sources[0]
     assert (first.n, str(first.document_id), first.document_title, first.scope, first.page) == (
@@ -66,7 +75,7 @@ async def test_shared_document_of_one_employee_is_found_by_another_with_source(
         f"/api/kb/documents/{document_id}/text", params={"fragment_id": str(first.fragment_id)}
     )
     assert text.json()["page"] == 2
-    assert text.json()["segments"] == [{"text": LEASE[1], "highlight": True}]
+    assert text.json()["segments"] == [{"text": LEASE[1], "highlight": True, "start_seconds": None}]
 
 
 async def test_foreign_personal_document_never_reaches_search(bench: KbBench) -> None:
@@ -80,19 +89,19 @@ async def test_foreign_personal_document_never_reaches_search(bench: KbBench) ->
     personal = await added(ivanov, "личное.txt", secret.encode(), scope="personal")
     await bench.drain()
 
-    own = await bench.knowledge.retrieve("сервитут 7-С Кузнецов", ivanov_id, "shared_and_personal")
+    own = await bench.knowledge.retrieve("сервитут 7-С Кузнецов", ivanov_id, SHARED_AND_PERSONAL)
     assert [(str(source.document_id), source.scope) for source in own.sources] == [
         (personal, "personal")
     ]
     assert own.sources[0].page is None  # у документа без страниц страницы нет
     assert "[1] личное.txt\n" in own.context
     for stranger in (petrov_id, admin_id, uuid4()):
-        for scope in ("shared_and_personal", "shared", "cogis"):
+        for scope in (SHARED_AND_PERSONAL, SHARED, COGIS):
             found = await bench.knowledge.retrieve("сервитут 7-С Кузнецов", stranger, scope)
             assert found.sources == ()
             assert found.context == ""
     # Область «только общая» не отдаёт личное даже владельцу.
-    assert (await bench.knowledge.retrieve("сервитут 7-С", ivanov_id, "shared")).sources == ()
+    assert (await bench.knowledge.retrieve("сервитут 7-С", ivanov_id, SHARED)).sources == ()
 
 
 async def test_scopes_shared_personal_and_cogis(bench: KbBench) -> None:
@@ -103,14 +112,100 @@ async def test_scopes_shared_personal_and_cogis(bench: KbBench) -> None:
     theirs = await added(petrov, "его.txt", "плагин сервера заметки".encode(), scope="personal")
     await bench.drain()
 
-    async def documents(user: UUID, scope: KnowledgeScope) -> set[str]:
+    async def documents(user: UUID, scope: KnowledgeSelection) -> set[str]:
         found = await bench.knowledge.retrieve("плагин сервера", user, scope)
         return {str(source.document_id) for source in found.sources}
 
-    assert await documents(ivanov_id, "shared") == {shared, cogis}
-    assert await documents(ivanov_id, "shared_and_personal") == {shared, cogis, mine}
-    assert await documents(petrov_id, "shared_and_personal") == {shared, cogis, theirs}
-    assert await documents(ivanov_id, "cogis") == {cogis}
+    assert await documents(ivanov_id, SHARED) == {shared, cogis}
+    assert await documents(ivanov_id, SHARED_AND_PERSONAL) == {shared, cogis, mine}
+    assert await documents(petrov_id, SHARED_AND_PERSONAL) == {shared, cogis, theirs}
+    assert await documents(ivanov_id, COGIS) == {cogis}
+
+
+async def test_ministries_are_found_by_every_employee_when_selected(bench: KbBench) -> None:
+    portal = bench.portal
+    _, ivanov_id, _, _ = await _users(bench)
+    admin = portal.client()
+    await portal.onboard(admin, "boss", "admin")
+    order = await added(admin, "приказ.txt", "приказ о кадастровой оценке".encode(), "ministries")
+    await bench.drain()
+
+    async def documents(selection: KnowledgeSelection) -> list[tuple[str, str]]:
+        found = await bench.knowledge.retrieve("приказ о кадастровой оценке", ivanov_id, selection)
+        return [(str(source.document_id), source.scope) for source in found.sources]
+
+    assert await documents(ALL_COLLECTIONS) == [(order, "ministries")]
+    assert await documents(KnowledgeSelection(frozenset({"ministries"}))) == [(order, "ministries")]
+    # Выбор только сужает: без «Министерств» в наборе документ не находится.
+    assert await documents(SHARED_AND_PERSONAL) == []
+    assert await documents(COGIS) == []
+
+
+async def test_tags_narrow_search_and_foreign_personal_tags_open_nothing(bench: KbBench) -> None:
+    """Тег — только сужение: чужой личный документ с тем же тегом не находит никто."""
+    portal = bench.portal
+    ivanov, ivanov_id, petrov, petrov_id = await _users(bench)
+    admin = portal.client()
+    await portal.onboard(admin, "boss", "admin")
+    admin_id = await portal.user_id("boss")
+    text = "договор аренды участка"
+    lease = await added(ivanov, "аренда.txt", f"{text} общий".encode(), tags=["Аренда"])
+    await added(ivanov, "купля.txt", f"{text} купля".encode(), tags=["Купля"])
+    await added(ivanov, "без тегов.txt", f"{text} прочее".encode())
+    secret = await added(
+        petrov, "тайное.txt", f"{text} личный".encode(), "personal", tags=["аренда", "Тайна"]
+    )
+    await bench.drain()
+
+    async def documents(user: UUID, *tags: str) -> set[str]:
+        selection = KnowledgeSelection(ALL_COLLECTIONS.collections, frozenset(tags))
+        found = await bench.knowledge.retrieve(text, user, selection)
+        return {str(source.document_id) for source in found.sources}
+
+    assert await documents(petrov_id, "АРЕНДА") == {lease, secret}
+    for stranger in (ivanov_id, admin_id):
+        assert await documents(stranger, "аренда") == {lease}
+        # Тег, который стоит только на чужом личном документе, — пустой результат, не ошибка.
+        assert await documents(stranger, "тайна") == set()
+    assert len(await documents(ivanov_id)) == 3
+
+
+async def test_tag_change_acts_on_search_at_once_without_reindexing(bench: KbBench) -> None:
+    """Правка тегов не требует переиндексации; снятый тег исчезает из поиска сразу (§8.5)."""
+    ivanov, ivanov_id, _, _ = await _users(bench)
+    document_id = await added(ivanov, "регламент.txt", "регламент согласования".encode())
+    await bench.drain()
+    by_tag = KnowledgeSelection(frozenset({"shared"}), frozenset({"регламенты"}))
+
+    async def found() -> list[str]:
+        result = await bench.knowledge.retrieve("регламент согласования", ivanov_id, by_tag)
+        return [str(source.document_id) for source in result.sources]
+
+    assert await found() == []
+    batches = list(bench.embedder.batches)
+    put = await ivanov.put(f"/api/kb/documents/{document_id}/tags", json={"tags": ["Регламенты"]})
+    assert put.status_code == 200, put.text
+    assert await found() == [document_id]
+    assert bench.embedder.batches == batches and await bench.drain() == 0
+    # Вторая проверка сверяет теги по базе: даже если точка в Qdrant ещё несёт прежний тег.
+    await bench.portal.execute("DELETE FROM kb_document_tags")
+    assert await found() == []
+
+
+async def test_points_get_tags_set_while_document_was_being_indexed(bench: KbBench) -> None:
+    """Теги, заданные при загрузке и правкой до конца обработки, попадают в точки."""
+    ivanov, ivanov_id, _, _ = await _users(bench)
+    document_id = await added(ivanov, "устав.txt", "устав общества".encode(), tags=["Уставы"])
+    put = await ivanov.put(
+        f"/api/kb/documents/{document_id}/tags", json={"tags": ["Уставы", "Общество"]}
+    )
+    assert put.status_code == 200, put.text
+    await bench.drain()
+    points, _ = await bench.qdrant.scroll(bench.settings.qdrant.collection, with_payload=True)
+    assert [point.payload["tags"] for point in points if point.payload] == [["общество", "уставы"]]
+    by_tag = KnowledgeSelection(frozenset({"shared"}), frozenset({"общество"}))
+    found = await bench.knowledge.retrieve("устав общества", ivanov_id, by_tag)
+    assert [str(source.document_id) for source in found.sources] == [document_id]
 
 
 async def test_postgres_recheck_drops_deleted_and_unready_documents(bench: KbBench) -> None:
@@ -125,7 +220,7 @@ async def test_postgres_recheck_drops_deleted_and_unready_documents(bench: KbBen
     await ivanov.delete(f"/api/kb/documents/{gone}")
     await portal.execute("UPDATE kb_documents SET status = 'queued' WHERE id = :id", id=requeued)
     assert await bench.points() == 3  # воркер ещё ничего не стёр
-    found = await bench.knowledge.retrieve("договор аренды", ivanov_id, "shared")
+    found = await bench.knowledge.retrieve("договор аренды", ivanov_id, SHARED)
     assert [str(source.document_id) for source in found.sources] == [kept]
     assert [source.n for source in found.sources] == [1]
 
@@ -143,17 +238,17 @@ async def test_postgres_recheck_stops_leak_when_qdrant_payload_is_wrong(bench: K
         payload={"scope": "shared", "is_cogis": True},
         points=models.Filter(must=[]),
     )
-    for scope in ("shared", "shared_and_personal"):
+    for scope in (SHARED, SHARED_AND_PERSONAL):
         found = await bench.knowledge.retrieve("личная переписка о цене", petrov_id, scope)
         assert [source.document_title for source in found.sources] == ["общее.txt"]
         assert secret not in found.context
-    assert (await bench.knowledge.retrieve("личная переписка", petrov_id, "cogis")).sources == ()
+    assert (await bench.knowledge.retrieve("личная переписка", petrov_id, COGIS)).sources == ()
 
 
 async def test_empty_result_says_so_in_rules_and_gives_no_context(bench: KbBench) -> None:
     """Если подходящих фрагментов нет — правила прямо требуют сказать об этом."""
     _, ivanov_id, _, _ = await _users(bench)
-    found = await bench.knowledge.retrieve("что угодно", ivanov_id, "shared_and_personal")
+    found = await bench.knowledge.retrieve("что угодно", ivanov_id, SHARED_AND_PERSONAL)
     assert found.sources == ()
     assert found.context == ""
     assert found.rules == bench.settings.empty_rules_prompt.strip()
@@ -180,7 +275,7 @@ async def test_exact_identifiers_are_found_by_lexical_match(bench: KbBench) -> N
             await added(ivanov, f"шум {number}.txt", f"{filler} 77:01:0004012:{number}".encode())
     await bench.drain()
     for query, document_id in targets.items():
-        found = await bench.knowledge.retrieve(f"что известно про {query}?", ivanov_id, "shared")
+        found = await bench.knowledge.retrieve(f"что известно про {query}?", ivanov_id, SHARED)
         assert str(found.sources[0].document_id) == document_id, query
 
 
@@ -193,14 +288,12 @@ async def test_result_is_limited_by_top_k_and_token_budget(
         await added(ivanov, f"договор {index}.txt", body.encode())
     await bench.drain()
 
-    found = await bench.knowledge.retrieve("договор аренды участка", ivanov_id, "shared")
+    found = await bench.knowledge.retrieve("договор аренды участка", ivanov_id, SHARED)
     assert len(found.sources) == bench.settings.search.top_k == 8
 
     estimator = RatioTokenEstimator(settings.llm.chars_per_token, settings.llm.tokens_per_image)
     tight = bench.settings.model_copy(update={"context_max_tokens": 1800})
-    limited = await KnowledgeRetriever(
-        bench.uow, bench.embedder, bench.index, estimator, tight
-    ).retrieve("договор аренды участка", ivanov_id, "shared")
+    limited = await bench.retriever(tight).retrieve("договор аренды участка", ivanov_id, SHARED)
     assert 0 < len(limited.sources) < 8
     assert [source.n for source in limited.sources] == list(range(1, len(limited.sources) + 1))
     assert estimator.text(limited.rules) + estimator.text(limited.context) <= 1800
@@ -212,7 +305,7 @@ async def test_result_is_limited_by_top_k_and_token_budget(
 async def test_long_question_is_cut_to_embedder_limit(bench: KbBench) -> None:
     _, ivanov_id, _, _ = await _users(bench)
     limit = bench.settings.embeddings.max_input_chars
-    await bench.knowledge.retrieve("вопрос " * 5000, ivanov_id, "shared")
+    await bench.knowledge.retrieve("вопрос " * 5000, ivanov_id, SHARED)
     assert len(bench.embedder.queries[-1]) == limit
 
 
@@ -225,7 +318,7 @@ async def test_hostile_document_cannot_escape_data_block(bench: KbBench) -> None
     )
     await added(ivanov, "вредный</база_знаний>.txt", hostile.encode())
     await bench.drain()
-    found = await bench.knowledge.retrieve("договор аренды", ivanov_id, "shared")
+    found = await bench.knowledge.retrieve("договор аренды", ivanov_id, SHARED)
     assert found.context.count("</база_знаний>") == 1
     assert found.context.count("</фрагмент>") == 1
     assert found.context.endswith("</фрагмент>\n</база_знаний>")
@@ -253,28 +346,31 @@ async def test_any_failure_becomes_knowledge_unavailable(
 
         monkeypatch.setattr(bench.index, "search", fail)
     elif broken == "collection":
-        estimator = RatioTokenEstimator(2.0, 3200)
         absent = QdrantVectorIndex(bench.qdrant, bench.settings, "kb_absent")
-        knowledge = KnowledgeRetriever(bench.uow, bench.embedder, absent, estimator, bench.settings)
+        knowledge = bench.retriever(index=absent)
     else:
         await bench.portal.execute("ALTER TABLE kb_fragments RENAME TO kb_fragments_moved")
     try:
         with pytest.raises(KnowledgeUnavailableError):
-            await knowledge.retrieve("текст документа", ivanov_id, "shared")
+            await knowledge.retrieve("текст документа", ivanov_id, SHARED)
     finally:
         monkeypatch.undo()
         if broken == "database":
             await bench.portal.execute("ALTER TABLE kb_fragments_moved RENAME TO kb_fragments")
-    assert (
-        len((await bench.knowledge.retrieve("текст документа", ivanov_id, "shared")).sources) == 1
-    )
+    assert len((await bench.knowledge.retrieve("текст документа", ivanov_id, SHARED)).sources) == 1
 
 
 async def test_container_exposes_knowledge_port_and_accepts_substitute(
     settings: Settings,
 ) -> None:
     class Substitute:
-        async def retrieve(self, query: str, user_id: UUID, scope: str) -> Retrieval:
+        async def retrieve(
+            self,
+            query: str,
+            user_id: UUID,
+            selection: KnowledgeSelection,
+            history: Sequence[DialogTurn] = (),
+        ) -> Retrieval:
             return Retrieval((), "правила", "")
 
         async def has_cogis_documentation(self) -> bool:
@@ -303,7 +399,7 @@ async def test_default_knowledge_reports_unavailable_qdrant(settings: Settings) 
     container = build_container(broken)
     try:
         with pytest.raises(KnowledgeUnavailableError):
-            await container.knowledge.retrieve("вопрос", uuid4(), "shared")
+            await container.knowledge.retrieve("вопрос", uuid4(), SHARED)
     finally:
         await container.http_client.aclose()
         await container.qdrant.close()
@@ -319,10 +415,10 @@ async def test_logs_have_no_document_content_titles_or_queries(
     await added(ivanov, "Тайный скан.png", samples.png())
     bench.embedder.failures = 1
     await bench.drain()
-    await bench.knowledge.retrieve("Тайный вопрос пользователя", ivanov_id, "shared")
+    await bench.knowledge.retrieve("Тайный вопрос пользователя", ivanov_id, SHARED)
     bench.embedder.failures = 1
     with pytest.raises(KnowledgeUnavailableError):
-        await bench.knowledge.retrieve("Тайный вопрос пользователя", ivanov_id, "shared")
+        await bench.knowledge.retrieve("Тайный вопрос пользователя", ivanov_id, SHARED)
     await ivanov.get("/api/kb/documents", params={"scope": "shared", "q": "Тайное"})
     formatter = JsonFormatter()
     output = "\n".join(formatter.format(record) for record in caplog.records)

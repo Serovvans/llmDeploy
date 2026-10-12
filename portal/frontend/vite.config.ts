@@ -10,9 +10,9 @@ export default defineConfig(({ mode }) => {
       proxy: apiTarget ? { '/api': { target: apiTarget, changeOrigin: false } } : undefined,
     },
     build: {
-      // Файл библиотеки компонентов — около 915 кБ (187 кБ в gzip) и делению не поддаётся;
+      // Файл библиотеки компонентов — около 1003 кБ (206 кБ в gzip) и делению не поддаётся;
       // порог чуть выше него, чтобы предупреждение сработало при заметном росте.
-      chunkSizeWarningLimit: 950,
+      chunkSizeWarningLimit: 1050,
       rolldownOptions: {
         output: {
           // Библиотека компонентов — отдельным файлом: меняется реже кода портала и дольше живёт в кэше браузера.

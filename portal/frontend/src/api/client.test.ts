@@ -113,7 +113,7 @@ describe('клиент API', () => {
     });
     const listener = vi.fn();
     const unsubscribe = onSessionSignal(listener);
-    const body = { content: 'Вопрос', attachment_ids: [], mode: 'fast', knowledge: 'none' };
+    const body = { content: 'Вопрос', attachment_ids: [], mode: 'fast', collections: [] };
 
     const refused = api.sendMessage('d-1', body, new AbortController().signal);
     await expect(refused.next()).rejects.toMatchObject({ code: 'generation_in_progress' });
@@ -193,6 +193,56 @@ describe('клиент API', () => {
     unsubscribe();
     await api.getSession().catch(() => undefined);
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('загрузка записи: тело — сам файл, имя — в строке запроса; отказ, потеря сессии и отмена — как у остальных запросов', async () => {
+    const server = mockApi({ 'POST /api/dialogs/d-1/attachments/media': () => fail(507, 'media_quota_exceeded', { details: { reason: 'user' } }) });
+    const file = new File(['ID3'], 'совещание & итоги.mp3');
+    const signals: string[] = [];
+    const off = onSessionSignal((signal) => signals.push(signal));
+    const upload = (signal = new AbortController().signal) => api.uploadMediaAttachment('d-1', file, () => undefined, signal);
+
+    await expect(upload()).rejects.toMatchObject({ status: 507, code: 'media_quota_exceeded', details: { reason: 'user' } });
+    expect(server.calls[0]).toMatchObject({ body: file, headers: { 'X-Portal-Csrf': '1' } });
+    // Имя файла не ломает строку запроса.
+    expect(new URL(server.uploads[0]?.path ?? '', 'http://localhost').searchParams.get('file_name')).toBe('совещание & итоги.mp3');
+    expect(signals).toEqual([]);
+
+    server.on('POST /api/dialogs/d-1/attachments/media', () => fail(401, 'unauthenticated'));
+    await expect(upload()).rejects.toBeInstanceOf(ApiError);
+    expect(signals).toEqual(['unauthenticated']);
+    off();
+
+    server.on('POST /api/dialogs/d-1/attachments/media', () => {
+      throw new TypeError('network error');
+    });
+    await expect(upload()).rejects.toBeInstanceOf(NetworkError);
+
+    server.on('POST /api/dialogs/d-1/attachments/media', () => new Promise(() => undefined));
+    const controller = new AbortController();
+    const pending = upload(controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toSatisfy(isAbort);
+    expect(server.uploads.at(-1)?.aborted).toBe(true);
+  });
+
+  it('просмотр: страница, цитата и момент записи — в строке запроса; подсказки тегов — по выбранным базам', async () => {
+    const server = mockApi({
+      'GET /api/kb/documents/doc-1/text': () => ok({}),
+      'GET /api/kb/tags': () => ok({ items: [] }),
+    });
+    await api.getKbDocumentText('doc-1', { fragmentId: 'frag-1', timecode: 760 });
+    await api.getKbDocumentText('doc-1', { page: 3, fragmentId: 'frag-1' });
+    await api.listKbTags(['shared', 'ministries'], 'ар');
+    await api.listKbTags([], '');
+
+    expect(vi.mocked(fetch).mock.calls.map(([input]) => String(input))).toEqual([
+      '/api/kb/documents/doc-1/text?fragment_id=frag-1&timecode=760',
+      '/api/kb/documents/doc-1/text?page=3&fragment_id=frag-1',
+      `/api/kb/tags?scope=shared&scope=ministries&q=${encodeURIComponent('ар')}`,
+      '/api/kb/tags?',
+    ]);
+    expect(server.calls).toHaveLength(4);
   });
 
   it('запрашивает пользователей по страницам с отбором и сортировкой по ФИО', async () => {

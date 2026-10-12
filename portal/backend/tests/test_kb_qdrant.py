@@ -19,11 +19,13 @@ from portal.kb.lexical import sparse_vector
 from portal.kb.ports import (
     CollectionMismatchError,
     FragmentPoint,
-    KnowledgeScope,
+    KnowledgeSelection,
     SparseVector,
     VectorIndexUnavailableError,
 )
 from portal.kb.qdrant import QdrantVectorIndex, access_filter
+from tests.kb_support import ALL_COLLECTIONS, COGIS, SHARED
+from tests.kb_support import SHARED_AND_PERSONAL as BOTH
 
 pytestmark = pytest.mark.anyio
 
@@ -55,7 +57,13 @@ async def index(client: AsyncQdrantClient, settings: Settings) -> AsyncIterator[
 
 
 def _point(
-    text: str, scope: str, owner: UUID, *, is_cogis: bool = False, document: UUID | None = None
+    text: str,
+    scope: str,
+    owner: UUID,
+    *,
+    is_cogis: bool = False,
+    document: UUID | None = None,
+    tags: tuple[str, ...] = (),
 ) -> FragmentPoint:
     return FragmentPoint(
         fragment_id=uuid4(),
@@ -63,22 +71,35 @@ def _point(
         scope=scope,  # type: ignore[arg-type]
         owner_id=owner,
         is_cogis=is_cogis,
+        tags=tags,
         dense=replies.embedding(text) or [],
         lexical=sparse_vector(text),
     )
 
 
 async def _search(
-    index: QdrantVectorIndex, query: str, user: UUID, scope: KnowledgeScope, limit: int = 8
+    index: QdrantVectorIndex,
+    query: str,
+    user: UUID,
+    selection: KnowledgeSelection,
+    limit: int = 8,
 ) -> list[UUID]:
-    return await index.search(
-        replies.embedding(query) or [], sparse_vector(query), user, scope, limit
+    """Выдача, как её собирает поиск: лексические совпадения, затем слияние ветвей."""
+    hits = await index.search(
+        replies.embedding(query) or [], sparse_vector(query), user, selection, limit
     )
+    return hits.ordered()[:limit]
 
 
 async def _store(index: QdrantVectorIndex, *points: FragmentPoint) -> None:
+    await _store_document(index, *points)
+
+
+async def _store_document(index: QdrantVectorIndex, *points: FragmentPoint) -> None:
+    """Записать точки и ввести их в действие — по одной, каждая со своими тегами."""
     for point in points:
-        await index.replace_document(point.document_id, [point])
+        await index.stage_document(point.document_id, [point])
+        await index.publish_document(point.document_id, point.tags)
 
 
 async def test_foreign_personal_fragment_is_never_returned(index: QdrantVectorIndex) -> None:
@@ -88,21 +109,21 @@ async def test_foreign_personal_fragment_is_never_returned(index: QdrantVectorIn
     boris_own = _point(text, "personal", BORIS)
     await _store(index, shared, ann_own, boris_own)
 
-    found = await _search(index, text, ANN, "shared_and_personal")
+    found = await _search(index, text, ANN, BOTH)
     assert set(found) == {shared.fragment_id, ann_own.fragment_id}
-    assert set(await _search(index, text, BORIS, "shared_and_personal")) == {
+    assert set(await _search(index, text, BORIS, BOTH)) == {
         shared.fragment_id,
         boris_own.fragment_id,
     }
     # Посторонний пользователь (и администратор — роли в фильтре нет) видит только общее.
-    assert await _search(index, text, uuid4(), "shared_and_personal") == [shared.fragment_id]
+    assert await _search(index, text, uuid4(), BOTH) == [shared.fragment_id]
 
 
 async def test_shared_scope_excludes_even_own_personal(index: QdrantVectorIndex) -> None:
     shared = _point("регламент резервного копирования", "shared", BORIS)
     own = _point("регламент резервного копирования личный", "personal", ANN)
     await _store(index, shared, own)
-    assert await _search(index, "регламент копирования", ANN, "shared") == [shared.fragment_id]
+    assert await _search(index, "регламент копирования", ANN, SHARED) == [shared.fragment_id]
 
 
 async def test_cogis_scope_returns_only_marked_shared_documents(index: QdrantVectorIndex) -> None:
@@ -110,7 +131,7 @@ async def test_cogis_scope_returns_only_marked_shared_documents(index: QdrantVec
     plain = _point("плагин интерфейс IServerPlugin описание", "shared", BORIS)
     own = _point("плагин интерфейс IServerPlugin черновик", "personal", ANN)
     await _store(index, cogis, plain, own)
-    assert await _search(index, "плагин IServerPlugin", ANN, "cogis") == [cogis.fragment_id]
+    assert await _search(index, "плагин IServerPlugin", ANN, COGIS) == [cogis.fragment_id]
 
 
 @pytest.mark.parametrize("branch", ["dense", "lexical"])
@@ -129,11 +150,10 @@ async def test_filter_guards_each_search_branch(index: QdrantVectorIndex, branch
         lexical = SparseVector((), ())
     else:
         dense = replies.embedding("совсем иной текст") or []
-    found = await index.search(dense, lexical, ANN, "shared_and_personal", 8)
-    assert foreign.fragment_id not in found
-    assert foreign.fragment_id in await index.search(
-        dense, lexical, BORIS, "shared_and_personal", 8
-    )
+    found = await index.search(dense, lexical, ANN, ALL_COLLECTIONS, 8)
+    assert foreign.fragment_id not in found.ordered()
+    theirs = await index.search(dense, lexical, BORIS, ALL_COLLECTIONS, 8)
+    assert foreign.fragment_id in theirs.ordered()
 
 
 async def _captured_requests(
@@ -153,7 +173,7 @@ async def _captured_requests(
     monkeypatch.setattr(client, "query_batch_points", spy)
     # Иного пути к точкам коллекции у поиска нет.
     monkeypatch.setattr(client, "query_points", None)
-    await _search(index, query, ANN, "shared_and_personal", limit)
+    await _search(index, query, ANN, BOTH, limit)
     return captured
 
 
@@ -162,7 +182,7 @@ async def test_every_request_of_the_batch_carries_access_filter(
 ) -> None:
     """Фильтр доступа — в обоих запросах пачки: в каждом `prefetch` и в корне (§10.4)."""
     exact, hybrid = await _captured_requests(index, client, monkeypatch, "договор 14-А")
-    expected = access_filter(ANN, "shared_and_personal")
+    expected = access_filter(ANN, BOTH)
 
     assert exact.prefetch is None
     assert (exact.using, exact.limit, exact.with_payload) == ("lexical", 3, False)
@@ -183,7 +203,7 @@ async def test_question_without_words_goes_as_one_filtered_dense_request(
 ) -> None:
     (only,) = await _captured_requests(index, client, monkeypatch, "?! …")
     assert (only.using, only.prefetch, only.limit) == ("dense", None, 5)
-    assert only.filter == access_filter(ANN, "shared_and_personal")
+    assert only.filter == access_filter(ANN, BOTH)
 
 
 async def test_lexical_only_request_does_not_leak_foreign_personal(
@@ -199,8 +219,8 @@ async def test_lexical_only_request_does_not_leak_foreign_personal(
         return await original(collection, requests[:1], **kwargs)
 
     monkeypatch.setattr(client, "query_batch_points", lexical_only)
-    assert await _search(index, secret, ANN, "shared_and_personal") == []
-    assert await _search(index, secret, BORIS, "shared_and_personal") == [foreign.fragment_id]
+    assert await _search(index, secret, ANN, BOTH) == []
+    assert await _search(index, secret, BORIS, BOTH) == [foreign.fragment_id]
 
 
 async def test_best_lexical_matches_come_first_then_hybrid_without_repeats(
@@ -219,46 +239,159 @@ async def test_best_lexical_matches_come_first_then_hybrid_without_repeats(
         scope="shared",
         owner_id=ANN,
         is_cogis=False,
+        tags=(),
         dense=replies.embedding("совсем другой текст о плагинах") or [],
         lexical=sparse_vector("правообладатель Соколова Марина"),
     )
     await _store(index, *crowd, target)
     query = f"{boilerplate} Соколовой"
-    found = await index.search(
-        replies.embedding(query) or [], sparse_vector(query), ANN, "shared", 8
-    )
+    hits = await index.search(replies.embedding(query) or [], sparse_vector(query), ANN, SHARED, 8)
+    assert hits.hybrid[0] != target.fragment_id  # одно слияние RRF первым его не ставит
+    found = hits.ordered()
     assert found[0] == target.fragment_id
-    assert len(found) == len(set(found)) == 8
+    assert len(found) == len(set(found)) >= 8
 
 
-async def test_limit_caps_merged_result(index: QdrantVectorIndex) -> None:
+async def test_limits_cap_both_candidate_lists(
+    index: QdrantVectorIndex, settings: Settings
+) -> None:
     points = [_point(f"договор аренды участка {n}", "shared", ANN) for n in range(12)]
     await _store(index, *points)
+    query = "договор аренды участка 3"
     for limit in (1, 2, 8):
-        found = await _search(index, "договор аренды участка 3", ANN, "shared", limit)
-        assert len(found) == len(set(found)) == limit
+        hits = await index.search(
+            replies.embedding(query) or [], sparse_vector(query), ANN, SHARED, limit
+        )
+        assert len(hits.hybrid) == len(set(hits.hybrid)) == limit
+        assert len(hits.lexical) == settings.kb.search.lexical_slots
 
 
 def test_access_filter_matches_contract_shapes() -> None:
     user = UUID("11111111-1111-4111-8111-111111111111")
-    dump = access_filter(user, "shared_and_personal").model_dump(exclude_none=True)
     shared = {"key": "scope", "match": {"value": "shared"}}
+    ministries = {"key": "scope", "match": {"value": "ministries"}}
     own = {
         "must": [
             {"key": "scope", "match": {"value": "personal"}},
             {"key": "owner_id", "match": {"value": str(user)}},
         ]
     }
-    assert dump == {"must": [{"should": [shared, own]}]}
-    assert access_filter(user, "shared").model_dump(exclude_none=True) == {"must": [shared]}
-    assert access_filter(user, "cogis").model_dump(exclude_none=True) == {
-        "must": [shared, {"key": "is_cogis", "match": {"value": True}}]
+    not_pending = [{"key": "pending", "match": {"value": True}}]
+    full = KnowledgeSelection(ALL_COLLECTIONS.collections, frozenset({" Аренда", "МИНСТРОЙ"}))
+    assert access_filter(user, full).model_dump(exclude_none=True) == {
+        "must": [
+            {"should": [shared, ministries, own]},
+            {"key": "tags", "match": {"any": ["аренда", "минстрой"]}},
+        ],
+        "must_not": not_pending,
+    }
+    assert access_filter(user, SHARED).model_dump(exclude_none=True) == {
+        "must": [{"should": [shared]}],
+        "must_not": not_pending,
+    }
+    only_mine = KnowledgeSelection(frozenset({"personal"}))
+    assert access_filter(user, only_mine).model_dump(exclude_none=True) == {
+        "must": [{"should": [own]}],
+        "must_not": not_pending,
+    }
+    assert access_filter(user, COGIS).model_dump(exclude_none=True) == {
+        "must": [shared, {"key": "is_cogis", "match": {"value": True}}],
+        "must_not": not_pending,
     }
 
 
-def test_unknown_scope_is_an_error_not_an_unfiltered_query() -> None:
-    with pytest.raises(AssertionError):
-        access_filter(ANN, "all")  # type: ignore[arg-type]
+def test_selection_cannot_widen_access_or_skip_a_branch() -> None:
+    """Пустой набор, неизвестная коллекция и CoGIS вне общей базы — ошибка, а не поиск."""
+    for collections in (frozenset(), frozenset({"all"}), frozenset({"shared", "foreign"})):
+        with pytest.raises(ValueError, match="набор коллекций"):
+            KnowledgeSelection(collections)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="CoGIS"):
+        KnowledgeSelection(frozenset({"shared", "personal"}), cogis_only=True)
+    with pytest.raises(ValueError, match="CoGIS"):
+        KnowledgeSelection(frozenset({"shared"}), frozenset({"тег"}), cogis_only=True)
+
+
+async def test_ministries_are_searched_by_everyone_only_when_selected(
+    index: QdrantVectorIndex,
+) -> None:
+    ministry = _point("приказ министерства о кадастровой оценке", "ministries", BORIS)
+    shared = _point("приказ о кадастровой оценке общий", "shared", BORIS)
+    await _store(index, ministry, shared)
+    query = "приказ о кадастровой оценке"
+    only = KnowledgeSelection(frozenset({"ministries"}))
+    assert await _search(index, query, ANN, only) == [ministry.fragment_id]
+    assert await _search(index, query, ANN, SHARED) == [shared.fragment_id]
+    assert set(await _search(index, query, ANN, ALL_COLLECTIONS)) == {
+        ministry.fragment_id,
+        shared.fragment_id,
+    }
+    assert await _search(index, query, ANN, COGIS) == []
+
+
+async def test_tags_only_narrow_and_never_open_foreign_personal(index: QdrantVectorIndex) -> None:
+    """Тег сужает выбранные коллекции; чужой личный документ с тем же тегом не находится."""
+    text = "договор аренды земельного участка"
+    tagged = _point(text, "shared", BORIS, tags=("аренда",))
+    other = _point(f"{text} иной", "shared", BORIS, tags=("купля",))
+    mine = _point(f"{text} мой", "personal", ANN, tags=("аренда", "черновик"))
+    foreign = _point(f"{text} чужой", "personal", BORIS, tags=("аренда",))
+    await _store(index, tagged, other, mine, foreign)
+    # Точка, записанная до 0.15: поля `tags` нет вовсе — под условие по тегам не подходит.
+    legacy = _point(f"{text} прежний", "shared", BORIS)
+    await index._client.upsert(
+        index._collection,
+        [
+            models.PointStruct(
+                id=str(legacy.fragment_id),
+                vector={"dense": list(legacy.dense)},
+                payload={"document_id": str(legacy.document_id), "scope": "shared"},
+            )
+        ],
+    )
+
+    def by_tag(*tags: str) -> KnowledgeSelection:
+        return KnowledgeSelection(ALL_COLLECTIONS.collections, frozenset(tags))
+
+    assert set(await _search(index, text, ANN, by_tag("Аренда"))) == {
+        tagged.fragment_id,
+        mine.fragment_id,
+    }
+    assert set(await _search(index, text, ANN, by_tag("купля", "черновик"))) == {
+        other.fragment_id,
+        mine.fragment_id,
+    }
+    assert await _search(index, text, ANN, by_tag("нет такого")) == []
+    shared_only = KnowledgeSelection(frozenset({"shared"}), frozenset({"аренда"}))
+    assert await _search(index, text, ANN, shared_only) == [tagged.fragment_id]
+    assert legacy.fragment_id in await _search(index, text, ANN, SHARED)
+
+
+async def test_set_tags_changes_all_points_of_document_without_rewriting_them(
+    index: QdrantVectorIndex, client: AsyncQdrantClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = uuid4()
+    points = [_point(f"регламент часть {n}", "shared", ANN, document=document) for n in range(3)]
+    bystander = _point("регламент иной", "shared", ANN, tags=("архив",))
+    await _store(index, *points, bystander)
+    monkeypatch.setattr(client, "upsert", None)  # правка тегов точки не перезаписывает
+    by_tag = KnowledgeSelection(frozenset({"shared"}), frozenset({"регламенты"}))
+    assert await _search(index, "регламент", ANN, by_tag) == []
+    await index.set_tags(document, ["регламенты"])
+    assert set(await _search(index, "регламент", ANN, by_tag)) == {p.fragment_id for p in points}
+    await index.set_tags(document, [])
+    assert await _search(index, "регламент", ANN, by_tag) == []
+    archive = KnowledgeSelection(frozenset({"shared"}), frozenset({"архив"}))
+    assert await _search(index, "регламент", ANN, archive) == [bystander.fragment_id]
+
+
+async def test_pending_points_are_invisible_to_search(
+    index: QdrantVectorIndex, client: AsyncQdrantClient
+) -> None:
+    live = _point("устав общества действующий", "shared", ANN)
+    staged = _point("устав общества запас", "shared", ANN)
+    await _store(index, live, staged)
+    await client.set_payload(index._collection, {"pending": True}, [str(staged.fragment_id)])
+    assert await _search(index, "устав общества", ANN, ALL_COLLECTIONS) == [live.fragment_id]
 
 
 async def test_exact_number_ranks_first_among_similar_texts(index: QdrantVectorIndex) -> None:
@@ -269,22 +402,36 @@ async def test_exact_number_ranks_first_among_similar_texts(index: QdrantVectorI
         for n in (344, 346, 3450, 245)
     ]
     await _store(index, *others, target)
-    found = await _search(index, "кому принадлежит участок 77:01:0004012:345", ANN, "shared")
+    found = await _search(index, "кому принадлежит участок 77:01:0004012:345", ANN, SHARED)
     assert found[0] == target.fragment_id
 
 
-async def test_replace_document_removes_previous_points(
-    index: QdrantVectorIndex, client: AsyncQdrantClient
+async def test_staged_points_replace_previous_ones_only_after_publish_and_prune(
+    index: QdrantVectorIndex,
 ) -> None:
+    """Порядок §10.6 на уровне порта: запас невидим, уборка оставляет только названное."""
     document = uuid4()
     old = [_point(f"старый текст {n}", "shared", ANN, document=document) for n in range(5)]
-    await index.replace_document(document, old)
-    new = _point("новый текст", "shared", ANN, document=document)
-    await index.replace_document(document, [new])
-    assert await _search(index, "старый новый текст", ANN, "shared") == [new.fragment_id]
+    await _store(index, *old)
+    bystander = _point("старый текст соседа", "shared", ANN)
+    await _store(index, bystander)
+    old_ids = {point.fragment_id for point in old}
+    new = _point("новый текст", "shared", ANN, document=document, tags=("устаревший",))
+    await index.stage_document(document, [new])
+    found = set(await _search(index, "старый новый текст", ANN, SHARED))
+    assert found == old_ids | {bystander.fragment_id}
+    # Уборка по прежним фрагментам стирает запас прерванной попытки и ничего больше.
+    await index.prune_document(document, [point.fragment_id for point in old])
+    await index.stage_document(document, [new])
+    await index.publish_document(document, ["договоры"])
+    by_tag = KnowledgeSelection(frozenset({"shared"}), frozenset({"договоры"}))
+    assert await _search(index, "новый текст", ANN, by_tag) == [new.fragment_id]
+    await index.prune_document(document, [new.fragment_id])
+    found = set(await _search(index, "старый новый текст", ANN, SHARED))
+    assert found == {new.fragment_id, bystander.fragment_id}
     await index.delete_document(document)
     await index.delete_document(document)  # повтор — не ошибка
-    assert await _search(index, "новый текст", ANN, "shared") == []
+    assert await _search(index, "новый текст", ANN, SHARED) == [bystander.fragment_id]
 
 
 async def test_points_are_written_in_configured_batches(
@@ -300,7 +447,7 @@ async def test_points_are_written_in_configured_batches(
     monkeypatch.setattr(client, "upsert", spy)
     document = uuid4()
     points = [_point(f"текст {n}", "shared", ANN, document=document) for n in range(300)]
-    await index.replace_document(document, points)
+    await index.stage_document(document, points)
     assert sizes == [128, 128, 44]
 
 
@@ -315,6 +462,7 @@ async def test_point_payload_has_no_text_or_title(
         "scope": "personal",
         "owner_id": str(ANN),
         "is_cogis": False,
+        "tags": [],
     }
 
 
@@ -339,5 +487,5 @@ async def test_missing_collection_is_reported_as_unavailable(
 ) -> None:
     index = QdrantVectorIndex(client, settings.kb, f"kb_absent_{uuid4().hex}")
     with pytest.raises(VectorIndexUnavailableError):
-        await _search(index, "вопрос", ANN, "shared")
+        await _search(index, "вопрос", ANN, SHARED)
     await index.drop_collection()  # отсутствие — не ошибка

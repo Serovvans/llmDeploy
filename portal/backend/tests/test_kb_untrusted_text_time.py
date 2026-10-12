@@ -107,10 +107,15 @@ BLOCK_UNITS = ["<", "< ", "</", "</фрагмент", "<  /  ", "[", "]", "[1] "
 def test_context_block_is_linear_in_title_and_fragment(unit: str, settings: Settings) -> None:
     text = _fill(unit, MESSAGE)  # с запасом против предела фрагмента
     sources = [
-        Source(n, uuid4(), text[:255], "shared", 1, uuid4(), text)
+        Source(n, uuid4(), text[:255], "shared", 1, None, None, uuid4(), text)
         for n in range(1, settings.kb.search.top_k + 1)
     ]
     assert _elapsed(lambda: knowledge_context(sources)) < TIME_LIMIT_SECONDS
-    found = [FoundFragment(uuid4(), uuid4(), text[:255], "shared", 1, text) for _ in sources]
+    found = [
+        FoundFragment(
+            uuid4(), uuid4(), text[:255], "shared", 1, text, 0, 1, 0, len(text), None, None
+        )
+        for _ in sources
+    ]
     estimator = RatioTokenEstimator(2.0, 3200)
     assert _elapsed(lambda: fit_sources(found, "правила", 10**9, estimator)) < TIME_LIMIT_SECONDS

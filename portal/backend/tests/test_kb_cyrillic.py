@@ -12,7 +12,7 @@ from qdrant_client import models
 
 from portal.kb.lexical import sparse_vector
 from portal.kb.qdrant import access_filter
-from tests.kb_support import KbBench, added, cyrillic_pdf
+from tests.kb_support import SHARED, KbBench, added, cyrillic_pdf
 
 pytestmark = pytest.mark.anyio
 
@@ -38,7 +38,7 @@ async def _lexical_only(bench: KbBench, query: str, user: UUID) -> list[tuple[in
         bench.settings.qdrant.collection,
         query=models.SparseVector(indices=list(vector.indices), values=list(vector.values)),
         using="lexical",
-        query_filter=access_filter(user, "shared"),
+        query_filter=access_filter(user, SHARED),
         limit=3,
     )
     rows = await bench.portal.rows(
@@ -110,7 +110,7 @@ async def test_russian_text_layer_is_extracted_split_and_found_exactly(bench: Kb
     }
 
     # Весь путь через порт: вопрос словами, ответ — нужный документ и страница.
-    by_number = await bench.knowledge.retrieve("Чей участок 77:01:0004012:345?", user, "shared")
+    by_number = await bench.knowledge.retrieve("Чей участок 77:01:0004012:345?", user, SHARED)
     # Обе страницы выписки содержат этот номер (вторая — в номере записи о праве), и обе
     # идут раньше выписок с соседними номерами.
     assert {(source.document_title, source.page) for source in by_number.sources[:2]} == {
@@ -120,7 +120,7 @@ async def test_russian_text_layer_is_extracted_split_and_found_exactly(bench: Kb
     # Вопрос со склонённой фамилией: нужная страница — первый источник, раньше выписок
     # с фамилиями «Соколов», «Соколовская», «Сокольникова».
     for question in ("Что принадлежит Соколовой Марине?", "Соколова Марина Викторовна"):
-        by_name = await bench.knowledge.retrieve(question, user, "shared")
+        by_name = await bench.knowledge.retrieve(question, user, SHARED)
         first = by_name.sources[0]
         assert (first.n, first.document_title, first.page) == (1, "Выписка ЕГРН.pdf", 2), question
     assert "] Выписка ЕГРН.pdf, стр. 1\n<фрагмент>\n" in by_number.context

@@ -9,7 +9,9 @@ from uuid import uuid4
 
 from portal.files.ports import FileTooLargeError, StorageArea, StoredFile
 
-_KEY_PATTERN = re.compile(r"^(attachments|docparse|kb)/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+_KEY_PATTERN = re.compile(
+    r"^(attachments|docparse|kb|kb-images)/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+)
 
 
 class DiskFileStorage:

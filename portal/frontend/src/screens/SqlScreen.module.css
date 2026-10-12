@@ -1,0 +1,27 @@
+/* Недоступный переключатель проверки (концепция §5.7): вид недоступного, но фокус получает. */
+.unavailableToggle {
+  display: inline-flex;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.unavailableToggle:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.unavailableToggleBody {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--p-text-muted);
+  /* Нажатие достаётся обёртке: она получает фокус и показывает пояснение. */
+  pointer-events: none;
+}
+
+.reason {
+  max-width: 320px;
+  font-size: 14px;
+  line-height: 20px;
+  white-space: normal;
+}

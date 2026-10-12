@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from portal.core.settings import Settings
-from portal.kb.ports import RecognitionFailedError, Retrieval, Source
+from portal.kb.ports import KnowledgeSelection, RecognitionFailedError, Retrieval, Source
 from portal.llm.ports import (
     ContentDelta,
     ContextOverflowError,
@@ -37,6 +37,9 @@ from tests.support import (
 from tests.test_chat_stream import _len_is, _live_client, _messages, _until
 
 pytestmark = pytest.mark.anyio
+
+# Помощник CoGIS ищет только по документации CoGIS общей базы (§5.4).
+COGIS_ONLY = KnowledgeSelection(frozenset({"shared"}), cogis_only=True)
 
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 RULES = "Ссылайся на документацию пометками [n]."
@@ -71,7 +74,9 @@ async def test_cogis_always_searches_cogis_documentation(portal: Portal) -> None
     client = await portal.employee()
     user_id = await portal.user_id("ivanov")
     dialog_id = await new_tool_dialog(client, "cogis")
-    source = Source(1, uuid4(), "CoGIS SDK.pdf", "shared", 4, uuid4(), "IPlugin.Execute()")
+    source = Source(
+        1, uuid4(), "CoGIS SDK.pdf", "shared", 4, None, None, uuid4(), "IPlugin.Execute()"
+    )
     portal.knowledge.result = Retrieval((source,), RULES, CONTEXT)
     portal.knowledge.documented = True
     _reply(portal, "Реализуйте IPlugin [1].\n```csharp\nvar x = items[1];\n```")
@@ -82,7 +87,7 @@ async def test_cogis_always_searches_cogis_documentation(portal: Portal) -> None
     )
     names = [name for name, _ in events if name != "title"]
     assert names == ["start", "search_started", "sources", "delta", "done"]
-    assert portal.knowledge.calls == [("Как написать плагин?", user_id, "cogis")]
+    assert portal.knowledge.calls == [("Как написать плагин?", user_id, COGIS_ONLY)]
 
     request = portal.model.requests[0]
     system = request.messages[0].parts[0].text  # type: ignore[union-attr]
@@ -98,7 +103,7 @@ async def test_cogis_always_searches_cogis_documentation(portal: Portal) -> None
     _reply(portal, "Другой ответ.")
     again = await client.post(f"/api/dialogs/{dialog_id}/regenerate", json={"schema_id": None})
     assert parse_events(again.text)[-1][0] == "done"
-    assert portal.knowledge.calls[-1][2] == "cogis"
+    assert portal.knowledge.calls[-1][2] == COGIS_ONLY
 
 
 async def test_cogis_without_documentation_tells_the_model_to_say_so(portal: Portal) -> None:
@@ -125,8 +130,8 @@ async def test_cogis_body_and_unavailable_knowledge(portal: Portal) -> None:
         ({"content": "x", "action": "optimize"}, ("action", "unknown_value")),
         ({"content": "", "action": "write"}, ("content", "required")),
         (
-            {"content": "x", "action": "write", "knowledge": "shared"},
-            ("knowledge", "invalid_format"),
+            {"content": "x", "action": "write", "collections": ["shared"]},
+            ("collections", "invalid_format"),
         ),
         ({"content": "x", "action": "write", "dialect": "postgres"}, ("dialect", "invalid_format")),
     ]
@@ -660,11 +665,48 @@ ANSWER = (
 )
 
 
+async def test_export_lists_the_timecode_of_a_recording_source(portal: Portal) -> None:
+    """В «Источниках» у записи — таймкод `ЧЧ:ММ:СС`; старый снимок без поля читается (§5.9)."""
+    client = await portal.employee()
+    dialog_id = await new_dialog(client)
+    sources = (
+        Source(1, uuid4(), "Совещание.mp4", "shared", None, 3725, None, uuid4(), "цитата"),
+        Source(2, uuid4(), "Договор.pdf", "shared", 7, None, None, uuid4(), "цитата"),
+        Source(3, uuid4(), "Схема.docx", "shared", None, None, uuid4(), uuid4(), "цитата"),
+        Source(4, uuid4(), "Начало.mp3", "shared", None, 0, None, uuid4(), "цитата"),
+    )
+    portal.knowledge.result = Retrieval(sources, RULES, CONTEXT)
+    portal.model.scripts.append(
+        [ContentDelta("Решили [1], по договору [2], [3], [4]."), Finished("stop")]
+    )
+    await ask(client, dialog_id, collections=["shared"])
+    listed = [
+        "Источники",
+        "[1] Совещание.mp4, 01:02:05",
+        "[2] Договор.pdf, стр. 7",
+        "[3] Схема.docx",
+        "[4] Начало.mp3, 00:00:00",
+    ]
+    texts = _texts(_document(await client.get(f"/api/dialogs/{dialog_id}/export")))
+    assert texts[texts.index("Источники") :] == listed
+
+    # Снимок, сохранённый до версии 0.15: полей `timecode_seconds` и `image_id` в нём нет.
+    await portal.execute(
+        "UPDATE messages SET sources = (SELECT jsonb_agg(item - 'timecode_seconds' - 'image_id')"
+        " FROM jsonb_array_elements(sources) AS item) WHERE jsonb_typeof(sources) = 'array'"
+    )
+    texts = _texts(_document(await client.get(f"/api/dialogs/{dialog_id}/export")))
+    assert texts[texts.index("Источники") :] == [
+        "Источники", "[1] Совещание.mp4", "[2] Договор.pdf, стр. 7", "[3] Схема.docx",
+        "[4] Начало.mp3",
+    ]  # fmt: skip
+
+
 async def test_export_of_a_chat_with_sources_attachments_and_markup(portal: Portal) -> None:
     client = await portal.employee()
     dialog_id = await new_dialog(client)
     sources = tuple(
-        Source(n, uuid4(), f"Документ {n}.pdf", "shared", page, uuid4(), "цитата")
+        Source(n, uuid4(), f"Документ {n}.pdf", "shared", page, None, None, uuid4(), "цитата")
         for n, page in ((1, 2), (2, 5), (3, None))
     )
     portal.knowledge.result = Retrieval(sources, RULES, CONTEXT)
@@ -674,7 +716,7 @@ async def test_export_of_a_chat_with_sources_attachments_and_markup(portal: Port
         client,
         dialog_id,
         "Какой срок?\nВторая строка",
-        knowledge="shared",
+        collections=["shared"],
         attachment_ids=[attachment],
     )
     await client.patch(f"/api/dialogs/{dialog_id}", json={"title": 'Аренда: "участок" 1/2?'})
@@ -749,12 +791,13 @@ async def test_export_file_name_falls_back_to_section_and_date(portal: Portal) -
         empty = await client.get(f"/api/dialogs/{dialog_id}/export")
         assert (empty.status_code, empty.json()["error"]["code"]) == (409, "nothing_to_export")
         bodies: dict[str, dict[str, Any]] = {
-            "chat": {"content": "Вопрос", "mode": "fast", "knowledge": "none"},
+            "chat": {"content": "Вопрос", "mode": "fast", "collections": []},
             "sql": {
                 "content": "Вопрос",
                 "action": "write",
                 "dialect": "postgres",
                 "schema_id": None,
+                "test_run": False,
             },
             "cogis": {"content": "Вопрос", "action": "write"},
         }
@@ -938,7 +981,9 @@ async def test_export_survives_control_characters_on_every_path(portal: Portal) 
     """Символы, недопустимые в XML, убираются везде, где текст попадает в документ."""
     client = await portal.employee()
     dialog_id = await new_dialog(client)
-    source = Source(1, uuid4(), f"Доку{DIRTY[:3]}мент.pdf", "shared", 2, uuid4(), "цитата")
+    source = Source(
+        1, uuid4(), f"Доку{DIRTY[:3]}мент.pdf", "shared", 2, None, None, uuid4(), "цитата"
+    )
     portal.knowledge.result = Retrieval((source,), RULES, CONTEXT)
     answer = (
         f"# Заго{DIRTY[:3]}ловок\n\nАбзац{DIRTY[:3]} с **полу{DIRTY[:3]}жирным** [1].\n\n"
@@ -948,7 +993,7 @@ async def test_export_survives_control_characters_on_every_path(portal: Portal) 
     portal.model.scripts.append([ContentDelta(answer), Finished("stop")])
     attachment = (await upload(client, dialog_id, "вложение.txt", b"text")).json()["id"]
     await ask(
-        client, dialog_id, f"Воп{DIRTY[:3]}рос", knowledge="shared", attachment_ids=[attachment]
+        client, dialog_id, f"Воп{DIRTY[:3]}рос", collections=["shared"], attachment_ids=[attachment]
     )
     # То, что нельзя прислать через JSON, но может оказаться в базе: NUL хранить нельзя и
     # в PostgreSQL, а вот остальное приходит из распознанного текста и ответов модели.

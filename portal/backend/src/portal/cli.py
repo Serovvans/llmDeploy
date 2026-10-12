@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError
 
 from portal.core.app import create_app
 from portal.core.audit import read_audit
+from portal.core.clock import SystemClock
 from portal.core.container import (
     AdminContainer,
     WorkerContainer,
@@ -29,7 +30,15 @@ from portal.core.errors import AppError
 from portal.core.logging import configure_logging
 from portal.core.settings import ConfigError, Settings, load_settings
 from portal.kb import evalset
-from portal.kb.evaluation import evaluate, format_report
+from portal.kb.evaluation import (
+    FEATURES,
+    EvalPorts,
+    Feature,
+    evaluate,
+    format_report,
+    idle_features,
+)
+from portal.kb.explaining import FragmentExplainer
 from portal.kb.ports import (
     CollectionMismatchError,
     EmbeddingsUnavailableError,
@@ -37,6 +46,13 @@ from portal.kb.ports import (
 )
 from portal.kb.qdrant import QdrantVectorIndex
 from portal.kb.reindex import WorkerRunningError
+from portal.kb.repositories import SqlKbUnitOfWorkFactory
+from portal.kb.reprocess import Reprocessor
+from portal.kb.reranker import BifrostReranker
+from portal.kb.rewrite import QueryRewriter
+from portal.llm.estimator import RatioTokenEstimator
+from portal.llm.ports import ModelOverloadedError, ModelUnavailableError
+from portal.media.gigaam import SpeechWeightsMissingError, require_weights
 from portal.worker.health import heartbeat_is_fresh
 
 _ALEMBIC_INI = Path("alembic.ini")
@@ -104,7 +120,13 @@ async def _audit(
 
 
 async def _worker(container: WorkerContainer) -> None:
-    """Цикл очереди до сигнала остановки; взятые задания возвращаются в очередь."""
+    """Цикл очереди до сигнала остановки; взятые задания возвращаются в очередь.
+
+    Записи включены, а весов модели речи нет — воркер не стартует (§8.7).
+    """
+    media = container.settings.media
+    if media.enabled and media.asr.engine == "gigaam":
+        require_weights(media.asr.model_dir)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -132,18 +154,83 @@ async def _reindex(container: WorkerContainer, only_errors: bool, recreate: bool
     return f"Документов возвращено в очередь: {count}\n"
 
 
-async def _eval_search(container: WorkerContainer) -> str:
-    """Оценить поиск на контрольном наборе в отдельной коллекции, которая затем удаляется."""
-    settings = container.settings.kb
-    index = QdrantVectorIndex(container.qdrant, settings, f"{settings.qdrant.collection}_eval")
-    documents, questions = evalset.load()
+async def _eval_search(
+    container: WorkerContainer, directory: Path | None, disabled: Sequence[Feature]
+) -> str:
+    """Оценить поиск на контрольном наборе в отдельной коллекции, которая затем удаляется.
+
+    `directory` — набор из каталога вместо встроенного; `disabled` — улучшения поиска,
+    выключенные на этот прогон: замер «до и после» без правки конфигурации.
+    """
+    settings = container.settings
+    kb = settings.kb.model_copy(
+        update={
+            feature: getattr(settings.kb, feature).model_copy(update={"enabled": False})
+            for feature in disabled
+        }
+    )
+    index = QdrantVectorIndex(container.qdrant, kb, f"{kb.qdrant.collection}_eval")
+    ports = EvalPorts(
+        embedder=container.embedder,
+        index=index,
+        rewriter=QueryRewriter(container.chat_model, kb.rewrite),
+        explainer=FragmentExplainer(
+            container.chat_model,
+            RatioTokenEstimator(settings.llm.chars_per_token, settings.llm.tokens_per_image),
+            kb.context,
+            asyncio.Semaphore(kb.worker.background_llm_parallel),
+        ),
+        reranker=BifrostReranker(
+            container.http_client, kb.rerank, settings.require_rerank_api_key()
+        ),
+    )
+    try:
+        documents, questions = evalset.load(directory)
+    except (OSError, ValueError, LookupError, TypeError) as error:
+        # Содержимое набора в сообщение не попадает: только вид ошибки.
+        raise ConfigError(f"Контрольный набор не читается: {type(error).__name__}") from error
     await index.drop_collection()
     await index.ensure_collection()
     try:
-        report = await evaluate(documents, questions, container.embedder, index, settings)
+        report = await evaluate(documents, questions, ports, kb)
     finally:
         await index.drop_collection()
+    if idle := idle_features(report):
+        # Числа такого прогона равны замеру без улучшения: за замер «с ним» их не выдаём.
+        raise ConfigError(
+            f"Улучшения поиска включены, но не сработали ни на одном вопросе: {', '.join(idle)}."
+            " Проверьте модель или выключите их на прогон (--disable)."
+        )
     return format_report(report)
+
+
+async def _reprocess(settings: Settings, action: str, all_ready: bool) -> str:
+    """Команды массовой переобработки: им нужна только база (§13.5)."""
+    clock = SystemClock()
+    engine = create_engine(settings)
+    reprocessor = Reprocessor(SqlKbUnitOfWorkFactory(engine, clock), clock)
+    try:
+        if action == "start":
+            count = await reprocessor.start(all_ready=all_ready)
+            return f"Документов поставлено на переобработку: {count}\n"
+        if action == "pause":
+            await reprocessor.set_paused(True)
+            return "Массовая переобработка приостановлена.\n"
+        if action == "resume":
+            await reprocessor.set_paused(False)
+            return "Массовая переобработка возобновлена.\n"
+        status = await reprocessor.status()
+    finally:
+        await engine.dispose()
+    lines = [
+        f"Документов с текущим индексом: {status.current}",
+        f"Заданий переобработки в очереди: {status.reprocess_jobs}",
+        f"Заданий пояснений в очереди: {status.context_jobs}",
+        f"Документов со сбоем переобработки: {sum(status.errors.values())}",
+        *(f"  {code}: {count}" for code, count in status.errors.items()),
+        f"Пауза: {'да' if status.paused else 'нет'}",
+    ]
+    return "".join(f"{line}\n" for line in lines)
 
 
 async def _run_kb_command(settings: Settings, args: argparse.Namespace) -> str:
@@ -154,7 +241,7 @@ async def _run_kb_command(settings: Settings, args: argparse.Namespace) -> str:
             return ""
         if args.command == "reindex":
             return await _reindex(container, args.only_errors, args.recreate_collection)
-        return await _eval_search(container)
+        return await _eval_search(container, args.set, args.disable)
     finally:
         await container.aclose()
 
@@ -193,7 +280,28 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="пересоздать коллекцию Qdrant; только при остановленном воркере",
     )
-    commands.add_parser("eval-search", help="оценить поиск на контрольном наборе")
+    reprocess = commands.add_parser(
+        "reprocess", help="массовая переобработка документов без выпадения из поиска"
+    )
+    actions = reprocess.add_subparsers(dest="action", required=True)
+    start = actions.add_parser("start", help="поставить задания переобработки")
+    start.add_argument(
+        "--all", action="store_true", help="всем готовым документам, а не только прежним"
+    )
+    actions.add_parser("pause", help="приостановить массовую переобработку")
+    actions.add_parser("resume", help="возобновить массовую переобработку")
+    actions.add_parser("status", help="показать числа хода переобработки")
+    eval_search = commands.add_parser("eval-search", help="оценить поиск на контрольном наборе")
+    eval_search.add_argument(
+        "--set", type=Path, help="каталог набора (corpus.yaml и questions.yaml) вместо встроенного"
+    )
+    eval_search.add_argument(
+        "--disable",
+        action="append",
+        choices=FEATURES,
+        default=[],
+        help="выключить улучшение поиска на этот прогон; можно несколько раз",
+    )
     return parser
 
 
@@ -225,6 +333,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if reason := asyncio.run(_worker_health(settings)):
                 sys.stderr.write(f"{reason}\n")
                 return 1
+        elif args.command == "reprocess":
+            all_ready = getattr(args, "all", False)
+            sys.stdout.write(asyncio.run(_reprocess(settings, args.action, all_ready)))
         elif args.command in _KB_COMMANDS:
             if args.command == "worker":
                 configure_logging()
@@ -240,13 +351,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     except WorkerRunningError:
         sys.stderr.write("Есть задания в работе: остановите воркер и повторите команду.\n")
         return 1
+    except SpeechWeightsMissingError as error:
+        sys.stderr.write(
+            f"В каталоге media.asr.model_dir нет весов модели речи ({error}): "
+            "загрузите их либо выключите media.enabled.\n"
+        )
+        return 1
     except CollectionMismatchError:
         sys.stderr.write(
             "Параметры коллекции Qdrant расходятся с конфигурацией: "
             "portal reindex --recreate-collection.\n"
         )
         return 1
-    except (VectorIndexUnavailableError, EmbeddingsUnavailableError, OSError) as error:
+    except (
+        VectorIndexUnavailableError,
+        EmbeddingsUnavailableError,
+        ModelUnavailableError,
+        ModelOverloadedError,
+        OSError,
+    ) as error:
         sys.stderr.write(f"Служба недоступна: {type(error).__name__}\n")
         return 1
     return 0

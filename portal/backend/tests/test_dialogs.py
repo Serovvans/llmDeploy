@@ -121,7 +121,7 @@ async def test_messages_are_paged_from_newest(portal: Portal) -> None:
     question = rest["items"][1]
     assert set(question) == {
         "id", "role", "content", "status", "error_code", "reasoning", "reasoning_seconds",
-        "attachments", "sources", "sources_found", "sql_check", "sql_dangers",
+        "attachments", "sources", "sources_found", "sql_check", "sql_run", "sql_dangers",
         "dropped_messages", "created_at",
     }  # fmt: skip
     assert question["status"] == "complete" and question["attachments"] == []
@@ -164,7 +164,7 @@ async def test_foreign_dialog_is_not_found_even_for_admin(portal: Portal) -> Non
         ("PATCH", base, {"title": "Моё"}),
         ("DELETE", base, None),
         ("GET", f"{base}/messages", None),
-        ("POST", f"{base}/messages", {"content": "?", "mode": "fast", "knowledge": "none"}),
+        ("POST", f"{base}/messages", {"content": "?", "mode": "fast", "collections": []}),
         ("POST", f"{base}/regenerate", None),
         ("GET", f"{base}/attachments/{attachment}/file", None),
         ("DELETE", f"{base}/attachments/{spare}", None),
@@ -183,7 +183,7 @@ async def test_foreign_dialog_is_not_found_even_for_admin(portal: Portal) -> Non
         own = await new_dialog(client)
         response = await client.post(
             f"/api/dialogs/{own}/messages",
-            json={"content": "?", "mode": "fast", "knowledge": "none", "attachment_ids": [spare]},
+            json={"content": "?", "mode": "fast", "collections": [], "attachment_ids": [spare]},
         )
         assert response.status_code == 422
         assert (await client.get(f"/api/dialogs/{own}/attachments/{spare}/file")).status_code == 404

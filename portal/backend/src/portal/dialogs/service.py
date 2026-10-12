@@ -18,11 +18,13 @@ from portal.core.errors import (
     file_too_large,
     file_unreadable,
     not_found,
+    service_unavailable,
     too_many_pages,
+    unauthenticated,
     unsupported_file_type,
     validation_error,
 )
-from portal.core.ports import Clock
+from portal.core.ports import Clock, SessionAuthenticator
 from portal.core.settings import ChatSettings
 from portal.dialogs import errors
 from portal.dialogs.domain import (
@@ -33,6 +35,7 @@ from portal.dialogs.domain import (
     Docparse,
     Message,
 )
+from portal.dialogs.files import AttachmentFiles
 from portal.dialogs.ports import DialogUnitOfWorkFactory
 from portal.files.names import display_file_name
 from portal.files.ports import (
@@ -40,10 +43,12 @@ from portal.files.ports import (
     FileStorage,
     FileTooLargeError,
     MediaType,
+    StoredRecording,
     UnreadableDocumentError,
 )
 from portal.files.text import store_as_utf8
 from portal.llm.ports import MAX_IMAGES_PER_REQUEST
+from portal.worker.ports import TranscriptionQueue
 
 _TEXT_TYPES = ("text/plain", "text/markdown")
 _ALL_POSITIONS = 2**31 - 1
@@ -132,6 +137,9 @@ class DialogService:
         self,
         uow_factory: DialogUnitOfWorkFactory,
         storage: FileStorage,
+        files: AttachmentFiles,
+        transcriptions: TranscriptionQueue,
+        sessions: SessionAuthenticator,
         reader: DocumentReader,
         document_executor: Executor,
         clock: Clock,
@@ -144,6 +152,9 @@ class DialogService:
     ) -> None:
         """Получить зависимости явно.
 
+        `files` удаляет файл вложения из его хранилища (документ или запись);
+        `transcriptions` — очередь расшифровки вложений-записей; `sessions` — проверка
+        сессии после долгой загрузки записи.
         `text_max_chars` — сколько символов текста вложения хранить: больше заведомо не
         поместится в запрос к модели, сколько бы ни развернулось из файла. `is_forming`
         отвечает, формируется ли ответ прямо сейчас, `summary_forming` — пишется ли краткое
@@ -152,6 +163,9 @@ class DialogService:
         """
         self._uow_factory = uow_factory
         self._storage = storage
+        self._files = files
+        self._transcriptions = transcriptions
+        self._sessions = sessions
         self._reader = reader
         self._document_executor = document_executor
         self._clock = clock
@@ -173,6 +187,24 @@ class DialogService:
             orphans = await uow.dialogs.reset_docparses()
         for key in orphans:
             await self._storage.delete(key)
+
+    async def align_recordings(self) -> None:
+        """При старте процесса выровнять вложения-записи без задания расшифровки (§5.8).
+
+        Строка вложения и задание фиксируются раздельно: остановка между ними оставила бы
+        вложение в `queued` навсегда. Такие вложения получают `error`/`internal_error`,
+        их файлы удаляются.
+        """
+        async with self._uow_factory() as uow:
+            queued = await uow.dialogs.queued_recordings()
+        if not queued:
+            return
+        pending = await self._transcriptions.pending([item.id for item in queued])
+        lost = [item for item in queued if item.id not in pending]
+        async with self._uow_factory() as uow:
+            await uow.dialogs.fail_queued_recordings([item.id for item in lost])
+        for item in lost:
+            await self._files.delete(item)
 
     # --- диалоги ---
 
@@ -278,7 +310,7 @@ class DialogService:
             if only_empty and await uow.dialogs.last_message(owner_id, dialog_id) is not None:
                 return False
             for attachment in await uow.dialogs.dialog_attachments(owner_id, dialog_id):
-                await self._storage.delete(attachment.storage_key)
+                await self._files.delete(attachment)
             docparse = await uow.dialogs.get_docparse(owner_id, dialog_id)
             if docparse is not None:
                 await self._storage.delete(docparse.storage_key)
@@ -387,24 +419,79 @@ class DialogService:
                 image_pages=facts.image_pages,
                 created_at=self._clock.now(),
             )
-            evicted: list[Attachment] = []
-            async with self._uow_factory() as uow:
-                # Диалог могли удалить, пока шёл приём файла.
-                if await uow.dialogs.get_dialog(owner_id, dialog_id, lock=True) is None:
-                    raise not_found()
-                # Неотправленных не больше chat.max_attachments: лишнее старое вытесняется.
-                files = await uow.dialogs.dialog_attachments(owner_id, dialog_id)
-                unsent = [item for item in files if item.message_id is None]
-                evicted = unsent[: max(0, len(unsent) + 1 - self._settings.max_attachments)]
-                for old in evicted:
-                    await uow.dialogs.delete_attachment(owner_id, old.id)
-                await uow.dialogs.add_attachment(attachment)
+            evicted = await self._insert(owner_id, attachment)
         except BaseException:
             await self._storage.delete(stored.key)
             raise
         for old in evicted:
-            await self._storage.delete(old.storage_key)
+            await self._files.delete(old)
         return attachment
+
+    async def add_recording(
+        self,
+        owner_id: UUID,
+        session_id: UUID,
+        dialog_id: UUID,
+        file_name: str,
+        recording: StoredRecording,
+    ) -> Attachment:
+        """Привязать принятую запись к чату и поставить её расшифровку в очередь (§5.8).
+
+        Тело записи принималось долго, поэтому сессия и диалог проверяются заново перед
+        записью строки (§1.6). Любой отказ удаляет принятый файл.
+        """
+        attachment = Attachment(
+            id=uuid4(),
+            dialog_id=dialog_id,
+            message_id=None,
+            file_name=display_file_name(file_name),
+            media_type=recording.media_type,
+            size_bytes=recording.size_bytes,
+            storage_key=recording.key,
+            page_count=None,
+            text_content=None,
+            image_pages=[],
+            created_at=self._clock.now(),
+            transcription_status="queued",
+        )
+        try:
+            evicted = await self._insert(owner_id, attachment, session_id)
+        except BaseException:
+            await self._files.delete(attachment)
+            raise
+        for old in evicted:
+            await self._files.delete(old)
+        try:
+            await self._transcriptions.enqueue(attachment.id)
+        except Exception as error:
+            # Без задания запись осталась бы «в очереди» навсегда: вложения не будет вовсе.
+            async with self._uow_factory() as uow:
+                await uow.dialogs.delete_attachment(owner_id, attachment.id)
+            await self._files.delete(attachment)
+            raise service_unavailable() from error
+        return attachment
+
+    async def _insert(
+        self, owner_id: UUID, attachment: Attachment, session_id: UUID | None = None
+    ) -> Sequence[Attachment]:
+        """Записать строку вложения; вернуть вытесненные вложения — их файлы удаляет вызвавший.
+
+        `session_id` — сессия долгой загрузки записи: если её уже нет, строка не создаётся.
+        """
+        async with self._uow_factory() as uow:
+            if session_id is not None and not await self._sessions.session_exists(session_id):
+                raise unauthenticated()
+            # Диалог могли удалить, пока шёл приём файла.
+            if await uow.dialogs.get_dialog(owner_id, attachment.dialog_id, lock=True) is None:
+                raise not_found()
+            # Неотправленных не больше chat.max_attachments: лишнее старое вытесняется.
+            files = await uow.dialogs.dialog_attachments(owner_id, attachment.dialog_id)
+            unsent = [item for item in files if item.message_id is None]
+            evicted = unsent[: max(0, len(unsent) + 1 - self._settings.max_attachments)]
+            for old in evicted:
+                await uow.dialogs.delete_attachment(owner_id, old.id)
+            await uow.dialogs.add_attachment(attachment)
+        return evicted
 
     def _inspect(self, path: Path, file_name: str, size_bytes: int) -> _FileFacts:
         """Разобрать принятый файл; блокирующая работа — вызывается в пуле потоков."""
@@ -452,11 +539,20 @@ class DialogService:
 
     async def get_attachment(
         self, owner_id: UUID, dialog_id: UUID, attachment_id: UUID
-    ) -> tuple[Attachment, Path]:
-        """Вложение владельца и путь к его оригиналу."""
+    ) -> Attachment:
+        """Вложение диалога владельца."""
         async with self._uow_factory() as uow:
             attachment = await uow.dialogs.get_attachment(owner_id, dialog_id, attachment_id)
         if attachment is None:
+            raise not_found()
+        return attachment
+
+    async def attachment_file(
+        self, owner_id: UUID, dialog_id: UUID, attachment_id: UUID
+    ) -> tuple[Attachment, Path]:
+        """Вложение владельца и путь к его оригиналу; исходник записи не отдаётся (§1.5)."""
+        attachment = await self.get_attachment(owner_id, dialog_id, attachment_id)
+        if attachment.is_recording:
             raise not_found()
         return attachment, self._storage.path(attachment.storage_key)
 
@@ -470,5 +566,5 @@ class DialogService:
                 raise not_found()
             if attachment.message_id is not None:
                 raise errors.attachment_already_sent()
-            await self._storage.delete(attachment.storage_key)
+            await self._files.delete(attachment)
             await uow.dialogs.delete_attachment(owner_id, attachment_id)

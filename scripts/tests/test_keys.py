@@ -1,6 +1,5 @@
 """Тесты keys.py: формирование запросов к REST Bifrost и разбор ответов без сети."""
 
-import argparse
 import base64
 import json
 from collections.abc import Callable
@@ -99,6 +98,15 @@ def test_build_create_payload_only_requests_limit() -> None:
 def test_build_create_payload_without_limits() -> None:
     payload = keys.build_create_payload("unlimited", None, requests=None, tokens=None, period="1h")
     assert "rate_limit" not in payload
+
+
+def test_only_key_created_with_rerank_gets_the_reranker_model() -> None:
+    plain = keys.build_create_payload("app-x", None, None, None, "1h")
+    portal = keys.build_create_payload("portal", None, None, None, "1h", rerank=True)
+    assert plain["provider_configs"][0]["allowed_models"] == ["default", "embeddings"]
+    assert portal["provider_configs"][0]["allowed_models"] == ["default", "embeddings", "rerank"]
+    assert keys.parse_args(["create", "--name", "portal", "--rerank"]).rerank is True
+    assert keys.parse_args(["create", "--name", "app-x"]).rerank is False
 
 
 def test_create_key_posts_payload_with_basic_auth() -> None:
@@ -274,6 +282,49 @@ def test_revoke_unknown_key_reports_404() -> None:
 # --- CLI ---------------------------------------------------------------------
 
 
+# --- grant-rerank ------------------------------------------------------------
+
+
+def rerank_config(models: list[str]) -> dict[str, Any]:
+    return {"id": 2, "provider": "vllm", "allowed_models": models}
+
+
+def test_grant_rerank_replaces_provider_config_and_keeps_limits() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        config = rerank_config(["default", "embeddings", "rerank"])
+        key = virtual_key(name="portal", provider_configs=[config])
+        return httpx.Response(200, json={"message": "updated", "virtual_key": key})
+
+    with make_client(handler) as client:
+        keys.grant_rerank(client, "vk-1")
+
+    request = seen[0]
+    assert (request.method, request.url.path) == ("PUT", "/api/governance/virtual-keys/vk-1")
+    # Только привязка к провайдеру: лимиты и активность ключа запрос не трогает.
+    assert body(request) == {
+        "provider_configs": [
+            {
+                "provider": "vllm",
+                "weight": 1.0,
+                "key_ids": ["*"],
+                "allowed_models": ["default", "embeddings", "rerank"],
+            }
+        ]
+    }
+
+
+def test_grant_rerank_fails_if_key_still_lacks_the_model() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = virtual_key(provider_configs=[rerank_config(["default", "embeddings"])])
+        return httpx.Response(200, json={"virtual_key": key})
+
+    with make_client(handler) as client, pytest.raises(keys.BifrostApiError, match="rerank"):
+        keys.grant_rerank(client, "vk-1")
+
+
 def test_parse_args_create_defaults() -> None:
     args = keys.parse_args(["create", "--name", "app-x", "--requests", "60"])
     assert (args.command, args.name, args.requests, args.tokens, args.period) == (
@@ -297,9 +348,7 @@ def test_run_command_create_prints_key(capsys: pytest.CaptureFixture[str]) -> No
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"message": "created", "virtual_key": virtual_key()})
 
-    args = argparse.Namespace(
-        command="create", name="app-x", description=None, requests=5, tokens=None, period="1h"
-    )
+    args = keys.parse_args(["create", "--name", "app-x", "--requests", "5"])
     with make_client(handler) as client:
         keys.run_command(args, client)
 

@@ -3,7 +3,7 @@
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from portal.dialogs.domain import Attachment, Message
@@ -69,7 +69,8 @@ def question_turn(content: str, attachments: Sequence[Attachment]) -> Turn:
     """
     blocks = [_attachment_block(attachment) for attachment in attachments]
     images = tuple(
-        ImageRef(attachment.storage_key, attachment.media_type, page)
+        # Страницы-сканы есть только у документов: у записи их не бывает.
+        ImageRef(attachment.storage_key, cast(MediaType, attachment.media_type), page)
         for attachment in attachments
         for page in attachment.image_pages
     )

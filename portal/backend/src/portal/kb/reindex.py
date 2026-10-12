@@ -1,7 +1,5 @@
 """Возврат документов в очередь командой `portal reindex` (docs/portal-api.md §13.4)."""
 
-from uuid import uuid4
-
 from portal.core.ports import Clock
 from portal.kb.domain import Job
 from portal.kb.ports import VectorIndex
@@ -44,6 +42,9 @@ class Reindexer:
                 if document is None or (only_errors and document.status != "error"):
                     continue
                 await uow.documents.set_status(document_id, "queued")
-                await uow.jobs.reset_or_add(Job(uuid4(), document_id, "index", 0, now, None, now))
+                await uow.jobs.reset_or_add(Job.new(document_id, "index", now))
+                # Документ целиком обработает `index` и сам поставит `context` (§13.4).
+                await uow.jobs.remove(document_id, "reprocess")
+                await uow.jobs.remove(document_id, "context")
             requeued += 1
         return requeued

@@ -22,7 +22,13 @@ from llm_stub import replies
 _CHAT_FIELDS = frozenset(
     {"model", "messages", "stream", "reasoning_effort", "max_tokens", "response_format"}
 )
-_REASONING_EFFORTS = frozenset({"low", "medium", "xhigh"})
+_REASONING_EFFORTS = frozenset({"low", "medium"})
+# Заглушка стоит на месте Bifrost, а он переписывает `xhigh` в `high`: шаблон модели
+# отвергает оба значения одним текстом. Уровень `xhigh` задаётся отсутствием поля.
+_GATEWAY_HIGH_EFFORTS = frozenset({"high", "xhigh"})
+_HIGH_EFFORT_MESSAGE = (
+    "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low."
+)
 _SLOW_DELAY_SECONDS = 0.2
 _CONTEXT_OVERFLOW = {
     "error": {
@@ -104,8 +110,8 @@ def _chat_refusal(body: dict[str, Any]) -> Response | None:
     if body.get("model") != "default":
         return _error(404, "model not found")
     effort = body.get("reasoning_effort")
-    if effort == "high":
-        return _error(500, "reasoning_effort high is not supported")
+    if effort in _GATEWAY_HIGH_EFFORTS:
+        return _error(400, _HIGH_EFFORT_MESSAGE)
     if effort is not None and effort not in _REASONING_EFFORTS:
         return _error(400, "invalid reasoning_effort")
     messages = body.get("messages")
@@ -196,11 +202,30 @@ def create_app(chunk_delay_ms: int) -> Starlette:
             }
         )
 
+    async def rerank(request: Request) -> Response:
+        body = await _body(request)
+        if body is None:
+            return _error(400, "invalid json")
+        if body.get("model") != "rerank":
+            return _error(404, "model not found")
+        query, documents = body.get("query"), body.get("documents")
+        if (
+            not isinstance(query, str)
+            or not isinstance(documents, list)
+            or not all(isinstance(document, str) for document in documents)
+        ):
+            return _error(400, "query must be a string, documents — a list of strings")
+        # Пометка своя: на `[[stub:error]]` этот маршрут не отзывается (§12.2).
+        if replies.RERANK_ERROR_MARK in query:
+            return _error(503, "stub rerank error")
+        return JSONResponse({"results": replies.rerank(query, documents)})
+
     return Starlette(
         routes=[
             Route("/health", health),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/embeddings", embeddings, methods=["POST"]),
+            Route("/v1/rerank", rerank, methods=["POST"]),
         ],
         middleware=[Middleware(BearerAuth)],
     )

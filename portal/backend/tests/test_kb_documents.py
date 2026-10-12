@@ -57,13 +57,19 @@ async def test_upload_accepts_each_format_and_queues_indexing(
         "id": body["id"],
         "title": name,
         "scope": "shared",
+        "kind": "document",
         "is_cogis": False,
+        "tags": [],
         "author": {"full_name": "Пользователь ivanov", "is_me": True},
         "created_at": "2026-10-05T09:00:00Z",
         "page_count": page_count,
+        "duration_seconds": None,
         "status": "queued",
         "error_code": None,
         "progress": None,
+        "images_truncated": False,
+        "reprocess_error": None,
+        "reprocessing": False,
         "can_delete": True,
     }
     row = (await portal.rows("SELECT * FROM kb_documents"))[0]
@@ -72,8 +78,8 @@ async def test_upload_accepts_each_format_and_queues_indexing(
     # Имя на диске генерирует сервер: `kb/<uuid>`, от имени файла не зависит.
     assert row.storage_key.startswith("kb/") and name not in row.storage_key
     assert (portal.container.settings.files.root / row.storage_key).read_bytes() == content
-    jobs = await portal.rows("SELECT kind, attempts, locked_until FROM kb_jobs")
-    assert [(job.kind, job.attempts, job.locked_until) for job in jobs] == [("index", 0, None)]
+    jobs = await portal.rows("SELECT kind, priority, attempts, locked_until FROM kb_jobs")
+    assert [tuple(job) for job in jobs] == [("index", 20, 0, None)]
     assert await portal.audit_events() == [
         *(await portal.audit_events())[:-1],
         ("document_uploaded", {"document_id": body["id"], "scope": "shared"}),
@@ -547,21 +553,25 @@ async def test_page_text_with_highlighted_quote(bench: KbBench) -> None:
         "page": 1,
         "page_count": 2,
         "recognized": False,
-        "segments": [{"text": first, "highlight": False}],
+        "segments": [{"text": first, "highlight": False, "start_seconds": None}],
+        "timecode_seconds": None,
+        "image": None,
     }
     by_fragment = (await reader.get(path, params={"fragment_id": str(fragments[1].id)})).json()
     assert (by_fragment["page"], by_fragment["segments"]) == (
         2,
-        [{"text": second, "highlight": True}],
+        [{"text": second, "highlight": True, "start_seconds": None}],
     )
     # Задана страница — отдаётся она; цитата с другой страницы не подсвечивается.
     other_page = (
         await reader.get(path, params={"page": 1, "fragment_id": str(fragments[1].id)})
     ).json()
-    assert other_page["segments"] == [{"text": first, "highlight": False}]
+    assert other_page["segments"] == [{"text": first, "highlight": False, "start_seconds": None}]
     # Неизвестный фрагмент — текст без подсветки, это не ошибка.
     unknown = await reader.get(path, params={"fragment_id": "00000000-0000-4000-8000-000000000000"})
-    assert unknown.json()["segments"] == [{"text": first, "highlight": False}]
+    assert unknown.json()["segments"] == [
+        {"text": first, "highlight": False, "start_seconds": None}
+    ]
     assert (await reader.get(path, params={"page": 3})).status_code == 404
     assert (await reader.get(path, params={"page": 0})).status_code == 404
     malformed = await reader.get(path, params={"fragment_id": "x"})
@@ -590,9 +600,9 @@ async def test_quote_is_a_middle_segment_and_segments_rebuild_the_page(bench: Kb
     # У документа без страниц `page` игнорируется, а номера страницы нет.
     assert (body["page"], body["page_count"], body["recognized"]) == (None, None, False)
     assert body["segments"] == [
-        {"text": "Начало страницы. ", "highlight": False},
-        {"text": "Цитата из договора.", "highlight": True},
-        {"text": " Конец страницы.", "highlight": False},
+        {"text": "Начало страницы. ", "highlight": False, "start_seconds": None},
+        {"text": "Цитата из договора.", "highlight": True, "start_seconds": None},
+        {"text": " Конец страницы.", "highlight": False, "start_seconds": None},
     ]
     assert "".join(segment["text"] for segment in body["segments"]) == text
 
@@ -608,7 +618,9 @@ async def test_fragment_of_another_document_is_not_highlighted(bench: KbBench) -
     body = (
         await client.get(f"/api/kb/documents/{first}/text", params={"fragment_id": str(foreign)})
     ).json()
-    assert body["segments"] == [{"text": "Текст первого документа", "highlight": False}]
+    assert body["segments"] == [
+        {"text": "Текст первого документа", "highlight": False, "start_seconds": None}
+    ]
 
 
 @pytest.mark.parametrize(

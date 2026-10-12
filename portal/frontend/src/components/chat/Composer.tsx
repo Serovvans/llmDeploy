@@ -1,14 +1,16 @@
 import { IconAttachPaperclipRegular16 } from '@skbkontur/icons/IconAttachPaperclipRegular16';
 import { IconMediaUiAStopRegular16 } from '@skbkontur/icons/IconMediaUiAStopRegular16';
-import { Button, Hint, Select, Switcher, Textarea } from '@skbkontur/react-ui';
+import { Button, Hint, Switcher, Textarea } from '@skbkontur/react-ui';
 import { useEffect, useId, useRef } from 'react';
 
 import { attachmentFileUrl } from '../../api/client';
-import type { AnswerMode, Knowledge } from '../../api/types';
+import type { AnswerMode, KbScope } from '../../api/types';
 import type { Draft } from '../../chat/state';
 import { texts } from '../../texts';
 import { AttachmentChip } from './AttachmentChip';
 import styles from './Composer.module.css';
+import { KnowledgePicker } from './KnowledgePicker';
+import { MediaAttachmentChip } from './MediaAttachmentChip';
 
 const t = texts.chat.composer;
 
@@ -17,20 +19,18 @@ const MODES = [
   { value: 'thorough', label: t.modeThorough },
 ];
 
-const KNOWLEDGE: [Knowledge, string][] = [
-  ['none', t.knowledge.none],
-  ['shared', t.knowledge.shared],
-  ['shared_and_personal', t.knowledge.shared_and_personal],
-];
-
 /** Вложения, режим ответа и база знаний — только в чате (концепция §4.1). */
 interface ChatControls {
   mode: AnswerMode;
-  knowledge: Knowledge;
+  collections: KbScope[];
+  tags: string[];
+  /** Предел числа тегов в вопросе; `null`, пока нет конфигурации. */
+  maxTags: number | null;
   /** Подсказка на кнопке «Прикрепить» и расширения для выбора файла; `null`, пока нет конфигурации. */
   attach: { hint: string; extensions: string[] } | null;
   onModeChange: (mode: AnswerMode) => void;
-  onKnowledgeChange: (knowledge: Knowledge) => void;
+  onCollectionsChange: (collections: KbScope[]) => void;
+  onTagsChange: (tags: string[]) => void;
   onAddFiles: (files: File[]) => void;
   onRetryFile: (key: string) => void;
   onRemoveFile: (key: string) => void;
@@ -53,6 +53,8 @@ interface ComposerProps {
   /** Отправка пока невозможна (настройки ещё загружаются): кнопка «Отправить» — в состоянии `loading`. */
   sendPending?: boolean;
   chat?: ChatControls;
+  /** Свой элемент строки управления слева, на месте режима ответа чата: действие SQL-помощника. */
+  controls?: React.ReactNode;
   onTextChange: (text: string) => void;
   onSend: () => void;
   onStop: () => void;
@@ -110,17 +112,26 @@ export function Composer(props: ComposerProps) {
       <div className={styles.box}>
         {draft.attachments.length > 0 && (
           <div className={styles.attachments}>
-            {draft.attachments.map((item) => (
-              <AttachmentChip
-                key={item.key}
-                name={item.file.name}
-                attachment={item.attachment}
-                fileUrl={dialogId && item.attachment ? attachmentFileUrl(dialogId, item.attachment.id) : null}
-                failed={item.status === 'failed'}
-                onRetry={() => chat?.onRetryFile(item.key)}
-                onRemove={() => chat?.onRemoveFile(item.key)}
-              />
-            ))}
+            {draft.attachments.map((item) =>
+              item.media ? (
+                <MediaAttachmentChip
+                  key={item.key}
+                  item={{ ...item, media: item.media }}
+                  onRetry={() => chat?.onRetryFile(item.key)}
+                  onRemove={() => chat?.onRemoveFile(item.key)}
+                />
+              ) : (
+                <AttachmentChip
+                  key={item.key}
+                  name={item.file.name}
+                  attachment={item.attachment}
+                  fileUrl={dialogId && item.attachment ? attachmentFileUrl(dialogId, item.attachment.id) : null}
+                  failed={item.status === 'failed'}
+                  onRetry={() => chat?.onRetryFile(item.key)}
+                  onRemove={() => chat?.onRemoveFile(item.key)}
+                />
+              ),
+            )}
           </div>
         )}
         <Textarea
@@ -165,26 +176,28 @@ export function Composer(props: ComposerProps) {
                   onValueChange={(value) => chat.onModeChange(value === 'thorough' ? 'thorough' : 'fast')}
                 />
               </Hint>
-              <Hint text={t.knowledgeHint} maxWidth={320}>
-                <Select<Knowledge, string>
-                  items={KNOWLEDGE}
-                  value={chat.knowledge}
-                  onValueChange={chat.onKnowledgeChange}
-                  renderValue={(value) => t.knowledgeChosen[value]}
-                />
-              </Hint>
+              <KnowledgePicker
+                collections={chat.collections}
+                tags={chat.tags}
+                maxTags={chat.maxTags}
+                onCollectionsChange={chat.onCollectionsChange}
+                onTagsChange={chat.onTagsChange}
+              />
             </>
           )}
-          <span className={styles.spacer} />
-          {answer === 'generating' ? (
-            <Button icon={<IconMediaUiAStopRegular16 />} onClick={props.onStop}>
-              {t.stop}
-            </Button>
-          ) : (
-            <Button use="primary" loading={props.sendPending} onClick={send}>
-              {t.send}
-            </Button>
-          )}
+          {props.controls}
+          {/* Кнопка остаётся у правого края и тогда, когда строка управления перенеслась (концепция §4.1). */}
+          <span className={styles.submit}>
+            {answer === 'generating' ? (
+              <Button icon={<IconMediaUiAStopRegular16 />} onClick={props.onStop}>
+                {t.stop}
+              </Button>
+            ) : (
+              <Button use="primary" loading={props.sendPending} onClick={send}>
+                {t.send}
+              </Button>
+            )}
+          </span>
         </div>
       </div>
       <p id={hintId} className={styles.hint}>

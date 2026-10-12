@@ -7,7 +7,8 @@
 
 import io
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import docx
 from docx.document import Document
@@ -131,8 +132,19 @@ def _write_answer(document: Document, view: MessageView, heading_offset: int) ->
     if listed:
         _write_label(document, "Источники")
         for source in listed:
-            page = f", стр. {source['page']}" if source.get("page") is not None else ""
-            _add_paragraph(document, f"[{source['n']}] {source['document_title']}{page}")
+            _add_paragraph(document, f"[{source['n']}] {source['document_title']}{_place(source)}")
+
+
+def _place(source: Mapping[str, Any]) -> str:
+    """Место источника в документе: страница, у записи — таймкод `ЧЧ:ММ:СС` (§5.9)."""
+    place = f", стр. {source['page']}" if source.get("page") is not None else ""
+    # В снимках до 0.15 поля `timecode_seconds` нет.
+    timecode = source.get("timecode_seconds")
+    if timecode is not None:
+        minutes, seconds = divmod(int(timecode), 60)
+        hours, minutes = divmod(minutes, 60)
+        place += f", {hours:02}:{minutes:02}:{seconds:02}"
+    return place
 
 
 def _write_docparse(document: Document, docparse: Docparse) -> None:

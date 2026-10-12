@@ -21,12 +21,20 @@ from llm_stub import replies
 from portal.core.container import Container
 from portal.core.ports import CurrentUser
 from portal.kb.ports import (
+    DialogTurn,
     KnowledgeBase,
-    KnowledgeScope,
+    KnowledgeSelection,
     KnowledgeUnavailableError,
     Retrieval,
 )
-from portal.llm.ports import ChatRequest, ContentDelta, Finished, ImagePart, ReasoningDelta
+from portal.llm.ports import (
+    ChatRequest,
+    ContentDelta,
+    Finished,
+    ImagePart,
+    ReasoningDelta,
+    TextPart,
+)
 
 NEW_PASSWORD = "Надёжный-пароль-2026"
 CLIENT_IP = "203.0.113.5"
@@ -84,6 +92,11 @@ class ScriptedModel:
         self.recognition: str | Exception | asyncio.Event | None = None
         self.extraction_requests: list[ChatRequest] = []
         self.recognition_requests: list[ChatRequest] = []
+        # Проверка SQL: ответ на запрос тестовых данных и ответы на запросы исправления
+        # по очереди (последний повторяется).
+        self.sql_data: str | Exception | asyncio.Event = '{"statements": []}'
+        self.sql_fixes: list[str | Exception] = [""]
+        self.sql_requests: list[ChatRequest] = []
         self.closed = 0
 
     async def stream(
@@ -104,6 +117,14 @@ class ScriptedModel:
 
     async def complete(self, request: ChatRequest) -> str:
         """Ответ без потока: реквизиты по схеме, текст страницы-скана или название диалога."""
+        first = request.messages[-1].parts[0]
+        prompt = first.text.partition("\n")[0] if isinstance(first, TextPart) else ""
+        if prompt in (replies.SQL_DATA_PROMPT, replies.SQL_FIX_PROMPT):
+            self.sql_requests.append(request)
+            if prompt == replies.SQL_DATA_PROMPT:
+                return await self._scripted(self.sql_data, request)
+            fix = self.sql_fixes.pop(0) if len(self.sql_fixes) > 1 else self.sql_fixes[0]
+            return await self._scripted(fix, request)
         if request.json_schema is not None:
             self.extraction_requests.append(request)
             return await self._scripted(self.extraction, request)
@@ -138,15 +159,23 @@ class FakeKnowledge:
     """
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, UUID, str]] = []
+        self.calls: list[tuple[str, UUID, KnowledgeSelection]] = []
+        self.histories: list[tuple[DialogTurn, ...]] = []
         self.result: Retrieval | None = None
         self.delegate: KnowledgeBase | None = None
         self.gate: asyncio.Event | None = None
         self.cancelled = 0
         self.documented = False  # есть ли в общей базе документация CoGIS
 
-    async def retrieve(self, query: str, user_id: UUID, scope: KnowledgeScope) -> Retrieval:
-        self.calls.append((query, user_id, scope))
+    async def retrieve(
+        self,
+        query: str,
+        user_id: UUID,
+        selection: KnowledgeSelection,
+        history: Sequence[DialogTurn] = (),
+    ) -> Retrieval:
+        self.calls.append((query, user_id, selection))
+        self.histories.append(tuple(history))
         if self.gate is not None:
             try:
                 await self.gate.wait()
@@ -154,13 +183,29 @@ class FakeKnowledge:
                 self.cancelled += 1
                 raise
         if self.delegate is not None:
-            return await self.delegate.retrieve(query, user_id, scope)
+            return await self.delegate.retrieve(query, user_id, selection, history)
         if self.result is None:
             raise KnowledgeUnavailableError
         return self.result
 
     async def has_cogis_documentation(self) -> bool:
         return self.documented
+
+
+class FakeTranscriptionQueue:
+    """Подменная очередь расшифровки вложений: запоминает задания; `failure` — сбой постановки."""
+
+    def __init__(self) -> None:
+        self.enqueued: list[UUID] = []
+        self.failure: Exception | None = None
+
+    async def enqueue(self, attachment_id: UUID) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.enqueued.append(attachment_id)
+
+    async def pending(self, attachment_ids: Sequence[UUID]) -> set[UUID]:
+        return set(attachment_ids) & set(self.enqueued)
 
 
 def parse_events(body: str) -> list[tuple[str, dict[str, Any]]]:
@@ -225,6 +270,7 @@ class Portal:
     clock: FakeClock
     model: "ScriptedModel"
     knowledge: "FakeKnowledge"
+    transcriptions: "FakeTranscriptionQueue"
 
     def client(self, ip: str = CLIENT_IP, forwarded_for: str | None = None) -> httpx.AsyncClient:
         """Клиент-«браузер»: свой набор cookie и заголовок защиты от CSRF."""
@@ -315,7 +361,7 @@ class Portal:
         return [(row.event, row.details) for row in rows]
 
 
-CHAT_BODY = {"content": "Какой срок аренды?", "mode": "fast", "knowledge": "none"}
+CHAT_BODY = {"content": "Какой срок аренды?", "mode": "fast", "collections": []}
 
 
 async def new_dialog(client: httpx.AsyncClient) -> str:
