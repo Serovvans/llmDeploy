@@ -3,6 +3,10 @@
 #
 # Запуск на ВМ (пользователь в группе docker, иначе через sudo):
 #   bash scripts/preflight.sh
+#   bash scripts/preflight.sh --release
+#       Перед релизом на работающей ВМ (docs/portal-design.md §3.4, §8.2): только Docker,
+#       свободное место по бюджету релиза, доступ к Hugging Face и реестрам образов.
+#       Карта и память заняты работающим сервисом — их проверяет первая установка.
 #
 # Проверяет: GPU и видеопамять, драйвер >= 580 с open kernel modules, Docker >= 27,
 # NVIDIA Container Toolkit (тестовый контейнер с nvidia-smi), свободное место в каталоге
@@ -23,6 +27,14 @@ readonly MIN_DRIVER_MAJOR=580
 readonly MIN_GPU_MEMORY_MIB=70000
 readonly MIN_DOCKER_MAJOR=27
 readonly MIN_FREE_DISK_GB=300
+# Бюджет релиза портала (docs/portal-design.md §3.4): веса, образы и кеш сборки — 15 ГБ;
+# квота на медиа — 50 ГБ; тома портала с ростом — 10 ГБ; восстановление из копии
+# разворачивает медиа и тома ещё раз. Квота и размер томов — допущения дизайна: при
+# других значениях поменять их здесь.
+readonly RELEASE_IMAGES_GB=15
+readonly RELEASE_MEDIA_QUOTA_GB=50
+readonly RELEASE_VOLUMES_GB=10
+readonly MIN_FREE_RELEASE_GB=$((RELEASE_IMAGES_GB + 2 * (RELEASE_MEDIA_QUOTA_GB + RELEASE_VOLUMES_GB)))
 # 64 ГБ по заявке; MemTotal меньше номинала на резерв ядра и прошивки.
 readonly MIN_RAM_GIB=62
 readonly MIN_VCPU=8
@@ -149,8 +161,9 @@ check_container_toolkit() {
   fi
 }
 
+# check_disk МИНИМУМ_ГБ: свободное место в каталоге данных Docker (образы и тома).
 check_disk() {
-  local dir="/var/lib/docker"
+  local min_gb="$1" dir="/var/lib/docker"
   if [[ "$docker_ok" -eq 1 ]]; then
     dir=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null) || dir="/var/lib/docker"
   fi
@@ -162,10 +175,10 @@ check_disk() {
   local free_bytes free_gb
   free_bytes=$(df -P -B1 "$dir" | awk 'NR == 2 { print $4 }')
   free_gb=$((free_bytes / 1000000000))
-  if [[ "$free_gb" -ge "$MIN_FREE_DISK_GB" ]]; then
-    pass "диск: свободно ${free_gb} ГБ в ${dir}"
+  if [[ "$free_gb" -ge "$min_gb" ]]; then
+    pass "диск: свободно ${free_gb} ГБ в ${dir} (нужно >= ${min_gb} ГБ)"
   else
-    fail "диск: свободно ${free_gb} ГБ в ${dir}; нужно >= ${MIN_FREE_DISK_GB} ГБ" \
+    fail "диск: свободно ${free_gb} ГБ в ${dir}; нужно >= ${min_gb} ГБ" \
       "расширить диск ВМ или перенести data-root Docker на отдельный том (/etc/docker/daemon.json)"
   fi
 }
@@ -283,17 +296,31 @@ main() {
     exit 1
   fi
 
-  check_gpu
-  check_open_kernel_modules
-  check_docker
-  check_container_toolkit
-  check_disk
-  check_ram
-  check_cpu
-  check_huggingface
-  check_network
-  check_ntp
-  check_uv
+  case "${1:-}" in
+    "")
+      check_gpu
+      check_open_kernel_modules
+      check_docker
+      check_container_toolkit
+      check_disk "$MIN_FREE_DISK_GB"
+      check_ram
+      check_cpu
+      check_huggingface
+      check_network
+      check_ntp
+      check_uv
+      ;;
+    --release)
+      check_docker
+      check_disk "$MIN_FREE_RELEASE_GB"
+      check_huggingface
+      check_network
+      ;;
+    *)
+      echo "неизвестный аргумент «$1»: ожидается --release или запуск без аргументов" >&2
+      exit 1
+      ;;
+  esac
 
   echo
   echo "===== Сводка ====="

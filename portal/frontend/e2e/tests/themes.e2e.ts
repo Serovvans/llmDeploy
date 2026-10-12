@@ -10,7 +10,7 @@ import { adoptSession, createUser, nextCode, uniqueSuffix } from '../support/acc
 import { pngImage, textFile } from '../support/files';
 import { expect, test, type Member } from '../support/fixtures';
 import { must } from '../support/must';
-import { addKbDocument, askChat, createDialog, eventsOf, parseStream, stubReply } from '../support/portal';
+import { addKbDocument, askChat, askSql, createDialog, eventsOf, parseStream, saveSqlSchema, stubReply } from '../support/portal';
 import { expectAnswerReady, fillLogin, searchUsers } from '../support/ui';
 
 type Theme = 'light' | 'dark';
@@ -25,6 +25,16 @@ const ALLOWED_LATIN = [
   'MD',
   'JPG',
   'PNG',
+  // Форматы записей в подсказке окна «Добавить документы».
+  'MP3',
+  'WAV',
+  'M4A',
+  'OGG',
+  'FLAC',
+  'MP4',
+  'MKV',
+  'WebM',
+  'MOV',
   'C#',
   'PostgreSQL',
   'PostGIS',
@@ -140,7 +150,7 @@ async function prepareData(member: Member) {
 
   const chatId = await createDialog(member.api, 'chat');
   await askChat(member.api, chatId, `${mark} ${stubReply('Срок аренды — сорок девять лет [1].')}`, {
-    knowledge: 'shared_and_personal',
+    collections: ['shared', 'personal'],
   });
   await member.api.patch(`/api/dialogs/${chatId}`, { data: { title: 'Срок аренды участка' } });
 
@@ -151,10 +161,25 @@ async function prepareData(member: Member) {
       action: 'write',
       dialect: 'postgres',
       schema_id: null,
+      test_run: false,
     },
   });
   await sql.text();
   await member.api.patch(`/api/dialogs/${sqlId}`, { data: { title: 'Удаление участков' } });
+
+  // Запрос, проверенный на тестовых данных: блок проверки с таблицами под блоком кода.
+  const table = 'CREATE TABLE parcels (id int, area numeric)';
+  const schemaId = await saveSqlSchema(
+    member.api,
+    `Кадастр ${mark}`,
+    `${table};\n-- [[stub:sql-data]]${JSON.stringify({ statements: [table, 'INSERT INTO parcels VALUES (1, 120.5)'] })}[[/stub:sql-data]]`,
+  );
+  const sqlRunId = await createDialog(member.api, 'sql');
+  await askSql(member.api, sqlRunId, `Участки ${stubReply('Запрос:\n```sql\nSELECT id, area FROM parcels;\n```')}`, {
+    schemaId,
+    testRun: true,
+  });
+  await member.api.patch(`/api/dialogs/${sqlRunId}`, { data: { title: 'Площади участков' } });
 
   const parse = await member.api.post('/api/docparse', {
     multipart: {
@@ -164,7 +189,7 @@ async function prepareData(member: Member) {
   });
   const docparseId: string = must(eventsOf(parseStream(await parse.text()), 'extraction')[0], 'событие extraction')
     .data.dialog_id;
-  return { mark, document, chatId, sqlId, docparseId };
+  return { mark, document, chatId, sqlId, sqlRunId, docparseId };
 }
 
 for (const theme of ['light', 'dark'] as const) {
@@ -253,6 +278,9 @@ for (const theme of ['light', 'dark'] as const) {
     await page.goto('/chat');
     await expect(page.getByRole('heading', { name: 'Чем помочь?' })).toBeVisible();
     await checkScreen(page, theme, 'чат-пустой', testInfo);
+    await page.getByRole('button', { name: /^База знаний:/ }).click();
+    await expect(page.getByRole('dialog', { name: 'База знаний' })).toContainText('Только документы с тегами');
+    await checkScreen(page, theme, 'чат-выбор-баз-знаний', testInfo);
 
     await page.goto(`/chat/${data.chatId}`);
     await expectAnswerReady(page);
@@ -271,6 +299,13 @@ for (const theme of ['light', 'dark'] as const) {
     await page.getByRole('button', { name: 'Добавить документы' }).first().click();
     await expect(page.getByRole('dialog')).toContainText('Куда добавить');
     await checkScreen(page, theme, 'база-знаний-добавление', testInfo, dataWords);
+    await page.getByRole('dialog').getByRole('button', { name: 'Отмена' }).click();
+    // Документы «Министерств» — данные других тестов: вкладка проверяется с отбором, который их скрывает.
+    await page.getByText('Министерства', { exact: true }).click();
+    await expect(page.getByText('Эту базу ведут администраторы; искать по ней могут все сотрудники')).toBeVisible();
+    await page.getByRole('textbox', { name: 'Найти по названию или автору' }).fill('нет-такого-документа');
+    await expect(page.getByRole('heading', { name: 'Ничего не нашлось' })).toBeVisible();
+    await checkScreen(page, theme, 'база-знаний-министерства', testInfo);
 
     await page.goto('/sql');
     await expect(page.getByRole('heading', { name: 'Опишите задачу — получите запрос' })).toBeVisible();
@@ -279,10 +314,16 @@ for (const theme of ['light', 'dark'] as const) {
     await expectAnswerReady(page);
     await expect(page.getByText(/^Осторожно:/).first()).toBeVisible();
     await checkScreen(page, theme, 'sql-ответ-с-предупреждением', testInfo, [...dataWords, 'stub', 'reply']);
+    await page.goto(`/sql/${data.sqlRunId}`);
+    await expect(page.getByText('Запрос выполнился на тестовых данных')).toBeVisible();
+    await page.getByRole('button', { name: 'Тестовые данные · 1 таблица' }).click();
+    await expect(page.getByRole('region', { name: 'Тестовая таблица parcels' })).toBeVisible();
+    const sqlWords = ['SELECT', 'FROM', 'parcels', 'area', 'id', 'sql', 'stub', 'reply'];
+    await checkScreen(page, theme, 'sql-проверка-на-тестовых-данных', testInfo, [...dataWords, ...sqlWords]);
     await page.getByRole('button', { name: 'Мои схемы' }).click();
     await expect(page.getByRole('dialog')).toContainText('Схемы видите только вы');
     await page.getByRole('dialog').getByRole('button', { name: 'Добавить схему' }).click();
-    await checkScreen(page, theme, 'sql-схемы', testInfo, [...dataWords, 'stub', 'reply', 'CREATE TABLE']);
+    await checkScreen(page, theme, 'sql-схемы', testInfo, [...dataWords, ...sqlWords, 'CREATE TABLE']);
 
     await page.goto('/cogis');
     await expect(page.getByRole('heading', { name: 'Плагины CoGIS на C#' })).toBeVisible();

@@ -6,14 +6,12 @@
  * Общая база на стенде одна на все тесты, поэтому у каждого теста свои слова-метки:
  * по ним лексический поиск ставит документ теста первым источником.
  */
-import type { Page } from '@playwright/test';
-
 import { uniqueSuffix } from '../support/accounts';
 import { pngImage, textFile, textPdf } from '../support/files';
 import { expect, test } from '../support/fixtures';
 import { must } from '../support/must';
 import { addKbDocument, chatWithAnswer, createDialog, eventsOf, expectError, parseStream } from '../support/portal';
-import { expectAnswerReady, send, toast } from '../support/ui';
+import { chooseKnowledge, expectAnswerReady, send, toast } from '../support/ui';
 
 function token(): string {
   return `zq${uniqueSuffix()}`;
@@ -25,11 +23,6 @@ function twoPagePdf(mark: string) {
     `First page of the regulation ${mark}a describes general provisions.`,
     `Second page says the lease term ${mark}b is forty nine years.`,
   ]);
-}
-
-async function chooseKnowledge(page: Page, option: 'Общая' | 'Общая и моя'): Promise<void> {
-  await page.getByRole('button', { name: /^База знаний:/ }).click();
-  await page.locator('[data-tid~="MenuItem__root"]').filter({ hasText: new RegExp(`^${option}$`) }).click();
 }
 
 test('документ, добавленный одним сотрудником в общую базу, находится в ответе другого; источник — документ, страница, цитата', async ({
@@ -53,11 +46,11 @@ test('документ, добавленный одним сотрудником
   const row = authorPage.getByRole('row').filter({ hasText: pdf.name });
   await expect(row).toContainText('Готов', { timeout: 45_000 });
   await expect(row).toContainText('Вы');
-  await expect(row.getByRole('cell', { name: '2', exact: true })).toBeVisible();
+  await expect(row.getByRole('cell', { name: '2 стр.', exact: true })).toBeVisible();
 
   // Другой сотрудник видит документ в общей базе и получает ответ со ссылкой на него.
   const page = await pageAs(reader, '/chat');
-  await chooseKnowledge(page, 'Общая');
+  await chooseKnowledge(page, ['Общая']);
   await send(page, `${mark}b`);
   await expectAnswerReady(page);
 
@@ -95,7 +88,7 @@ test('личный документ не находится ни у другог
   const document = await addKbDocument(owner.api, file, { scope: 'personal' });
 
   for (const stranger of [colleague, admin]) {
-    const { events } = await chatWithAnswer(stranger.api, mark, { knowledge: 'shared_and_personal' });
+    const { events } = await chatWithAnswer(stranger.api, mark, { collections: ['shared', 'personal'] });
     const sources = eventsOf(events, 'sources').flatMap((event) => event.data.sources);
     expect(sources.map((source: { document_id: string }) => source.document_id)).not.toContain(document.id);
     expect(JSON.stringify(events)).not.toContain(`кодовое слово ${mark}`);
@@ -107,12 +100,12 @@ test('личный документ не находится ни у другог
   }
 
   // Режим «Общая» личную базу владельца не трогает.
-  const sharedOnly = await chatWithAnswer(owner.api, mark, { knowledge: 'shared' });
+  const sharedOnly = await chatWithAnswer(owner.api, mark, { collections: ['shared'] });
   const sharedSources = eventsOf(sharedOnly.events, 'sources').flatMap((event) => event.data.sources);
   expect(sharedSources.map((source: { document_id: string }) => source.document_id)).not.toContain(document.id);
 
   const page = await pageAs(owner, '/chat');
-  await chooseKnowledge(page, 'Общая и моя');
+  await chooseKnowledge(page, ['Общая', 'Моя']);
   await send(page, mark);
   await expectAnswerReady(page);
   const card = page.getByRole('button', { name: new RegExp(`^1\\s*${file.name}`) });
@@ -141,7 +134,7 @@ test('скан без текстового слоя индексируется �
   expect(recognized).toMatch(/^Текст страницы-заглушки [0-9a-f]{8}\.$/);
   const digest = must(/([0-9a-f]{8})\.$/.exec(recognized)?.[1], 'метка распознанной страницы');
 
-  const { events } = await chatWithAnswer(member.api, digest, { knowledge: 'shared_and_personal' });
+  const { events } = await chatWithAnswer(member.api, digest, { collections: ['shared', 'personal'] });
   const sources = eventsOf(events, 'sources').flatMap((event) => event.data.sources);
   expect(sources[0]).toMatchObject({ n: 1, document_id: document.id, page: 1, quote: recognized });
 
@@ -207,7 +200,7 @@ test('удаление: чужой общий документ сотрудни�
   const mark = token();
   const file = textFile(`инструкция-${mark}.txt`, `Инструкция ${mark} по оформлению договора аренды участка.`);
   const document = await addKbDocument(author.api, file, { scope: 'shared' });
-  const { dialogId } = await chatWithAnswer(colleague.api, mark, { knowledge: 'shared' });
+  const { dialogId } = await chatWithAnswer(colleague.api, mark, { collections: ['shared'] });
 
   await expectError(await colleague.api.delete(`/api/kb/documents/${document.id}`), 403, 'forbidden');
   await expectError(await colleague.api.post(`/api/kb/documents/${document.id}/retry`), 403, 'forbidden');
@@ -228,7 +221,7 @@ test('удаление: чужой общий документ сотрудни�
   await expectError(await colleague.api.get(`/api/kb/documents/${document.id}`), 404, 'not_found');
   await expectError(await colleague.api.get(`/api/kb/documents/${document.id}/file`), 404, 'not_found');
   // Удалённый документ сразу пропадает из новых ответов.
-  const after = await chatWithAnswer(colleague.api, mark, { knowledge: 'shared' });
+  const after = await chatWithAnswer(colleague.api, mark, { collections: ['shared'] });
   const sources = eventsOf(after.events, 'sources').flatMap((event) => event.data.sources);
   expect(sources.map((source: { document_id: string }) => source.document_id)).not.toContain(document.id);
 
@@ -301,7 +294,7 @@ test('если в ответе нет ссылок на найденное, ин
     data: {
       content: `${mark} [[stub:reply]]В документах об этом ничего нет.[[/stub:reply]]`,
       mode: 'fast',
-      knowledge: 'shared_and_personal',
+      collections: ['shared', 'personal'],
     },
   });
   expect(response.status()).toBe(200);

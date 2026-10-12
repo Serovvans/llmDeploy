@@ -881,6 +881,7 @@ describe('SQL-помощник: проверка на тестовых данн�
     ['пусто, чтение', { result: { columns: ['id'], rows: [], truncated: false } }, [r.emptyRead, r.emptyReadText, r.disclaimer], [r.passed]],
     ['пусто, изменение', { affected_rows: 0 }, [r.emptyWrite, r.emptyWriteText, r.disclaimer], [r.passed]],
     ['не проверялось: причина', { status: 'not_checked', reason: 'multiple_statements' }, [r.reasons.multiple_statements as string], [r.disclaimer]],
+    ['не проверялось: одно имя таблицы с разными схемами', { status: 'not_checked', reason: 'table_name_conflict' }, [r.reasons.table_name_conflict as string], [r.disclaimer]],
     ['не проверялось: неизвестная причина', { status: 'not_checked', reason: 'new_reason' }, [r.notChecked], [r.disclaimer]],
     ['неизвестное состояние', { status: 'new_status' as SqlRunBlock['status'] }, [r.notChecked], [r.disclaimer]],
     ['после перезагрузки — не завершена', { status: 'stopped' }, [r.stopped], [r.disclaimer]],

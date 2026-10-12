@@ -22,9 +22,9 @@ _ROLES = ("user", "assistant")
 def load(directory: Path | None = None) -> tuple[list[EvalDocument], list[EvalQuestion]]:
     """Прочитать набор: встроенный либо из каталога с `corpus.yaml` и `questions.yaml`.
 
-    Негодный файл, неизвестный вид вопроса или роль в истории, ссылка вопроса на
-    несуществующую страницу и история не у уточняющего вопроса — ошибка набора
-    (`ValueError`).
+    Негодный файл, набор без документов или вопросов, страница не строкой, неизвестный
+    вид вопроса или роль в истории, ссылка вопроса на несуществующую страницу и история
+    не у уточняющего вопроса — ошибка набора (`ValueError`).
     """
     files: Traversable = directory if directory is not None else resources.files(__package__)
     try:
@@ -32,6 +32,11 @@ def load(directory: Path | None = None) -> tuple[list[EvalDocument], list[EvalQu
         asked = yaml.safe_load(files.joinpath("questions.yaml").read_text(encoding="utf-8"))
     except yaml.YAMLError as error:
         raise ValueError("файл набора не разбирается как YAML") from error
+    if not corpus["documents"] or not asked["questions"]:
+        raise ValueError("в наборе нет документов или вопросов")
+    for item in corpus["documents"]:
+        if not all(isinstance(page, str) for page in item["pages"]):
+            raise ValueError(f"страница документа — не строка: {item['id']}")
     documents = [
         EvalDocument(item["id"], item["title"], tuple(page.strip() for page in item["pages"]))
         for item in corpus["documents"]

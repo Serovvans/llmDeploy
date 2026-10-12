@@ -954,6 +954,56 @@ describe('чат: вложения', () => {
       }
     });
 
+    it('чат удалён во время загрузки записи: загрузка отменяется, ждавшая запись не отправляется', async () => {
+      const { server, user } = setupChat([QUESTION]);
+      await waitFor(() => expect(screen.getByRole('button', { name: t.composer.attach })).toBeEnabled());
+      server.on(MEDIA, () => new Promise(() => undefined));
+      server.on(`DELETE /api/dialogs/${ID}`, () => ok());
+      await user.upload(fileInput(), [mp3('совещание.mp3'), mp3('планёрка.mp3')]);
+      await waitFor(() => expect(server.uploads).toHaveLength(1));
+
+      const history = within(screen.getByRole('complementary', { name: t.history }));
+      await user.click(await history.findByRole('button', { name: 'Действия: Аренда участка под ЛЭП' }));
+      await user.click(await screen.findByText(t.menu.remove));
+      await user.click(await screen.findByRole('button', { name: t.remove.action }));
+      expect(await screen.findByText(t.remove.done)).toBeInTheDocument();
+
+      expect(server.uploads[0]?.aborted).toBe(true);
+      expect(server.uploads).toHaveLength(1);
+    });
+
+    it('очередь одна на чат и базу знаний: запись из окна добавления ждёт, пока загружается запись чата', async () => {
+      vi.stubGlobal(
+        'DataTransfer',
+        class {
+          items = { add: () => undefined };
+          files = null;
+        },
+      );
+      const { server, user } = await ready();
+      let finish: () => void = () => undefined;
+      server.on(MEDIA, () => new Promise((resolve) => (finish = () => resolve(ok(record('f-1', 'совещание.mp3', 'ready'), 201)))));
+      server.on('GET /api/kb/tags', () => ok({ items: [] }));
+      server.on('POST /api/kb/documents/media', () => new Promise(() => undefined));
+      await user.upload(fileInput(), mp3('совещание.mp3'));
+      await waitFor(() => expect(server.uploads).toHaveLength(1));
+
+      await user.click(screen.getByRole('link', { name: texts.nav.knowledge }));
+      await waitFor(() => expect(screen.getAllByRole('button', { name: texts.kb.add })[0]).toBeEnabled());
+      await user.click(screen.getAllByRole('button', { name: texts.kb.add })[0] as HTMLElement);
+      const modal = within(await screen.findByRole('dialog'));
+      fireEvent.change(document.querySelector('[role="dialog"] input[type="file"]') as HTMLInputElement, {
+        target: { files: [mp3('планёрка.mp3')] },
+      });
+      await user.click(modal.getByRole('button', { name: texts.kb.upload.submit }));
+      expect(await modal.findByText(texts.kb.upload.waiting)).toBeInTheDocument();
+      expect(server.uploads).toHaveLength(1);
+
+      finish();
+      await waitFor(() => expect(server.uploads).toHaveLength(2));
+      expect(server.uploads[1]?.path).toContain('/api/kb/documents/media?');
+    });
+
     it('запись убрана до того, как создан новый чат: загрузка не начинается', async () => {
       const user = userEvent.setup({ applyAccept: false });
       let create: () => void = () => undefined;
@@ -1553,6 +1603,32 @@ describe('чат: база знаний', () => {
     fireEvent.error(audio);
     expect(await screen.findByText(texts.viewer.audioFailed)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Слушать с/ })).not.toBeInTheDocument();
+  });
+
+  it('источник-запись: цитата на нескольких строках — в видимую часть прокручивается её начало', async () => {
+    const record = source(2, { document_id: 'rec-1', document_title: 'Совещание 03.10.mp3', page: null, timecode_seconds: 760 });
+    const { server, user } = setupChat([QUESTION, message({ content: 'Продлеваем [2].', sources_found: 2, sources: [record] })]);
+    const text: DocumentText = {
+      page: 1,
+      page_count: 1,
+      recognized: true,
+      segments: [
+        { text: 'По второму вопросу.', highlight: false, start_seconds: 725 },
+        { text: 'срок аренды', highlight: true, start_seconds: 760 },
+        { text: 'продлеваем', highlight: true, start_seconds: 770 },
+        { text: 'до конца 2027 года', highlight: true, start_seconds: 780 },
+      ],
+      timecode_seconds: 760,
+      image: null,
+    };
+    server.on('GET /api/kb/documents/rec-1/text', () => ok(text));
+    server.on('GET /api/kb/documents/rec-1', () => ok({ ...KB_DOC, id: 'rec-1', kind: 'recording', page_count: null, duration_seconds: 4320 }));
+
+    await user.click(await screen.findByRole('button', { name: 'Источник 2: Совещание 03.10.mp3, с 12 минут 40 секунд' }));
+    expect(await screen.findByText('до конца 2027 года')).toBeInTheDocument();
+    const scrolledTo = () => vi.mocked(Element.prototype.scrollIntoView).mock.contexts.filter((element) => (element as Element).tagName === 'MARK');
+    await waitFor(() => expect(scrolledTo().length).toBeGreaterThan(0));
+    expect(new Set(scrolledTo())).toEqual(new Set([screen.getByText('срок аренды')]));
   });
 
   it('источник-картинка: адрес строит интерфейс; под ответом — один раз; не загрузилась — убрана из ряда', async () => {

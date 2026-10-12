@@ -5,22 +5,7 @@
 # Сценарий подключается (source) entrypoint'ом базового образа после initdb, пока
 # временный сервер слушает только локальный сокет. Каталог данных лежит в tmpfs, поэтому
 # сценарий выполняется при каждом старте контейнера. Ошибка любой команды прерывает
-# запуск: entrypoint работает с set -e.
-
-if ! [[ "${SQL_SANDBOX_ROLES:-}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "SQL_SANDBOX_ROLES: нужно целое число не меньше 1" >&2
-  exit 1
-fi
-if [[ -z "${SQL_SANDBOX_PASSWORD:-}" || -z "${SQL_SANDBOX_CONTROL_PASSWORD:-}" ]]; then
-  echo "SQL_SANDBOX_PASSWORD и SQL_SANDBOX_CONTROL_PASSWORD обязательны" >&2
-  exit 1
-fi
-# Управляющая роль завершает сеансы ролей проверки; с общим паролем утечка одного
-# открывала бы обе.
-if [[ "$SQL_SANDBOX_PASSWORD" == "$SQL_SANDBOX_CONTROL_PASSWORD" ]]; then
-  echo "SQL_SANDBOX_PASSWORD и SQL_SANDBOX_CONTROL_PASSWORD не должны совпадать" >&2
-  exit 1
-fi
+# запуск: entrypoint работает с set -e. Число ролей и пароли проверены в entrypoint.sh.
 
 # Пароли psql берёт из окружения (\getenv), а не из аргументов командной строки.
 docker_process_sql -v roles="$SQL_SANDBOX_ROLES" <<'SQL'

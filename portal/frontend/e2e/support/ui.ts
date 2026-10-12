@@ -1,5 +1,5 @@
 /** Действия сотрудника в интерфейсе, общие для нескольких тестов. */
-import { expect, type Locator, type Page } from '@playwright/test';
+import { expect, type APIResponse, type Locator, type Page, type Route } from '@playwright/test';
 
 import { nextCode, type Account } from './accounts';
 import type { TestFile } from './files';
@@ -41,6 +41,41 @@ export async function attachFiles(page: Page, files: TestFile | TestFile[]): Pro
 export async function chooseDocparseFile(page: Page, file: TestFile): Promise<void> {
   await expect(page.getByRole('radio')).not.toHaveCount(0);
   await page.locator('input[type=file]').setInputFiles(file);
+}
+
+/**
+ * Ответ сервера для подмены на пути к браузеру, с телом без сжатия: Firefox просит zstd, а его
+ * `route.fetch()` не распаковывает.
+ */
+export function fetchPlain(route: Route): Promise<APIResponse> {
+  return route.fetch({ headers: { ...route.request().headers(), 'accept-encoding': 'identity' } });
+}
+
+export type ScopeLabel = 'Общая' | 'Моя' | 'Министерства';
+
+/**
+ * Отмечает базы знаний (и теги) для следующего вопроса в панели под полем ввода. Тег выбирается из
+ * подсказок: в чате новых тегов не заводят.
+ */
+export async function chooseKnowledge(page: Page, scopes: ScopeLabel[], tags: string[] = []): Promise<void> {
+  await page.getByRole('button', { name: /^База знаний:/ }).click();
+  const panel = page.getByRole('dialog', { name: 'База знаний' });
+  for (const scope of scopes) {
+    // Сам флажок библиотеки скрыт под своей подписью: нажимается подпись.
+    await panel.getByText(new RegExp(`^${scope} —`)).click();
+    await expect(panel.getByRole('checkbox', { name: new RegExp(`^${scope} —`) })).toBeChecked();
+  }
+  for (const tag of tags) {
+    await panel.getByRole('textbox', { name: 'Только документы с тегами' }).fill(tag);
+    await tagSuggestion(page, tag).click();
+  }
+  await page.keyboard.press('Escape');
+  await expect(panel).toBeHidden();
+}
+
+/** Тег в раскрытом списке подсказок поля тегов. */
+export function tagSuggestion(page: Page, tag: string): Locator {
+  return page.locator('[data-tid~="ComboBoxMenu__item"]').filter({ hasText: tag });
 }
 
 export async function fillLogin(page: Page, login: string, password: string): Promise<void> {

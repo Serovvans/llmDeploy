@@ -2,13 +2,19 @@
 
 Команды:
     create --name NAME [--description TEXT] [--requests N] [--tokens N] [--period 1h]
+           [--rerank]
         Создать ключ с лимитами запросов и/или токенов за период (по умолчанию час)
-        и вывести его значение ``sk-bf-...``.
+        и вывести его значение ``sk-bf-...``. Ключу доступны модели ``default`` и
+        ``embeddings``; с ``--rerank`` — ещё и ``rerank``. Реранкер нужен только ключу
+        портала (docs/design.md §3.9): наружу ``/v1/rerank`` не открыт.
     list
         Показать ключи: id, имя, активность, расход/лимит запросов и токенов.
     revoke VK_ID
         Отозвать ключ: деактивировать (``is_active: false``). Доступ пропадает сразу,
         ключ остаётся в Bifrost для аудита и может быть включён обратно в UI.
+    grant-rerank VK_ID
+        Выдать уже выпущенному ключу (ключу портала) доступ к модели ``rerank``. Лимиты
+        ключа и его значение не меняются.
 
 API (сверено с https://docs.getbifrost.ai/features/governance/virtual-keys и
 API reference ``/api-reference/governance/*`` на 2026-09-15; перепроверить на ВМ
@@ -18,7 +24,10 @@ API reference ``/api-reference/governance/*`` на 2026-09-15; перепров�
     PUT  /api/governance/virtual-keys/{id}   -> {"message", "virtual_key": VirtualKey}
 Ключ создаётся с привязкой к провайдеру ``vllm`` (``provider_configs``): без неё
 Bifrost v2.2.0 не определяет провайдера по имени модели без префикса ``vllm/`` и
-отвечает 400 «could not auto resolve a provider» (проверено на ВМ 2026-10-07).
+отвечает 400 «could not auto resolve a provider» (проверено на ВМ 2026-10-07). Тем же
+ответом он отказывает в модели, которой нет в ``allowed_models`` ключа. ``PUT`` с
+``provider_configs`` заменяет список привязок ключа целиком, остальные поля не трогает
+(проверено на образе v2.2.0 2026-10-12).
 
 Окружение:
     BIFROST_ADMIN_URL       адрес API управления; по умолчанию http://127.0.0.1:8081
@@ -52,16 +61,20 @@ DEFAULT_ADMIN_URL = f"http://127.0.0.1:{ADMIN_PORT}"
 VIRTUAL_KEYS_PATH = "/api/governance/virtual-keys"
 REQUEST_TIMEOUT_S = 30.0
 LIST_PAGE_SIZE = 100
-# Провайдер и алиасы моделей из deploy/bifrost/config.json; ``key_ids: ["*"]`` — любой
-# ключ провайдера, иначе ответ 400 «no keys found for provider».
-PROVIDER_CONFIG: dict[str, Any] = {
-    "provider": "vllm",
-    "weight": 1.0,
-    "key_ids": ["*"],
-    "allowed_models": ["default", "embeddings"],
-}
+# Алиасы моделей из deploy/bifrost/config.json. Реранкер — только ключу портала.
+CLIENT_MODELS = ("default", "embeddings")
+RERANK_MODEL = "rerank"
 
 JsonObject = dict[str, Any]
+
+
+def provider_config(*, rerank: bool) -> JsonObject:
+    """Собрать привязку ключа к провайдеру ``vllm``; ``rerank`` — с доступом к реранкеру.
+
+    ``key_ids: ["*"]`` — любой ключ провайдера, иначе ответ 400 «no keys found for provider».
+    """
+    models = [*CLIENT_MODELS, RERANK_MODEL] if rerank else list(CLIENT_MODELS)
+    return {"provider": "vllm", "weight": 1.0, "key_ids": ["*"], "allowed_models": models}
 
 
 class BifrostApiError(Exception):
@@ -106,13 +119,15 @@ def build_create_payload(
     requests: int | None,
     tokens: int | None,
     period: str,
+    *,
+    rerank: bool = False,
 ) -> JsonObject:
     """Собрать тело POST /api/governance/virtual-keys."""
     payload: JsonObject = {
         "name": name,
         "is_active": True,
         "allow_all_providers": True,
-        "provider_configs": [PROVIDER_CONFIG],
+        "provider_configs": [provider_config(rerank=rerank)],
     }
     if description:
         payload["description"] = description
@@ -188,6 +203,21 @@ def revoke_key(client: httpx.Client, vk_id: str) -> JsonObject:
     return virtual_key
 
 
+def grant_rerank(client: httpx.Client, vk_id: str) -> JsonObject:
+    """Выдать ключу доступ к модели реранкера и вернуть обновлённый VirtualKey."""
+    body = _request(
+        client,
+        "PUT",
+        f"{VIRTUAL_KEYS_PATH}/{vk_id}",
+        json={"provider_configs": [provider_config(rerank=True)]},
+    )
+    virtual_key = _virtual_key(body)
+    configs = virtual_key.get("provider_configs") or []
+    if not any(RERANK_MODEL in (config.get("allowed_models") or []) for config in configs):
+        raise BifrostApiError(f"ключ {vk_id} после обновления не получил модель {RERANK_MODEL}")
+    return virtual_key
+
+
 def _limit_cell(rate_limit: JsonObject | None, kind: str) -> str:
     if not rate_limit or rate_limit.get(f"{kind}_max_limit") is None:
         return "-"
@@ -237,11 +267,17 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     create.add_argument("--requests", type=_positive_int, help="лимит запросов за период")
     create.add_argument("--tokens", type=_positive_int, help="лимит токенов за период")
     create.add_argument("--period", default="1h", help="период сброса лимитов: 1m, 1h, 1d, ...")
+    create.add_argument(
+        "--rerank", action="store_true", help="выдать доступ к модели rerank (ключ портала)"
+    )
 
     commands.add_parser("list", help="показать ключи")
 
     revoke = commands.add_parser("revoke", help="деактивировать ключ")
     revoke.add_argument("vk_id", help="ID ключа (см. list)")
+
+    grant = commands.add_parser("grant-rerank", help="выдать ключу доступ к модели rerank")
+    grant.add_argument("vk_id", help="ID ключа (см. list)")
     return parser.parse_args(argv)
 
 
@@ -249,7 +285,7 @@ def run_command(args: argparse.Namespace, client: httpx.Client) -> None:
     """Выполнить команду CLI и вывести результат в stdout."""
     if args.command == "create":
         payload = build_create_payload(
-            args.name, args.description, args.requests, args.tokens, args.period
+            args.name, args.description, args.requests, args.tokens, args.period, rerank=args.rerank
         )
         if "rate_limit" not in payload:
             logger.warning("ключ %s создаётся без лимитов запросов и токенов", args.name)
@@ -260,6 +296,9 @@ def run_command(args: argparse.Namespace, client: httpx.Client) -> None:
     elif args.command == "revoke":
         key = revoke_key(client, args.vk_id)
         print(f"ключ {key.get('id')} ({key.get('name')}) деактивирован")
+    elif args.command == "grant-rerank":
+        key = grant_rerank(client, args.vk_id)
+        print(f"ключу {key.get('id')} ({key.get('name')}) доступна модель {RERANK_MODEL}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

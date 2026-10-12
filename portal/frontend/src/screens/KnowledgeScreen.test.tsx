@@ -830,6 +830,26 @@ describe('база знаний: добавление записей', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
+  it('окно исчезло без «Прервать» (переход на другой экран): незагруженные запись и документ прерваны', async () => {
+    const { server, user } = setup();
+    server.on('POST /api/kb/documents/media', () => new Promise(() => undefined));
+    server.on('POST /api/kb/documents', () => new Promise(() => undefined));
+    const dialog = await openAdd(user);
+    pick(sized('совещание.mp3', MB), new File(['%PDF-'], 'договор.pdf'));
+    await user.click(dialog.getByRole('button', { name: t.upload.submit }));
+    await waitFor(() => expect(server.uploads).toHaveLength(1));
+    await waitFor(() => expect(server.callsTo('POST /api/kb/documents')).toHaveLength(1));
+    const documentSignal = vi
+      .mocked(fetch)
+      .mock.calls.find(([input, init]) => String(input) === '/api/kb/documents' && init?.method === 'POST')?.[1]?.signal;
+    expect(documentSignal?.aborted).toBe(false);
+
+    fireEvent.click(screen.getByRole('link', { name: texts.nav.chat, hidden: true }));
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/chat'));
+    expect(server.uploads[0]?.aborted).toBe(true);
+    expect(documentSignal?.aborted).toBe(true);
+  });
+
   it.each([
     [() => fail(429, 'too_many_uploads'), 'Сейчас загружается слишком много записей. Повторите через несколько минут', true],
     [() => fail(408, 'upload_timeout', { message: 'Загрузка прервалась: данные перестали поступать. Повторите загрузку' }), 'Загрузка прервалась: данные перестали поступать. Повторите загрузку', true],

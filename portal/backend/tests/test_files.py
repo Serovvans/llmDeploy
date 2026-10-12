@@ -108,6 +108,14 @@ def test_reader_handles_images_docx_and_text(tmp_path: Path) -> None:
     assert reader.page_text(path, "image/jpeg", 1) is None
     assert reader.page_image(path, "image/jpeg", 1).startswith(b"\x89PNG")
 
+    # JPEG в CMYK (вывод сканеров и допечатной подготовки): в PNG такой режим не пишется.
+    cmyk = io.BytesIO()
+    Image.new("CMYK", (40, 30)).save(cmyk, "JPEG")
+    path.write_bytes(cmyk.getvalue())
+    assert reader.page_count(path, "image/jpeg") == 1
+    with Image.open(io.BytesIO(reader.page_image(path, "image/jpeg", 1))) as page:
+        assert (page.format, page.mode, page.size) == ("PNG", "RGB", (40, 30))
+
     path.write_bytes(samples.docx_file("Первый абзац", "Второй абзац"))
     assert reader.detect(path, "a.pdf") == DOCX
     assert reader.page_count(path, DOCX) is None

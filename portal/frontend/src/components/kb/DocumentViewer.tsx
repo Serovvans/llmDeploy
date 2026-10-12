@@ -139,7 +139,7 @@ function useScrollToQuote(text: DocumentText | null) {
 }
 
 /** Текст отрезками (контракт §8.3): цитата — на подложке; смещений интерфейс не считает. */
-function Segments({ segments, firstMark }: { segments: Segment[]; firstMark: React.Ref<HTMLElement> }) {
+function Segments({ segments, firstMark }: { segments: Segment[]; firstMark?: React.Ref<HTMLElement> }) {
   const first = segments.find((segment) => segment.highlight);
   return segments.map((segment, index) =>
     segment.highlight ? (
@@ -240,6 +240,8 @@ interface TranscriptProps {
 
 /** Расшифровка открытой части записи (концепция §4.4): слева момент отрезка речи, справа его текст. */
 function Transcript({ text, firstMark, onPlay, onPage }: TranscriptProps) {
+  // Цитата записи — несколько строк: к началу прокручивается первая из них, остальные метку не получают.
+  const first = text.segments.find((segment) => segment.highlight);
   return (
     <>
       {text.page !== null && text.page_count !== null && text.page_count > 1 && (
@@ -269,7 +271,7 @@ function Transcript({ text, firstMark, onPlay, onPage }: TranscriptProps) {
               <span className={styles.momentText}>{formatTimecode(start)}</span>
             ))}
           <p className={styles.text}>
-            <Segments segments={segments} firstMark={firstMark} />
+            <Segments segments={segments} firstMark={first && segments.includes(first) ? firstMark : undefined} />
           </p>
         </div>
       ))}

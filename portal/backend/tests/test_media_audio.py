@@ -11,6 +11,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import wave
 from itertools import pairwise
 from pathlib import Path
@@ -244,6 +245,21 @@ async def test_codec_outside_the_whitelist_is_rejected(settings: Settings, tmp_p
 
 
 @needs_ffmpeg
+async def test_sound_in_a_codec_that_is_not_allowed_is_rejected(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """AC-3 в Matroska: контейнер и дорожка исправны, но кодека нет среди разрешённых."""
+    source = tmp_path / "source"
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi"]
+    command += ["-i", "sine=duration=1", "-c:a", "ac3", "-f", "matroska", str(source)]
+    subprocess.run(command, check=True, capture_output=True)
+
+    with pytest.raises(MediaRejectedError) as error:
+        await _tools(settings).probe(source, "video/x-matroska")
+    assert _rejection(error) == "media_invalid"
+
+
+@needs_ffmpeg
 async def test_content_that_does_not_match_the_type_is_rejected(
     settings: Settings, tmp_path: Path
 ) -> None:
@@ -409,6 +425,20 @@ async def test_job_directory_without_write_access_is_a_tool_failure(
     finally:
         scratch.chmod(0o755)
     assert [file.name for file in scratch.iterdir()] == ["source"]
+
+
+@needs_ffmpeg
+@pytest.mark.skipif(sys.platform != "linux", reason="предел памяти процесса действует в Linux")
+async def test_memory_limit_too_tight_for_the_tools_is_a_tool_failure(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Программам не хватает памяти и на образец: исправная запись не отклоняется."""
+    source = _wav(tmp_path / "source")
+    limits = settings.media.ffmpeg.model_copy(update={"memory_bytes": 8 * 1024 * 1024})
+
+    with pytest.raises(AudioToolsError):
+        await _tools(settings, ffmpeg=limits).probe(source, "audio/wav")
+    assert [file.name for file in tmp_path.iterdir()] == ["source"]
 
 
 @needs_ffmpeg

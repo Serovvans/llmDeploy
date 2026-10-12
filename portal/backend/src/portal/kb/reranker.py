@@ -48,7 +48,8 @@ class BifrostReranker:
                 for item in response.json()["results"]
             }
             scores = [by_index[index] for index in range(len(documents))]
-        except (ValueError, LookupError, TypeError) as error:
+        except (ValueError, LookupError, TypeError, OverflowError) as error:
+            # OverflowError — целая оценка, которая не помещается в число с плавающей точкой.
             raise RerankUnavailableError from error
         if not all(math.isfinite(score) for score in scores):
             raise RerankUnavailableError

@@ -323,7 +323,7 @@ test.describe('Пустые состояния и проверки ввода', 
     const member = await newMember();
     const dialogId = await createDialog(member.api, 'chat');
     const response = await member.api.post(`/api/dialogs/${dialogId}/messages`, {
-      data: { content: 'Вопрос без базы', mode: 'fast', knowledge: 'none' },
+      data: { content: 'Вопрос без базы', mode: 'fast', collections: [] },
     });
     await response.text();
     const messages = await (await member.api.get(`/api/dialogs/${dialogId}/messages`)).json();

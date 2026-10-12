@@ -56,7 +56,12 @@ test.describe('SQL-помощник', () => {
     await expect(page.locator('pre').filter({ hasText: 'SELECT cadastral_number FROM parcels' })).toBeVisible();
     await expect(page.getByText('Синтаксис проверен')).toBeVisible();
     await expect(page.getByText(/^Осторожно:/)).toHaveCount(0);
-    await expect(page.getByText('Портал не выполняет запросы и не подключается к вашим базам', { exact: true })).toBeVisible();
+    await expect(
+      page.getByText(
+        'Портал не подключается к вашим базам; запросы проверяются в отдельной тестовой базе на придуманных данных',
+        { exact: true },
+      ),
+    ).toBeVisible();
   });
 
   test('объясняет чужой запрос и предупреждает об опасной операции в нём', async ({ newMember, pageAs }) => {
@@ -66,7 +71,7 @@ test.describe('SQL-помощник', () => {
     await page.getByRole('switch', { name: 'Объяснить запрос' }).click();
     const request = waitMessageRequest(page);
     await send(page, 'DELETE FROM parcels;', SQL_EXPLAIN);
-    expect((await request).postDataJSON()).toMatchObject({ action: 'explain', schema_id: null });
+    expect((await request).postDataJSON()).toMatchObject({ action: 'explain', schema_id: null, test_run: false });
     await expectAnswerReady(page);
 
     // Запрос дошёл до модели, а под вопросом — предупреждение о вставленном запросе.
@@ -101,7 +106,7 @@ test.describe('SQL-помощник', () => {
       '```',
     ].join('\n');
     const response = await member.api.post(`/api/dialogs/${dialogId}/messages`, {
-      data: { content: `Очисти площадь ${stubReply(reply)}`, action: 'write', dialect: 'postgres', schema_id: null },
+      data: { content: `Очисти площадь ${stubReply(reply)}`, action: 'write', dialect: 'postgres', schema_id: null, test_run: false },
     });
     const check = must(eventsOf(parseStream(await response.text()), 'sql_check')[0], 'событие sql_check').data;
     expect(check.blocks.map((block: { dangers: string[] }) => block.dangers)).toEqual([
@@ -158,7 +163,7 @@ test.describe('SQL-помощник', () => {
     ).json();
     const dialogId = await createDialog(other.api, 'sql');
     const rejected = await other.api.post(`/api/dialogs/${dialogId}/messages`, {
-      data: { content: 'Напиши запрос', action: 'write', dialect: 'postgres', schema_id: schema.id },
+      data: { content: 'Напиши запрос', action: 'write', dialect: 'postgres', schema_id: schema.id, test_run: false },
     });
     await expectError(rejected, 422, 'schema_not_found');
   });

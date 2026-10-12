@@ -39,6 +39,8 @@ _SIGNATURES: tuple[tuple[bytes, MediaType], ...] = (
 _TEXT_EXTENSIONS: dict[str, MediaType] = {".txt": "text/plain", ".md": "text/markdown"}
 _DOCX_MAIN_PART = "word/document.xml"
 _IMAGE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG"}
+# Режимы растра, которые Pillow записывает в PNG без приведения.
+_PNG_MODES = frozenset({"1", "L", "LA", "P", "RGB", "RGBA", "I;16"})
 _ImageType = Literal["image/png", "image/jpeg"]
 _IMAGE_SIGNATURES: tuple[tuple[bytes, _ImageType], ...] = (
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -190,7 +192,9 @@ class ContentDocumentReader:
             raise UnreadableDocumentError
         buffer = io.BytesIO()
         with image:
-            image.save(buffer, format="PNG")
+            # JPEG со сканера бывает в CMYK, а такой режим в PNG не записывается.
+            writable = image if image.mode in _PNG_MODES else image.convert("RGB")
+            writable.save(buffer, format="PNG")
         return buffer.getvalue()
 
     def embedded_images(

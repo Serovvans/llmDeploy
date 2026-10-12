@@ -115,6 +115,21 @@ def test_evalset_from_directory_is_checked_like_the_shipped_one(tmp_path: Path) 
         questions.write_text(f"questions:\n  - {item}\n", encoding="utf-8")
         with pytest.raises(ValueError, match=reason):
             evalset.load(tmp_path)
+    # Пустой список вопросов дал бы деление на ноль уже после индексации набора.
+    questions.write_text("questions: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="нет документов или вопросов"):
+        evalset.load(tmp_path)
+    questions.write_text(
+        "questions:\n  - {text: число, document: act, pages: [1], kind: exact}\n", encoding="utf-8"
+    )
+    for corpus, reason in (
+        ("documents: []\n", "нет документов или вопросов"),
+        # Страница числом, а не строкой: YAML читает её без кавычек как число.
+        ("documents:\n  - {id: act, title: Акт.pdf, pages: [123]}\n", "не строка"),
+    ):
+        (tmp_path / "corpus.yaml").write_text(corpus, encoding="utf-8")
+        with pytest.raises(ValueError, match=reason):
+            evalset.load(tmp_path)
 
 
 async def test_evaluation_reports_each_stage_separately(

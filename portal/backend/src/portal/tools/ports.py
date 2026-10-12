@@ -1,8 +1,8 @@
 """Порт песочницы проверки SQL на тестовых данных (docs/portal-api.md §7.4, §13.3).
 
-Общий срок проверки блока, запросы к модели и разбор операторов до исполнения — в
-сценарии (`portal/tools/sql_run.py`): порт ничего не знает о модели, а тексты операторов
-считает враждебными и сам их не разбирает.
+Общий срок проверки блока, запросы к модели, разбор операторов до исполнения и снятие
+имён схем — в сценарии (`portal/tools/sql_run.py`): порт ничего не знает о модели, а
+тексты операторов считает враждебными и сам их не разбирает.
 """
 
 from collections.abc import Sequence
@@ -46,12 +46,16 @@ class SandboxSetupError(Exception):
 
 
 class SandboxQueryError(Exception):
-    """Ошибка исполнения запроса либо результат больше предела; `message` уже обрезано."""
+    """Ошибка исполнения запроса либо результат больше предела; `message` уже обрезано.
 
-    def __init__(self, message: str) -> None:
-        """Запомнить сообщение СУБД (недоверенный текст)."""
+    `fixture` — тестовые данные, прочитанные перед запросом: они есть при любой причине.
+    """
+
+    def __init__(self, message: str, fixture: Sequence[SandboxTable]) -> None:
+        """Запомнить сообщение СУБД (недоверенный текст) и тестовые данные."""
         super().__init__()
         self.message = message
+        self.fixture = fixture
 
 
 class SandboxSlot(Protocol):
@@ -60,9 +64,9 @@ class SandboxSlot(Protocol):
     async def run(self, setup: Sequence[str], query: str) -> SandboxRun:
         """Одна попытка: новое соединение и транзакция, которая всегда откатывается.
 
-        Отмена задачи (общий срок, остановка, потеря сессии) принудительно завершает
-        сеанс на сервере. Исключения: `SandboxUnavailableError`, `SandboxSetupError`,
-        `SandboxQueryError`.
+        Имена схем в текстах уже сняты сценарием. Отмена задачи (общий срок, остановка,
+        потеря сессии) принудительно завершает сеанс на сервере. Исключения:
+        `SandboxUnavailableError`, `SandboxSetupError`, `SandboxQueryError`.
         """
         ...
 

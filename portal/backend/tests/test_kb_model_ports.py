@@ -222,7 +222,9 @@ async def test_scores_come_in_document_order_through_real_client_and_stub(
     assert await reranker.scores("срок аренды", documents) == [0.0, 1.0, 0.5]
 
 
-@pytest.mark.parametrize("failure", ["status", "model", "refused", "partial", "garbage", "slow"])
+@pytest.mark.parametrize(
+    "failure", ["status", "model", "refused", "partial", "garbage", "huge", "slow"]
+)
 async def test_every_reranker_failure_is_one_port_error(
     stub: tuple[str, httpx.AsyncClient], settings: Settings, failure: str
 ) -> None:
@@ -234,7 +236,12 @@ async def test_every_reranker_failure_is_one_port_error(
         if failure == "slow":
             await asyncio.sleep(5)
         body: Any = {"results": [{"index": 0, "relevance_score": 0.9}]}
-        return httpx.Response(200, json="не то" if failure == "garbage" else body)
+        if failure == "garbage":
+            body = "не то"
+        elif failure == "huge":
+            # Целое, которое не помещается в число с плавающей точкой.
+            body = {"results": [{"index": index, "relevance_score": 10**400} for index in (0, 1)]}
+        return httpx.Response(200, json=body)
 
     if failure == "status":
         reranker = _reranker(settings, url, client)

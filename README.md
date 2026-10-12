@@ -23,7 +23,7 @@ vLLM (Qwen3.8-27B-FP8) → Bifrost (API-ключи, лимиты) → Caddy (HTT
 | Каталог | Что там |
 |---|---|
 | `deploy/` | `docker-compose.yml`, `.env.example`, Caddyfile, конфиги Bifrost и мониторинга, systemd-юнит |
-| `scripts/` | установка по этапам, preflight, сертификат, запуск стека, смоук-тест, ключи, резервная копия, бенчмарк (uv-проект) |
+| `scripts/` | установка по этапам, preflight, сертификат, запуск стека, смоук-тест, ключи, резервная копия, релиз на работающей ВМ, бенчмарк (uv-проект) |
 | `portal/backend/` | бэкенд портала: FastAPI, воркер базы знаний, миграции, `config/*.yaml` |
 | `portal/frontend/` | интерфейс: React, `@skbkontur/react-ui`; `e2e/` — сквозные тесты Playwright |
 | `portal/dev/` | стенд без GPU с заглушкой модели |
@@ -47,15 +47,20 @@ make cert                 # сертификат Let's Encrypt для LLM_HOSTNA
 make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=corp PROFILES=embeddings   # этап 2: Caddy + Bifrost (или TLS_MODE=internal)
 make key NAME=app-crm     # ключ клиента
 
-make key NAME=portal      # этап 3: ключ портала — вписать в PORTAL_LLM_API_KEY в deploy/.env
-make portal               # портал сотрудников
+make key NAME=portal RERANK=1   # этап 3: ключ портала — вписать в PORTAL_LLM_API_KEY в deploy/.env
+make portal PROFILES=embeddings,rerank GPU_MEM_UTIL=0.81   # портал сотрудников с реранкером поиска; без него — make portal
 make portal-admin LOGIN=<логин> NAME="<ФИО>"   # первый администратор
 make backup DIR=<каталог вне репозитория>      # резервная копия
 ```
 
+Обновление работающего сервиса до версии портала 0.5 — не повтор этапа, а порядок релиза
+(runbook §4.6): `make release-prepare`, `make release-rehearse`, `make release-backup`,
+`make portal`, при сбое — `make release-rollback`; затем переобработка документов —
+`make portal-reprocess-start` (runbook §3.10).
+
 `make help` — полный список команд. Локальные проверки без GPU — `make check`; стенд
 портала и сквозные тесты — `make dev-up`, `make dev-reset`, `make dev-down`,
-`make dev-test-install`, `make dev-test` (runbook §6).
+`make dev-test-install`, `make dev-test`, `make dev-check-stand` (runbook §6).
 
 Адрес сервиса из интернета — `https://llm.<домен>:18443` (проброс
 `195.122.229.203:18443 → 192.168.25.8:8080`):

@@ -182,7 +182,8 @@ class AsyncpgSqlSandbox:
         self._retired: set[int] = set()
         self._users: set[UUID] = set()
         self._waiters: list[asyncio.Future[None]] = []
-        self._cleanups: set[asyncio.Task[bool]] = set()
+        # Последняя уборка сеансов каждого места: пока она идёт, место не выдаётся.
+        self._cleanups: dict[int, asyncio.Task[bool]] = {}
 
     @asynccontextmanager
     async def slot(self, user_id: UUID) -> AsyncIterator[SandboxSlot]:
@@ -215,8 +216,22 @@ class AsyncpgSqlSandbox:
 
     def _release(self, user_id: UUID, number: int) -> None:
         self._users.discard(user_id)
+        cleanup = self._cleanups.get(number)
+        if cleanup is None or cleanup.done():
+            self._return(number)
+        else:
+            # Держатель места отменён, пока шла уборка его сеансов: она продолжается в
+            # фоне и сняла бы сеанс следующей проверки, получи та это место сейчас.
+            cleanup.add_done_callback(lambda _: self._return(number))
+            self._wake()
+
+    def _return(self, number: int) -> None:
+        """Вернуть место в свободные."""
         if number not in self._retired:
             self._free.add(number)
+        self._wake()
+
+    def _wake(self) -> None:
         waiters, self._waiters = self._waiters, []
         for waiter in waiters:
             if not waiter.done():
@@ -282,8 +297,7 @@ class AsyncpgSqlSandbox:
     async def force(self, number: int) -> None:
         """Принудительно завершить сеансы места — и тогда, когда сама задача отменена."""
         task = asyncio.ensure_future(self.terminate_sessions(number))
-        self._cleanups.add(task)
-        task.add_done_callback(self._cleanups.discard)
+        self._cleanups[number] = task
         if not await asyncio.shield(task):
             # Следующая выдача места повторит завершение и без него место не выдаст.
             logger.warning("sandbox sessions not terminated", extra={"slot": number})
@@ -370,11 +384,11 @@ class _Slot:
         try:
             rows = await untrusted(partial(self._query, connection, query))
         except _TooLargeError:
-            raise SandboxQueryError(_RESULT_TOO_LARGE) from None
+            raise SandboxQueryError(_RESULT_TOO_LARGE, fixture) from None
         except _UnreadableError:
-            raise SandboxQueryError(_RESULT_UNREADABLE) from None
+            raise SandboxQueryError(_RESULT_UNREADABLE, fixture) from None
         if isinstance(rows, _Rejected):
-            return SandboxQueryError(rows.message)
+            return SandboxQueryError(rows.message, fixture)
         await self._guard(connection, schema)
         result = await self._result(connection, rows) if rows.attributes else None
         return SandboxRun(fixture, result, rows.affected_rows)

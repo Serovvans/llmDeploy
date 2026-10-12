@@ -17,7 +17,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 
 import { api, isAbort, type KbUploadTarget } from '../../api/client';
 import type { KbScope, PortalConfig } from '../../api/types';
-import { UploadQueue } from '../../chat/uploadQueue';
+import { useMediaUploads } from '../../chat/MediaUploads';
 import {
   checkKbFile,
   isKbMedia,
@@ -83,8 +83,11 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
   const [isCogis, setIsCogis] = useState(props.cogis ?? false);
   const [noFiles, setNoFiles] = useState(false);
   const [confirmingAbort, setConfirmingAbort] = useState(false);
-  const [mediaUploads] = useState(() => new UploadQueue());
-  const [documentUploads] = useState(() => new AbortController());
+  // Очередь записей — общая с чатом: пока запись загружается там, запись окна ждёт.
+  const mediaUploads = useMediaUploads();
+  const queued = useRef(new Set<string>());
+  // Свой на каждое открытие окна: создаётся эффектом ниже и прерывается вместе с окном.
+  const documentUploads = useRef(new AbortController());
   const uploader = useRef<FileUploader>(null);
   const counter = useRef(0);
   const uploadedInRun = useRef(0);
@@ -117,6 +120,17 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
     }
   }, [busy, files, onClose]);
 
+  // Окно закрыто любым способом (в том числе кнопкой «Назад» браузера): незагруженное не загружается.
+  useEffect(() => {
+    const controller = new AbortController();
+    const keys = queued.current;
+    documentUploads.current = controller;
+    return () => {
+      keys.forEach((key) => mediaUploads.cancel(key));
+      controller.abort();
+    };
+  }, [mediaUploads]);
+
   // Пока идёт загрузка, браузер переспрашивает о закрытии вкладки (концепция §5.6).
   useEffect(() => {
     if (!busy) {
@@ -133,7 +147,7 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
       counter.current += 1;
       const error = config && checkKbFile(file, config);
       return {
-        key: `file-${counter.current}`,
+        key: `kb-file-${counter.current}`,
         file,
         media: isKbMedia(file, config),
         status: error ? 'failed' : 'picked',
@@ -183,19 +197,19 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
       current.map((item) => (keys.has(item.key) ? { ...item, status: 'waiting', percent: 0, error: null, retry: false } : item)),
     );
     for (const item of items.filter((candidate) => candidate.media)) {
+      queued.current.add(item.key);
       mediaUploads.enqueue(item.key, (signal) =>
         upload(item, () => api.uploadKbMedia(item.file, target, (percent) => patch(item.key, { percent }), signal)),
       );
     }
     const documents = items.filter((candidate) => !candidate.media);
+    const { signal } = documentUploads.current;
     void (async () => {
       for (const item of documents) {
-        if (documentUploads.signal.aborted) {
+        if (signal.aborted) {
           return;
         }
-        await upload(item, () =>
-          api.uploadKbDocument(item.file, { ...target, isCogis: scope === 'shared' && isCogis }, documentUploads.signal),
-        );
+        await upload(item, () => api.uploadKbDocument(item.file, { ...target, isCogis: scope === 'shared' && isCogis }, signal));
       }
     })();
   };
@@ -212,11 +226,8 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
 
   const requestClose = () => (busy ? setConfirmingAbort(true) : onClose());
 
-  const abort = () => {
-    mediaUploads.clear();
-    documentUploads.abort();
-    onClose();
-  };
+  /** Загрузки прерывает само закрытие окна — тем же путём, что и любое другое его исчезновение. */
+  const abort = onClose;
 
   return (
     <Modal width={560} ignoreBackgroundClick onClose={requestClose}>

@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 
 import { ChatProvider } from './chat/ChatProvider';
+import { MediaUploadsProvider } from './chat/MediaUploads';
 import { DocparseProvider } from './docparse/DocparseProvider';
 import { AppShell } from './components/AppShell';
 import { ChatScreen } from './screens/ChatScreen';
@@ -62,6 +63,7 @@ function Workspace() {
   }
   const user = session.user;
   return (
+    <MediaUploadsProvider>
     <ChatProvider config={config}>
       <DocparseProvider config={config}>
       <AppShell user={user}>
@@ -79,6 +81,7 @@ function Workspace() {
       </AppShell>
       </DocparseProvider>
     </ChatProvider>
+    </MediaUploadsProvider>
   );
 }
 

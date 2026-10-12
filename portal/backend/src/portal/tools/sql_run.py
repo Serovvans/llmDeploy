@@ -57,6 +57,7 @@ SkipReason = Literal[
     "unparsed",
     "multiple_statements",
     "statement_not_supported",
+    "table_name_conflict",
     "block_limit",
     "test_data_failed",
 ]
@@ -78,11 +79,25 @@ _MODEL_ERRORS = (ModelUnavailableError, ModelOverloadedError, ContextOverflowErr
 _UNFINISHED: frozenset[RunStatus] = frozenset({"pending", "running"})
 
 
+@dataclass(frozen=True)
+class ParsedSql:
+    """Разбор текста до исполнения.
+
+    `bare` — текст единственного оператора без имён схем у таблиц: таким он уходит в
+    песочницу, у проверки схема одна. `name_conflict` — одно имя таблицы стоит с разными
+    схемами либо и со схемой, и без неё: без схем это был бы уже другой запрос.
+    """
+
+    kinds: Sequence[StatementKind]
+    bare: str
+    name_conflict: bool
+
+
 class StatementClassifier(Protocol):
     """Разбор текста на операторы до исполнения; реализация — на `sqlglot`."""
 
-    async def statements(self, sql: str, dialect: str) -> Sequence[StatementKind] | None:
-        """Виды операторов по порядку; `None` — текст не разобран либо превышен предел."""
+    async def statements(self, sql: str, dialect: str) -> ParsedSql | None:
+        """Разбор текста; `None` — текст не разобран либо превышен предел."""
         ...
 
 
@@ -101,6 +116,7 @@ class _Block:
     index: int
     line: int
     text: str
+    bare: str = ""
     kind: StatementKind = "other"
     status: RunStatus = "pending"
     reason: SkipReason | None = None
@@ -188,24 +204,26 @@ class SqlTestRunner:
         if position >= self._settings.max_blocks:
             block.skip("block_limit")
             return
-        kinds = await self._classifier.statements(block.text, dialect)
-        if not kinds:
+        parsed = await self._classifier.statements(block.text, dialect)
+        if parsed is None or not parsed.kinds:
             block.skip("unparsed")
-        elif len(kinds) > 1:
+        elif len(parsed.kinds) > 1:
             block.skip("multiple_statements")
-        elif kinds[0] not in _CHECKED:
+        elif parsed.kinds[0] not in _CHECKED:
             block.skip("statement_not_supported")
+        elif parsed.name_conflict:
+            block.skip("table_name_conflict")
         else:
-            block.kind = kinds[0]
+            block.kind, block.bare = parsed.kinds[0], parsed.bare
 
     async def _sole(
         self, sql: str, dialect: str, allowed: frozenset[StatementKind]
-    ) -> StatementKind | None:
-        """Вид оператора, если текст — ровно один оператор из `allowed`; иначе `None`."""
-        kinds = await self._classifier.statements(sql, dialect)
-        if kinds is None or len(kinds) != 1 or kinds[0] not in allowed:
+    ) -> ParsedSql | None:
+        """Разбор текста, если он — ровно один оператор из `allowed`; иначе `None`."""
+        parsed = await self._classifier.statements(sql, dialect)
+        if parsed is None or len(parsed.kinds) != 1 or parsed.kinds[0] not in allowed:
             return None
-        return kinds[0]
+        return parsed
 
     async def _check(
         self, user_id: UUID, schema: str, dialect: str, block: _Block, publish: Callable[[], None]
@@ -231,30 +249,34 @@ class SqlTestRunner:
 
     async def _attempts(self, slot: SandboxSlot, schema: str, dialect: str, block: _Block) -> None:
         """Тестовые данные, запрос и исправления; исход записывается в блок."""
-        setup = await self._test_data(schema, block.text, dialect)
-        if setup is None:
+        prepared = await self._test_data(schema, block.text, dialect)
+        if prepared is None:
             block.skip("test_data_failed")
             return
-        sql, kind = block.text, block.kind
+        # Модели и пользователю — тексты как написаны; в песочницу — без имён схем.
+        setup, bare_setup = prepared
+        sql, bare, kind = block.text, block.bare, block.kind
         first_error = last_error = None
+        last_fixture: Sequence[SandboxTable] | None = None
         for attempt in range(self._settings.fix_attempts + 1):
             if attempt:
                 fixed = await self._fixed(schema, setup, sql, last_error or "", dialect)
                 if fixed is None:
                     continue  # негодное исправление — неудачная попытка
-                sql, kind = fixed
+                sql, parsed = fixed
+                bare, kind = parsed.bare, parsed.kinds[0]
             try:
-                run = await slot.run(setup, sql)
+                run = await slot.run(bare_setup, bare)
             except SandboxSetupError:
                 block.skip("test_data_failed")
                 return
             except SandboxQueryError as failure:
-                last_error = failure.message
+                last_error, last_fixture = failure.message, failure.fixture
                 first_error = first_error or last_error
                 continue
             self._succeed(block, run, kind, first_error, sql)
             return
-        block.status, block.error = "failed", last_error
+        block.status, block.error, block.fixture = "failed", last_error, last_fixture
 
     @staticmethod
     def _succeed(
@@ -284,8 +306,10 @@ class SqlTestRunner:
         except _MODEL_ERRORS:
             return None
 
-    async def _test_data(self, schema: str, sql: str, dialect: str) -> list[str] | None:
-        """Операторы подготовки от модели; `None` — пригодных данных нет.
+    async def _test_data(
+        self, schema: str, sql: str, dialect: str
+    ) -> tuple[list[str], list[str]] | None:
+        """Операторы подготовки от модели и они же без имён схем; `None` — данных нет.
 
         Каждый оператор — ровно один `CREATE TABLE` без `AS SELECT` либо `INSERT … VALUES`.
         """
@@ -297,20 +321,24 @@ class SqlTestRunner:
             return None
         if not isinstance(statements, list) or not statements:
             return None
+        bare = []
         for statement in statements:
             if not isinstance(statement, str):
                 return None
-            if await self._sole(statement, dialect, _SETUP) is None:
+            parsed = await self._sole(statement, dialect, _SETUP)
+            if parsed is None:
                 return None
-        return statements
+            bare.append(parsed.bare)
+        return statements, bare
 
     async def _fixed(
         self, schema: str, setup: Sequence[str], sql: str, error: str, dialect: str
-    ) -> tuple[str, StatementKind] | None:
-        """Исправленный запрос от модели и его вид; `None` — попытка неудачна.
+    ) -> tuple[str, ParsedSql] | None:
+        """Исправленный запрос от модели и его разбор; `None` — попытка неудачна.
 
         Сообщение СУБД — данные в размеченном блоке, а не указания. Исправление проходит
-        тот же отбор, что блок ответа: один оператор разрешённого вида.
+        тот же отбор, что блок ответа: один оператор разрешённого вида без совпадения
+        имён таблиц.
         """
         user = "\n".join(
             [
@@ -325,5 +353,5 @@ class SqlTestRunner:
         fixed = next((b.text.strip() for b in answer_sql_blocks(reply or "") if b.closed), None)
         if fixed is None:
             return None
-        kind = await self._sole(fixed, dialect, _CHECKED)
-        return None if kind is None else (fixed, kind)
+        parsed = await self._sole(fixed, dialect, _CHECKED)
+        return None if parsed is None or parsed.name_conflict else (fixed, parsed)

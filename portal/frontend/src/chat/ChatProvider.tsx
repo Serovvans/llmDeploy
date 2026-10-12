@@ -14,6 +14,7 @@ import {
   uploadErrorText,
 } from './files';
 import { readCollections, storeCollections } from './knowledge';
+import { useMediaUploads } from './MediaUploads';
 import {
   chatReducer,
   EMPTY_DRAFT,
@@ -24,7 +25,6 @@ import {
   type Draft,
   type DraftAttachment,
 } from './state';
-import { UploadQueue } from './uploadQueue';
 
 const MODE_STORAGE_KEY = 'portal.chat.mode';
 
@@ -163,7 +163,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
   const fileCounter = useRef(0);
   // Чаты, созданные первым вложением: строка истории появляется после первого отправленного вопроса.
   const unlisted = useRef(new Map<string, Dialog>());
-  const [mediaUploads] = useState(() => new UploadQueue());
+  const mediaUploads = useMediaUploads();
   // Файлы нового чата, которые ждут его создания: убранный за это время файл загружаться не должен.
   const awaitingDialog = useRef(new Set<string>());
 
@@ -173,11 +173,8 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
 
   useEffect(() => {
     const open = streams.current;
-    return () => {
-      open.forEach((controller) => controller.abort());
-      mediaUploads.clear();
-    };
-  }, [mediaUploads]);
+    return () => open.forEach((controller) => controller.abort());
+  }, []);
 
   const setMode = useCallback((next: AnswerMode) => {
     setModeState(next);
@@ -701,7 +698,15 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
   );
 
   const addDialog = useCallback((dialog: Dialog) => dispatch({ type: 'dialogUpserted', dialog, toTop: true }), []);
-  const forgetDialog = useCallback((id: string) => dispatch({ type: 'dialogRemoved', id }), []);
+
+  /** Диалога больше нет: его записи не должны догружаться и занимать очередь остальных. */
+  const forgetDialog = useCallback(
+    (id: string) => {
+      stateRef.current.drafts[id]?.attachments.forEach((item) => mediaUploads.cancel(item.key));
+      dispatch({ type: 'dialogRemoved', id });
+    },
+    [mediaUploads],
+  );
 
   const stop = useCallback((id: string) => streams.current.get(id)?.abort(), []);
 
@@ -709,11 +714,14 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
     dispatch({ type: 'dialogUpserted', dialog: await api.renameDialog(id, title), toTop: false });
   }, []);
 
-  const remove = useCallback(async (id: string) => {
-    streams.current.get(id)?.abort();
-    await api.deleteDialog(id);
-    dispatch({ type: 'dialogRemoved', id });
-  }, []);
+  const remove = useCallback(
+    async (id: string) => {
+      streams.current.get(id)?.abort();
+      await api.deleteDialog(id);
+      forgetDialog(id);
+    },
+    [forgetDialog],
+  );
 
   const value = useMemo<ChatApi>(
     () => ({

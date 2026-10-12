@@ -232,6 +232,35 @@ async def test_statement_timeout_and_forced_termination_on_cancel(
     assert (await _run(patient, SETUP, "SELECT 1")).result is not None
 
 
+async def test_cleanup_left_in_background_does_not_end_the_next_check(
+    settings: Settings, config: SqlSandboxSettings
+) -> None:
+    """Вторая отмена застаёт уборку сеансов: место не выдаётся, пока она не закончилась."""
+    sandbox = _sandbox(config, max_parallel=1, statement_timeout_seconds=600)
+    first = asyncio.create_task(_run(sandbox, SETUP, "SELECT pg_sleep(600)"))
+    sessions = "SELECT count(*) FROM pg_stat_activity WHERE usename = 'sandbox_run_1'"
+    admin = await _admin(settings, DATABASE)
+    try:
+        async with asyncio.timeout(5):
+            while not await admin.fetchval(sessions + " AND query LIKE 'SELECT pg_sleep%'"):
+                await asyncio.sleep(0.05)
+            second = asyncio.create_task(_run(sandbox, SETUP, "SELECT pg_sleep(0.5)"))
+            first.cancel()
+            # Уборка сняла сеанс и ждёт, чтобы убедиться: в этот промежуток место, выданное
+            # сразу, прошло бы проверку чистоты, а следующий её круг снял бы новый сеанс.
+            while await admin.fetchval(sessions):
+                await asyncio.sleep(0)
+    finally:
+        await admin.close()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert (await second).result is not None
+    await _no_sessions(settings)
+    assert await _leftovers(settings) == (0, 0)
+
+
 async def test_concurrent_checks_do_not_see_each_other(
     settings: Settings, config: SqlSandboxSettings
 ) -> None:
@@ -420,6 +449,8 @@ async def test_statement_with_parameters_is_refused_as_a_query_error(
     with pytest.raises(SandboxQueryError) as failed:
         await _run(sandbox, SETUP, "SELECT 1 / (id - 1) FROM parcels ORDER BY id DESC")
     assert failed.value.message == "division by zero"
+    # Данные, на которых запрос не выполнился, приходят вместе с ошибкой.
+    assert [(table.table, len(table.rows)) for table in failed.value.fixture] == [("parcels", 2)]
     assert (await _run(sandbox, SETUP, "SELECT 1")).result is not None
     await _no_sessions(settings)
     assert await _leftovers(settings) == (0, 0)

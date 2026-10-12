@@ -7,12 +7,14 @@
 Проверки через клиентский эндпоинт с ключом Bifrost, модель ``default``:
 текст; ``chat_template_kwargs: {"enable_thinking": false}`` доходит до vLLM через Bifrost
 (в ответе нет рассуждений); запрос без ``reasoning_effort`` — так портал шлёт режим
-«Вдумчиво»; изображение; ``response_format: json_schema`` (ответ валидируется по схеме);
+«Вдумчиво», в ответе обязано быть рассуждение; изображение; ``response_format:
+json_schema`` (ответ валидируется по схеме);
 tool call. Отрицательные проверки (лимит ключа не расходуют): запрос без ключа
 и с неверным ключом получает 401/403; ``/api/governance/virtual-keys``, ``/metrics`` и ``/``
 через 443 отдают 404. Caddy проксирует в Bifrost только четыре пути —
 ``/v1/chat/completions``, ``/v1/completions``, ``/v1/embeddings``, ``/v1/models``
-(docs/design.md §3.3); остальное под ``/v1`` — 404 при любом ``SITE_MODE``.
+(docs/design.md §3.3); остальное под ``/v1``, включая ``/v1/rerank``, — 404 при любом
+``SITE_MODE``.
 
 При ``SITE_MODE=portal`` (третий этап, docs/portal-design.md §3, §3.2) вместо «всё, кроме
 ``/v1/*``, — 404» проверяется портал: ``/`` и ``/login`` отдают страницу с заголовками
@@ -21,9 +23,12 @@ tool call. Отрицательные проверки (лимит ключа н
 cookie — 401; ``POST`` без ``X-Portal-Csrf`` — 403.
 
 С флагом ``--site-only`` выполняются только проверки обвязки (запрос без ключа и то, что
-отдаёт сайт): ключ не нужен, к модели запросов нет. С ``--compose-file ФАЙЛ`` добавляется
-проверка, что все сервисы включённых профилей запущены и здоровы (``docker compose ps``;
-только на машине, где работает стек).
+отдаёт сайт): ключ не нужен, к основной модели запросов нет. С ``--compose-file ФАЙЛ``
+добавляется проверка, что все сервисы включённых профилей запущены и здоровы (``docker
+compose ps``; только на машине, где работает стек). При ``SITE_MODE=portal`` с этим же
+флагом проверяются сервисы пакета 0.5 (docs/portal-design.md §8.2): контейнер песочницы
+SQL здоров; при профиле ``rerank`` реранкер отвечает через Bifrost на loopback-порту ВМ
+с ключом портала — так, как к нему обращается сам портал.
 
 С флагом ``--check-rate-limit N`` выполняется только проверка лимита: до N запросов подряд,
 ожидается HTTP 429 от Bifrost. Для неё нужен отдельный ключ с малым лимитом запросов
@@ -43,8 +48,14 @@ Qwen3.8 (§3.1): мышление включено по умолчанию с ``
     LLM_HOSTNAME  DNS-имя сервиса, если LLM_BASE_URL не задан.
     LLM_API_KEY   ключ Bifrost ``sk-bf-...``; с ``--direct`` — VLLM_API_KEY (обязателен,
                   кроме ``--site-only``).
-    SITE_MODE     что сайт отдаёт помимо ``/v1/*``: ``api`` (по умолчанию) или ``portal``;
-                  та же переменная, что в ``deploy/.env``.
+    SITE_MODE     что сайт отдаёт помимо ``/v1/*``: ``api`` (и пустое значение) или
+                  ``portal``; та же переменная, что в ``deploy/.env``. Если переменной в
+                  окружении нет вовсе (запуск с рабочей станции, без ``deploy/.env``),
+                  режим определяется по ответу ``/``: 200 — портал, 404 — ``api``.
+    COMPOSE_PROFILES, PORTAL_LLM_API_KEY, BIFROST_ADMIN_URL
+                  для проверки реранкера: она выполняется, если среди профилей есть
+                  ``rerank``; ключ портала и адрес Bifrost на ВМ (по умолчанию
+                  ``http://127.0.0.1:8081``) — те же, что в ``deploy/.env`` и ``keys.py``.
     LLM_CA_CERT   путь к PEM корпоративного CA для проверки TLS. Для сертификата
                   корпоративного CA фактически обязателен: httpx доверяет только набору
                   certifi, а не системному хранилищу ОС. Альтернатива — SSL_CERT_FILE.
@@ -108,6 +119,8 @@ V1_CLOSED_ROUTES = (
     ("GET", "/v1/"),
     ("POST", "/v1/async/chat/completions"),
     ("POST", "/v1/mcp/tool/execute"),
+    # Реранкер — только для портала по docker-сети (docs/design.md §3.9).
+    ("POST", "/v1/rerank"),
 )
 SITE_MODES = ("api", "portal")
 # Не /api/*: уходят в статику портала, а не в бэкенд и не в Bifrost (docs/portal-api.md §1.1).
@@ -119,6 +132,15 @@ PORTAL_SESSION_PATH = "/api/auth/session"
 # Любой POST /api/*: без заголовка X-Portal-Csrf бэкенд отказывает раньше, чем смотрит сессию.
 PORTAL_CSRF_PROBE_PATH = "/api/auth/logout"
 COMPOSE_TIMEOUT_S = 60
+SQL_SANDBOX_SERVICE = "sql-sandbox"
+RERANK_PROFILE = "rerank"
+# Bifrost на ВМ: только loopback (deploy/docker-compose.yml); тот же адрес, что у keys.py.
+DEFAULT_BIFROST_URL = "http://127.0.0.1:8081"
+RERANK_PATH = "/v1/rerank"
+RERANK_MODEL = "rerank"
+RERANK_QUERY = "Какой город — столица Франции?"
+# Первый документ отвечает на вопрос, второй — нет: оценка первого обязана быть выше.
+RERANK_DOCUMENTS = ("Париж — столица Франции.", "Борщ варят из свёклы и капусты.")
 # vLLM отдаёт рассуждения в reasoning_content (старые версии) или reasoning (новые).
 REASONING_FIELDS = ("reasoning_content", "reasoning")
 TLS_HINT = (
@@ -161,13 +183,26 @@ class SmokeTestError(Exception):
 
 
 @dataclass(frozen=True)
+class RerankAccess:
+    """Как портал обращается к реранкеру: адрес Bifrost на ВМ и ключ портала."""
+
+    bifrost_url: str
+    api_key: str
+
+
+@dataclass(frozen=True)
 class Settings:
-    """Параметры подключения к клиентскому эндпоинту."""
+    """Параметры подключения к клиентскому эндпоинту.
+
+    ``site_mode`` ``None`` — переменной ``SITE_MODE`` в окружении нет, режим определяется
+    по ответу сайта. ``rerank`` ``None`` — профиль ``rerank`` не включён.
+    """
 
     base_url: str
     api_key: str
     ca_cert: str | None
-    site_mode: str = "api"
+    site_mode: str | None = "api"
+    rerank: RerankAccess | None = None
 
 
 def load_settings(
@@ -196,11 +231,24 @@ def load_settings(
         raise SmokeTestError(f"LLM_CA_CERT указывает на несуществующий файл: {ca_cert}")
     if not ca_cert and env.get("TLS_MODE", "").strip() == "internal" and INTERNAL_CA_FILE.is_file():
         ca_cert = str(INTERNAL_CA_FILE)
-    site_mode = env.get("SITE_MODE", "").strip() or "api"
-    if site_mode not in SITE_MODES:
+    # Пустое значение — режим api, как в deploy/.env; переменной нет — режим неизвестен.
+    site_mode = (env["SITE_MODE"].strip() or "api") if "SITE_MODE" in env else None
+    if site_mode is not None and site_mode not in SITE_MODES:
         raise SmokeTestError(f"SITE_MODE={site_mode!r}: ожидается api или portal")
+    rerank = None
+    if RERANK_PROFILE in env.get("COMPOSE_PROFILES", "").split(","):
+        rerank = RerankAccess(
+            bifrost_url=(env.get("BIFROST_ADMIN_URL", "").strip() or DEFAULT_BIFROST_URL).rstrip(
+                "/"
+            ),
+            api_key=env.get("PORTAL_LLM_API_KEY", "").strip(),
+        )
     return Settings(
-        base_url=base_url.rstrip("/"), api_key=api_key, ca_cert=ca_cert, site_mode=site_mode
+        base_url=base_url.rstrip("/"),
+        api_key=api_key,
+        ca_cert=ca_cert,
+        site_mode=site_mode,
+        rerank=rerank,
     )
 
 
@@ -398,13 +446,21 @@ def check_thinking_disabled(client: httpx.Client) -> str:
 
 
 def check_thinking_default(client: httpx.Client) -> str:
-    """Запрос без ``reasoning_effort`` (режим «Вдумчиво» портала) принят: есть рассуждение."""
+    """Запрос без ``reasoning_effort`` (режим «Вдумчиво» портала) принят, модель рассуждает.
+
+    Ответа без рассуждения недостаточно: он значит, что по пути к модели мышление
+    выключено или заменено — «Вдумчиво» у портала тогда не отличается от «Быстро».
+    """
     message = complete(client, thinking_default_payload(), allow_truncated=True)
-    for field in (*REASONING_FIELDS, "content"):
+    for field in REASONING_FIELDS:
         value = message.get(field)
         if isinstance(value, str) and value.strip():
             return f"{field}: {value.strip()}"
-    raise SmokeTestError(f"в ответе нет ни рассуждения, ни content: {message}")
+    raise SmokeTestError(
+        "в ответе на запрос без reasoning_effort нет рассуждения "
+        f"({' / '.join(REASONING_FIELDS)}): режим «Вдумчиво» портала не думает. "
+        f"Проверьте --reasoning-parser vLLM и что Bifrost не меняет запрос; ответ: {message}"
+    )
 
 
 def check_image(client: httpx.Client) -> str:
@@ -524,6 +580,22 @@ def check_v1_closed_routes(client: httpx.Client, root: str) -> str:
 
 def _get_without_key(client: httpx.Client, url: str) -> httpx.Response:
     return send_with_key(client, "GET", url, api_key=None)
+
+
+def detect_site_mode(client: httpx.Client, root: str) -> str:
+    """Определить режим сайта по ответу ``/``: 200 — ``portal``, 404 — ``api``.
+
+    Нужен только там, где ``SITE_MODE`` взять неоткуда (рабочая станция). На ВМ режим
+    задаёт ``deploy/.env``: иначе портал, открытый по ошибке, сошёл бы за ожидаемый.
+    """
+    response = _get_without_key(client, root + "/")
+    if response.status_code == httpx.codes.OK:
+        return "portal"
+    if response.status_code == httpx.codes.NOT_FOUND:
+        return "api"
+    raise SmokeTestError(
+        f"режим сайта не определить: / → HTTP {response.status_code}; задайте SITE_MODE=api|portal"
+    )
 
 
 def portal_error_code(response: httpx.Response) -> str | None:
@@ -675,6 +747,50 @@ def check_services(compose_file: str, runner: ComposeRunner = run_compose) -> st
     return "healthy: " + ", ".join(expected)
 
 
+def check_service_healthy(
+    compose_file: str, service: str, runner: ComposeRunner = run_compose
+) -> str:
+    """Сервис ``service`` запущен и здоров; ``runner`` подменяется в тестах."""
+    problems = unhealthy_services([service], runner(compose_file, ["ps", "--format", "json"]))
+    if problems:
+        raise SmokeTestError(f"{problems[0]} (docker compose logs {service})")
+    return f"healthy: {service}"
+
+
+def rerank_payload() -> JsonObject:
+    """Запрос к реранкеру в том виде, в каком его шлёт портал (docs/portal-api.md §12.1)."""
+    return {"model": RERANK_MODEL, "query": RERANK_QUERY, "documents": list(RERANK_DOCUMENTS)}
+
+
+def check_rerank(client: httpx.Client, access: RerankAccess) -> str:
+    """Реранкер отвечает через Bifrost ключу портала и ставит подходящий документ выше."""
+    if not access.api_key:
+        raise SmokeTestError("PORTAL_LLM_API_KEY пуст: реранкер проверяется ключом портала")
+    response = send_with_key(
+        client, "POST", access.bifrost_url + RERANK_PATH, access.api_key, rerank_payload()
+    )
+    if response.status_code != httpx.codes.OK:
+        raise SmokeTestError(
+            f"{describe_error(response)} — портал при таком ответе ищет без переранжирования. "
+            "Ответ 400 «could not auto resolve a provider» значит, что ключу портала не выдана "
+            "модель rerank: make keys, затем make key-rerank ID=<id ключа portal>"
+        )
+    try:
+        scores = {
+            int(item["index"]): float(item["relevance_score"])
+            for item in response.json()["results"]
+        }
+        relevant, irrelevant = (scores[index] for index in range(len(RERANK_DOCUMENTS)))
+    except (ValueError, LookupError, TypeError) as exc:
+        raise SmokeTestError(f"неожиданная форма ответа реранкера: {response.text[:300]}") from exc
+    if relevant <= irrelevant:
+        raise SmokeTestError(
+            f"подходящий документ оценён не выше постороннего ({relevant} и {irrelevant}): "
+            "проверьте RERANK_MODEL_ID и журнал vllm-rerank"
+        )
+    return f"оценки: {relevant:.3f} > {irrelevant:.3f}"
+
+
 def _is_tls_error(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while current is not None:
@@ -729,11 +845,13 @@ def build_checks(
     site_mode: str = "api",
     site_only: bool = False,
     compose_file: str | None = None,
+    rerank: RerankAccess | None = None,
 ) -> list[Check]:
     """Собрать список проверок.
 
     ``direct`` — без проверок сайта (их обеспечивает Caddy); ``site_only`` — без запросов к
-    модели; ``compose_file`` — добавить проверку здоровья сервисов.
+    модели; ``compose_file`` — добавить проверку здоровья сервисов, а при портале — ещё и
+    сервисов пакета 0.5: песочницы SQL и, если задан ``rerank``, реранкера.
     """
     checks: list[Check] = []
     if not site_only:
@@ -752,6 +870,12 @@ def build_checks(
         checks += build_site_checks(client, root, site_mode)
     if compose_file is not None:
         checks.append(("services", lambda: check_services(compose_file)))
+        if site_mode == "portal":
+            checks.append(
+                ("sql_sandbox", lambda: check_service_healthy(compose_file, SQL_SANDBOX_SERVICE))
+            )
+            if rerank is not None:
+                checks.append(("rerank", lambda: check_rerank(client, rerank)))
     return checks
 
 
@@ -802,13 +926,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     mode = "vLLM напрямую" if args.direct else "через Caddy и Bifrost"
-    logger.info(
-        "эндпоинт: %s (%s), модель: %s, сайт: %s",
-        settings.base_url,
-        mode,
-        MODEL,
-        settings.site_mode,
-    )
+    logger.info("эндпоинт: %s (%s), модель: %s", settings.base_url, mode, MODEL)
     try:
         client = build_client(settings)
     except ssl.SSLError as exc:
@@ -816,6 +934,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     root = site_root(settings.base_url)
     with client:
+        site_mode = settings.site_mode
+        if site_mode is None and not args.direct and args.check_rate_limit is None:
+            try:
+                site_mode = detect_site_mode(client, root)
+            except (SmokeTestError, httpx.HTTPError) as exc:
+                logger.error("%s", failure_message(exc))
+                return 1
+            logger.info("SITE_MODE не задан: режим сайта определён по ответу / — %s", site_mode)
         checks: list[Check]
         if args.check_rate_limit is not None:
             attempts: int = args.check_rate_limit
@@ -825,9 +951,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 client,
                 root,
                 direct=args.direct,
-                site_mode=settings.site_mode,
+                site_mode=site_mode or "api",
                 site_only=args.site_only,
                 compose_file=args.compose_file,
+                rerank=settings.rerank,
             )
         ok = run_checks(checks)
     print("ИТОГ: PASS" if ok else "ИТОГ: FAIL")
