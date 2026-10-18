@@ -303,7 +303,7 @@ describe('база знаний: добавление', () => {
     const dialog = await openAdd(user);
     expect(
       dialog.getByText(
-        'PDF, DOCX, TXT, MD, JPG, PNG — до 50 МБ каждый, PDF до 500 страниц. ' +
+        'PDF, DOCX, TXT, MD, JPG, PNG — до 200 МБ каждый, PDF до 3000 страниц. ' +
           'Аудио и видео с русской речью (MP3, WAV, M4A, OGG, FLAC, MP4, MKV, WebM, MOV) — до 2 ГБ и до 3 часов. ' +
           'Сканы распознаются, записи расшифровываются автоматически.',
       ),
@@ -352,41 +352,59 @@ describe('база знаний: добавление', () => {
         return ok(doc({ status: 'queued' }), 201);
       }
       if (name === 'длинный.pdf') {
-        return fail(422, 'too_many_pages', { details: { max_pages: 500 } });
+        return fail(422, 'too_many_pages', { details: { max_pages: 3000 } });
       }
       if (name === 'битый.pdf') {
         return fail(422, 'file_unreadable');
+      }
+      if (name === 'текст.docx') {
+        return fail(422, 'docx_too_large');
+      }
+      if (name === 'скриншоты.docx') {
+        return fail(422, 'docx_images_too_large');
+      }
+      if (name === 'место.pdf') {
+        return fail(507, 'storage_full');
       }
       throw new TypeError('Failed to fetch');
     });
     const dialog = await openAdd(user);
 
     const big = new File(['x'], 'огромный.pdf');
-    Object.defineProperty(big, 'size', { value: 52428801 });
+    Object.defineProperty(big, 'size', { value: 209715201 });
     pick(
       new File(['%PDF-'], 'хороший.pdf'),
       new File(['%PDF-'], 'длинный.pdf'),
       new File(['%PDF-'], 'битый.pdf'),
+      new File(['PK'], 'текст.docx'),
+      new File(['PK'], 'скриншоты.docx'),
+      new File(['%PDF-'], 'место.pdf'),
       new File(['%PDF-'], 'сеть.pdf'),
       new File(['x'], 'чертёж.dwg'),
       big,
     );
     // Тип и размер проверены до отправки.
     expect(dialog.getByText('Такой формат не поддерживается')).toBeInTheDocument();
-    expect(dialog.getByText('Файл больше 50 МБ')).toBeInTheDocument();
+    expect(dialog.getByText('Файл больше 200 МБ')).toBeInTheDocument();
 
     await user.click(dialog.getByRole('button', { name: t.upload.submit }));
-    expect(await dialog.findByText('В файле больше 500 страниц. Разделите его на части')).toBeInTheDocument();
+    expect(await dialog.findByText('В файле больше 3000 страниц. Разделите его на части')).toBeInTheDocument();
     expect(await dialog.findByText('Файл повреждён или защищён паролем')).toBeInTheDocument();
+    expect(await dialog.findByText('В документе слишком много содержимого помимо картинок. Разделите его на части')).toBeInTheDocument();
+    expect(
+      await dialog.findByText('Картинки в документе занимают слишком много места. Уменьшите их или разделите документ на части'),
+    ).toBeInTheDocument();
+    // Своё сообщение, а не общее «Портал временно не справляется…»; повтора нет (проверено ниже).
+    expect(await dialog.findByText('На сервере заканчивается место для файлов. Сообщите администратору')).toBeInTheDocument();
     expect(await dialog.findByText('Не удалось загрузить. Повторите')).toBeInTheDocument();
     expect(await screen.findByText('Добавлено документов: 1. Они появятся в ответах после обработки')).toBeInTheDocument();
     expect(dialog.getByText(t.upload.uploaded)).toBeInTheDocument();
     expect(dialog.getByRole('button', { name: t.upload.close })).toBeInTheDocument();
-    expect(server.callsTo('POST /api/kb/documents')).toHaveLength(4);
+    expect(server.callsTo('POST /api/kb/documents')).toHaveLength(7);
 
     // Повторное «Добавить» отправляет только файл, чья загрузка оборвалась.
     await user.click(dialog.getByRole('button', { name: t.upload.submit }));
-    await waitFor(() => expect(server.callsTo('POST /api/kb/documents')).toHaveLength(5));
+    await waitFor(() => expect(server.callsTo('POST /api/kb/documents')).toHaveLength(8));
     expect(((server.callsTo('POST /api/kb/documents').at(-1)?.body as FormData).get('file') as File).name).toBe('сеть.pdf');
   });
 
@@ -479,7 +497,7 @@ describe('база знаний: правки дизайн-ревью', () => {
     // «Повторить» запрашивает настройки сразу; заметка исчезает, выбранный файл остаётся.
     server.on('GET /api/config', () => ok(CONFIG));
     await user.click(dialog.getByRole('button', { name: texts.common.retry }));
-    expect(await dialog.findByText(/PDF, DOCX, TXT, MD, JPG, PNG — до 50 МБ/)).toBeInTheDocument();
+    expect(await dialog.findByText(/PDF, DOCX, TXT, MD, JPG, PNG — до 200 МБ/)).toBeInTheDocument();
     expect(dialog.queryByText(texts.common.configFailed)).not.toBeInTheDocument();
     expect(dialog.getByText('любой.xyz')).toBeInTheDocument();
 
@@ -890,7 +908,7 @@ describe('база знаний: добавление записей', () => {
     off.server.on('GET /api/config', () => ok({ ...CONFIG, media: { ...CONFIG.media, enabled: false } }));
     await waitFor(() => expect(off.server.callsTo('GET /api/config').length).toBeGreaterThan(0));
     dialog = await openAdd(off.user);
-    expect(dialog.getByText('PDF, DOCX, TXT, MD, JPG, PNG — до 50 МБ каждый, PDF до 500 страниц. Сканы распознаются автоматически.')).toBeInTheDocument();
+    expect(dialog.getByText('PDF, DOCX, TXT, MD, JPG, PNG — до 200 МБ каждый, PDF до 3000 страниц. Сканы распознаются автоматически.')).toBeInTheDocument();
     pick(sized('совещание.mp3', MB));
     expect(dialog.getByText(t.upload.unsupported)).toBeInTheDocument();
     expect(dialog.queryByText(t.upload.recordingNotice)).not.toBeInTheDocument();

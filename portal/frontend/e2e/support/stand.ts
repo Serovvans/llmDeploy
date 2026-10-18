@@ -1,6 +1,6 @@
 /** Стенд `portal/dev/`: адрес и команды бэкенда в контейнере `portal-api`. */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,6 +8,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 export const BASE_URL = process.env.PORTAL_E2E_BASE_URL ?? 'https://localhost:8443';
 export const COMPOSE_FILE = path.resolve(HERE, '../../../dev/docker-compose.yml');
+/** Накладка конфигурации стенда, которую compose монтирует в portal-api и portal-worker. */
+const STAND_OVERRIDE_FILE = path.resolve(HERE, '../../../dev/config.override.yaml');
 /** Состояние между глобальной настройкой и тестами: учётная запись администратора прогона. */
 export const STATE_DIR = path.resolve(HERE, '../.state');
 export const ADMIN_STATE_FILE = path.join(STATE_DIR, 'admin.json');
@@ -65,4 +67,54 @@ export function standMediaFiles(ownerId: string): number[] {
     `find /data/files/media/${ownerId} -type f -exec stat -c %s {} + 2>/dev/null || true`,
   ).toString('utf8');
   return listing.split('\n').filter(Boolean).map(Number);
+}
+
+/** Запрос к базе портала стенда; строки ответа без заголовков, поля через `|`. */
+export function standSql(query: string): string[] {
+  return standCompose('exec', '-T', 'portal-db', 'psql', '-U', 'portal', '-d', 'portal', '-At', '-c', query)
+    .toString('utf8')
+    .split('\n')
+    .filter(Boolean);
+}
+
+/** Журнал `portal-worker` с момента `since` (ISO 8601). */
+export function workerLog(since: string): string {
+  return standCompose('logs', '--no-color', '--no-log-prefix', '--since', since, 'portal-worker').toString('utf8');
+}
+
+/**
+ * Перезапускает `portal-worker` с накладкой конфигурации стенда, дополненной `extraYaml` — разделами
+ * верхнего уровня, которых в накладке нет (например, `kb:`). Возвращает функцию, которая
+ * перезапускает воркер с прежней накладкой. Файлы стенда не меняются: дополненная накладка и
+ * файл compose с её монтированием пишутся в каталог состояния прогона.
+ */
+export function restartWorkerWith(extraYaml: string): () => void {
+  const base = readFileSync(STAND_OVERRIDE_FILE, 'utf8');
+  for (const section of extraYaml.match(/^[A-Za-z_]+:/gm) ?? []) {
+    if (new RegExp(`^${section}`, 'm').test(base)) {
+      throw new Error(`Раздел ${section} уже есть в ${STAND_OVERRIDE_FILE}: дополнение его бы не слило, а заменило`);
+    }
+  }
+  mkdirSync(STATE_DIR, { recursive: true });
+  const override = path.join(STATE_DIR, 'worker-override.yaml');
+  const composeFile = path.join(STATE_DIR, 'worker-override.compose.yml');
+  writeFileSync(override, `${base}\n${extraYaml}`);
+  // Тома службы compose сливает по пути в контейнере: эта строка заменяет монтирование накладки.
+  writeFileSync(
+    composeFile,
+    `services:\n  portal-worker:\n    volumes:\n      - ${JSON.stringify(`${override}:/etc/portal/config.override.yaml:ro`)}\n`,
+  );
+  const up = ['up', '-d', '--no-build', '--no-deps', '--force-recreate', '--wait', 'portal-worker'];
+  standCompose('-f', composeFile, ...up);
+  return () => {
+    standCompose(...up);
+  };
+}
+
+/** Сколько запросов `chat/completions` получила заглушка модели с момента `since` (ISO 8601). */
+export function stubCompletions(since: string): number {
+  return standCompose('logs', '--no-color', '--no-log-prefix', '--since', since, 'bifrost')
+    .toString('utf8')
+    .split('\n')
+    .filter((line) => line.includes('POST /v1/chat/completions')).length;
 }

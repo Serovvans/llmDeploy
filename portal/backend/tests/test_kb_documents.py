@@ -2,7 +2,9 @@
 
 import asyncio
 import hashlib
+import io
 import threading
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ import pytest
 
 from portal.core.settings import Settings
 from portal.files.names import display_file_name as display_title
+from portal.files.ports import DocxTooLargeError, UnreadableDocumentError
 from portal.files.reader import ContentDocumentReader
 from tests import samples
 from tests.conftest import close_portal, make_portal
@@ -130,6 +133,84 @@ async def test_unreadable_and_too_long_files_are_refused_and_not_kept(
         assert list((settings.files.root / "kb").iterdir()) == []
     finally:
         await close_portal(portal)
+
+
+async def test_upload_is_refused_before_reading_the_form_when_volume_is_nearly_full(
+    settings: Settings,
+) -> None:
+    """`storage_full` (§8.1): тело не читается, поля формы и право ещё не проверены."""
+    media = settings.media.model_copy(update={"min_free_bytes": 2**62})
+    portal = await make_portal(settings.model_copy(update={"media": media}))
+    try:
+        client = await portal.employee()
+        for form in ({"scope": "shared", "is_cogis": "false"}, {"scope": "ministries"}, {}):
+            response = await client.post(
+                "/api/kb/documents", files={"file": ("a.txt", b"text")}, data=form
+            )
+            error = response.json()["error"]
+            assert (response.status_code, error["code"]) == (507, "storage_full")
+            assert error["message"] == (
+                "На сервере заканчивается место для файлов. Сообщите администратору."
+            )
+        assert await portal.rows("SELECT 1 FROM kb_documents") == []
+        assert not (settings.files.root / "kb").exists()
+    finally:
+        await close_portal(portal)
+
+
+@pytest.mark.parametrize(
+    ("raised", "code"),
+    [
+        (DocxTooLargeError("markup"), "docx_too_large"),
+        (DocxTooLargeError("images"), "docx_images_too_large"),
+        (UnreadableDocumentError(), "file_unreadable"),
+    ],
+)
+async def test_docx_limits_have_their_own_codes_on_upload(
+    portal: Portal, monkeypatch: pytest.MonkeyPatch, raised: Exception, code: str
+) -> None:
+    """Пределы DOCX по оглавлению (§1.5): свои коды; файл не сохраняется."""
+
+    def refuse(*_: Any) -> None:
+        raise raised
+
+    monkeypatch.setattr(ContentDocumentReader, "page_count", refuse)
+    client = await portal.employee()
+    response = await add_document(client, "отчёт.docx", samples.docx_file("Отчёт"))
+    assert (response.status_code, response.json()["error"]["code"]) == (422, code)
+    assert await portal.rows("SELECT 1 FROM kb_documents") == []
+    assert list((portal.container.settings.files.root / "kb").iterdir()) == []
+
+
+async def test_unreadable_on_type_detection_is_file_unreadable(
+    portal: Portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """С 0.16 `detect` бросает `UnreadableDocumentError` — как `page_count` (§1.5)."""
+
+    def unreadable(*_: Any) -> None:
+        raise UnreadableDocumentError
+
+    monkeypatch.setattr(ContentDocumentReader, "detect", unreadable)
+    client = await portal.employee()
+    response = await add_document(client, "архив.docx", b"PK")
+    assert (response.status_code, response.json()["error"]["code"]) == (422, "file_unreadable")
+    assert await portal.rows("SELECT 1 FROM kb_documents") == []
+
+
+async def test_zip_with_oversized_directory_is_refused_as_unreadable(portal: Portal) -> None:
+    """Оглавление ZIP больше `files.zip_max_directory_bytes` — отказ до открытия (§1.5, А-77)."""
+    limit = portal.container.settings.files.zip_max_directory_bytes
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", "<w:document/>")
+        # Запись оглавления — 46 байт плюс имя: этого числа записей хватает с запасом.
+        for number in range(limit // 46 + 1):
+            archive.writestr(f"x/{number:07d}", b"")
+    client = await portal.employee()
+    response = await add_document(client, "архив.docx", buffer.getvalue())
+    assert (response.status_code, response.json()["error"]["code"]) == (422, "file_unreadable")
+    assert await portal.rows("SELECT 1 FROM kb_documents") == []
 
 
 async def test_file_over_limit_is_refused_with_file_too_large(

@@ -55,6 +55,7 @@ INNER_MODULES = [
     "kb/recognizer.py",
     "kb/evaluation.py",
     "kb/outcomes.py",
+    "kb/slicing.py",
     "kb/images.py",
     "kb/recordings.py",
     "media/ports.py",

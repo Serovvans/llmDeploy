@@ -204,14 +204,14 @@ async def _eval_search(
     return format_report(report)
 
 
-async def _reprocess(settings: Settings, action: str, all_ready: bool) -> str:
+async def _reprocess(settings: Settings, action: str, all_ready: bool, images: bool) -> str:
     """Команды массовой переобработки: им нужна только база (§13.5)."""
     clock = SystemClock()
     engine = create_engine(settings)
     reprocessor = Reprocessor(SqlKbUnitOfWorkFactory(engine, clock), clock)
     try:
         if action == "start":
-            count = await reprocessor.start(all_ready=all_ready)
+            count = await reprocessor.start(all_ready=all_ready, images=images)
             return f"Документов поставлено на переобработку: {count}\n"
         if action == "pause":
             await reprocessor.set_paused(True)
@@ -229,6 +229,7 @@ async def _reprocess(settings: Settings, action: str, all_ready: bool) -> str:
         f"Документов со сбоем переобработки: {sum(status.errors.values())}",
         *(f"  {code}: {count}" for code, count in status.errors.items()),
         f"Пауза: {'да' if status.paused else 'нет'}",
+        f"Картинок с описанием прежней версии: {status.old_descriptions}",
     ]
     return "".join(f"{line}\n" for line in lines)
 
@@ -285,8 +286,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     actions = reprocess.add_subparsers(dest="action", required=True)
     start = actions.add_parser("start", help="поставить задания переобработки")
-    start.add_argument(
+    selection = start.add_mutually_exclusive_group()
+    selection.add_argument(
         "--all", action="store_true", help="всем готовым документам, а не только прежним"
+    )
+    selection.add_argument(
+        "--images",
+        action="store_true",
+        help="готовым PDF, DOCX и файлам-картинкам: картинки описываются заново",
     )
     actions.add_parser("pause", help="приостановить массовую переобработку")
     actions.add_parser("resume", help="возобновить массовую переобработку")
@@ -335,7 +342,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
         elif args.command == "reprocess":
             all_ready = getattr(args, "all", False)
-            sys.stdout.write(asyncio.run(_reprocess(settings, args.action, all_ready)))
+            images = getattr(args, "images", False)
+            sys.stdout.write(asyncio.run(_reprocess(settings, args.action, all_ready, images)))
         elif args.command in _KB_COMMANDS:
             if args.command == "worker":
                 configure_logging()

@@ -140,6 +140,12 @@ export function uploadErrorText(error: unknown, fileName: string, config: Portal
   if (isApiError(error, 'file_unreadable')) {
     return files.unreadable(fileName);
   }
+  if (isApiError(error, 'docx_too_large')) {
+    return files.docxTooLarge(fileName);
+  }
+  if (isApiError(error, 'docx_images_too_large')) {
+    return files.docxImagesTooLarge(fileName);
+  }
   return errorText(error);
 }
 

@@ -204,12 +204,20 @@ class DocumentRepository(Protocol):
         """Сохранить строку картинки."""
         ...
 
-    async def describe_image(self, image_id: UUID, description: str) -> None:
-        """Записать описание картинки."""
+    async def describe_image(self, image_id: UUID, description: str, *, pending: bool) -> None:
+        """Записать описание текущей версии (§8.6).
+
+        `pending` — у картинки описание прежней версии: новое ждёт замены индекса в
+        `pending_description`; иначе — в `description`.
+        """
         ...
 
-    async def delete_image(self, image_id: UUID) -> None:
-        """Удалить строку картинки; её фрагмент уходит каскадом."""
+    async def finish_images(self, document_id: UUID, image_ids: Sequence[UUID]) -> None:
+        """Картинки нового индекса при его замене (§10.6, шаг 2.1).
+
+        `image_ids` — картинки, на которые ссылаются новые фрагменты, по порядку индекса:
+        `ordinal` — по этому порядку, `pending_description` переносится в `description`.
+        """
         ...
 
     async def set_images_truncated(self, document_id: UUID, truncated: bool) -> None:
@@ -252,6 +260,13 @@ class DocumentRepository(Protocol):
         """Записать пояснения; результат — фрагменты, которые ещё существуют."""
         ...
 
+    async def contexts_by_text(self, document_id: UUID) -> dict[tuple[str | None, str], str]:
+        """Пояснения текстовых фрагментов документа по (раздел, текст) — для переноса (§11.2).
+
+        Фрагменты без пояснения не входят; при совпадении берётся первый по порядку.
+        """
+        ...
+
     async def delete(self, document_id: UUID) -> None:
         """Стереть строку документа; страницы, фрагменты и задания уходят каскадом."""
         ...
@@ -260,10 +275,11 @@ class DocumentRepository(Protocol):
         """Неудалённые документы, которые `portal reindex` вернёт в очередь."""
         ...
 
-    async def ids_for_reprocess(self, *, all_ready: bool) -> list[UUID]:
+    async def ids_for_reprocess(self, *, all_ready: bool, images: bool = False) -> list[UUID]:
         """Готовые документы для массовой переобработки (§11.6).
 
-        Без `all_ready` — только с прежним `index_version` или с отметкой о сбое.
+        `all_ready` — все; `images` — PDF, DOCX и файлы-картинки; без обоих — только с
+        прежним `index_version` или с отметкой о сбое.
         """
         ...
 
@@ -349,6 +365,27 @@ class JobQueue(Protocol):
 
     async def set_bulk_paused(self, paused: bool) -> None:
         """Приостановить или возобновить массовую переобработку (§11.6)."""
+        ...
+
+    async def bulk_paused(self) -> bool:
+        """Приостановлена ли массовая переобработка."""
+        ...
+
+    async def has_waiting(
+        self, now: datetime, busy_documents: Collection[UUID], up_to_priority: int
+    ) -> bool:
+        """Ждёт ли задание, которое основное место взяло бы сейчас, с `priority ≤ up_to_priority`.
+
+        Условия — те же, что при взятии (§11.1): точка уступки сверяет с ними очередь.
+        """
+        ...
+
+    async def yield_turn(self, job_id: UUID, requeued_at: datetime | None) -> bool:
+        """Уступка места (§11.1): аренда снята, попытки — с нуля, `run_after` прежний.
+
+        `requeued_at` — новое `created_at`: задание встаёт за ждущими своего приоритета;
+        `None` — место в очереди прежнее. `False` — задания уже нет.
+        """
         ...
 
 

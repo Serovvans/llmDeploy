@@ -16,7 +16,7 @@ import pytest
 
 from portal.core.settings import Settings
 from portal.kb import lexical
-from portal.kb.chunking import split_page
+from portal.kb.chunking import split_document, split_page
 from portal.kb.context import fit_sources, knowledge_context
 from portal.kb.domain import FoundFragment
 from portal.kb.lexical import sparse_vector, tokenize
@@ -82,7 +82,8 @@ def test_spaced_sign_rule_gives_the_same_result_as_before_the_fix() -> None:
         ), repr(text)
 
 
-# Документ без страниц доходит до `kb.indexing.document_max_chars` символов одной «страницей».
+# Документ без страниц доходит до `kb.indexing.document_max_chars` символов (с 0.16 — 10 млн)
+# одной «страницей».
 PAGE_UNITS = ["я", " ", "\n", "\n ", "я\n\n", "я. ", ". ", "\n\t\t\tя", "я ", "!\n", "…"]
 
 
@@ -92,6 +93,27 @@ def test_splitting_page_of_document_limit_is_linear(unit: str, settings: Setting
     text = _fill(unit, length)
     chunking = settings.kb.chunking
     assert _elapsed(lambda: split_page(text, chunking.max_chars, chunking.overlap_chars)) < 3.0
+
+
+# Строки-заголовки подряд: каждая — раздел, либо нумерованный перечень (§10.1).
+HEADING_UNITS = ["# a\n", "1. А\n", "Статья 1\nтекст\n"]
+
+
+@pytest.mark.parametrize("unit", HEADING_UNITS)
+def test_splitting_by_structure_at_document_limit_is_linear(unit: str, settings: Settings) -> None:
+    """Разбиение по структуре идёт в пуле потоков воркера, но квадратичное его бы не спасло."""
+    chunking = settings.kb.chunking
+    text = _fill(unit, settings.kb.indexing.document_max_chars)
+    elapsed = _elapsed(
+        lambda: split_document(
+            [(1, text)],
+            chunking.heading_patterns,
+            chunking.max_chars,
+            chunking.overlap_chars,
+            chunking.section_max_chars,
+        )
+    )
+    assert elapsed < 15.0
 
 
 def test_page_of_spaces_ending_with_letter_is_linear(settings: Settings) -> None:

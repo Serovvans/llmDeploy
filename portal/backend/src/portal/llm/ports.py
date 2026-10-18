@@ -78,6 +78,25 @@ class ChatModel(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class Completion:
+    """Ответ без потока с причиной окончания (docs/portal-api.md §12.1)."""
+
+    text: str
+    finish_reason: Literal["stop", "length"]
+
+
+class CompletionModel(Protocol):
+    """Модель, отвечающая без потока с причиной окончания; нужна описанию картинок.
+
+    Отдельный порт, а не метод `ChatModel`: подмены `ChatModel` в тестах не меняются.
+    """
+
+    async def complete_with_reason(self, request: ChatRequest) -> Completion:
+        """Ответ целиком; исключения — как у `ChatModel.complete`."""
+        ...
+
+
 class TokenEstimator(Protocol):
     """Оценка числа токенов: точного счёта у портала нет."""
 

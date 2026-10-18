@@ -119,9 +119,9 @@ export async function addKbRecording(
   return document;
 }
 
-export async function waitKbReady(api: APIRequestContext, documentId: string): Promise<void> {
+export async function waitKbReady(api: APIRequestContext, documentId: string, timeout = 45_000): Promise<void> {
   await expect
-    .poll(async () => (await (await api.get(`/api/kb/documents/${documentId}`)).json()).status, { timeout: 45_000 })
+    .poll(async () => (await (await api.get(`/api/kb/documents/${documentId}`)).json()).status, { timeout })
     .toBe('ready');
 }
 

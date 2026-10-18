@@ -189,7 +189,7 @@ def test_knowledge_base_configuration_has_contract_start_values() -> None:
     """Стартовые значения §13.6 для базы знаний, распознавания и очереди."""
     settings = load_settings(ENVIRON, CONFIG_DIR, NO_OVERRIDE)
     kb, llm = settings.kb, settings.llm
-    assert (kb.document_max_bytes, kb.document_max_pages) == (50 * 1024 * 1024, 500)
+    assert (kb.document_max_bytes, kb.document_max_pages) == (200 * 1024 * 1024, 3000)
     assert (kb.search.top_k, kb.search.prefetch_limit, kb.search.lexical_slots) == (8, 40, 3)
     assert (kb.context_max_tokens, kb.embeddings.dimension) == (8000, 1024)
     worker = kb.worker

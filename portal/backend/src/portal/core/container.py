@@ -313,6 +313,7 @@ def build_container(
             document_executor,
             clock,
             settings.kb,
+            settings.media.min_free_bytes,
         ),
         knowledge=knowledge,
         media_storage=media_storage,
@@ -329,7 +330,8 @@ def build_worker_container(
 
     Без `PORTAL_LLM_API_KEY` и `QDRANT_API_KEY` сборка отказывает; контекст модели
     (`MAX_MODEL_LEN`) воркеру не нужен
-    (§13.5). `chat_model` и `qdrant` подменяют клиент Bifrost и клиент Qdrant в тестах.
+    (§13.5). `chat_model` и `qdrant` подменяют клиент Bifrost и клиент Qdrant в тестах;
+    описание картинок идёт через клиент Bifrost (`CompletionModel`, §12.1).
     """
     clock = clock or SystemClock()
     llm_api_key = settings.require_llm_api_key()
@@ -339,7 +341,15 @@ def build_worker_container(
     kb_uow = SqlKbUnitOfWorkFactory(engine, clock)
     vector_index = QdrantVectorIndex(qdrant, settings.kb)
     embedder = _embedder(settings, http_client)
-    model = chat_model or BifrostChatModel(http_client, settings.llm, llm_api_key)
+    # Запросы воркера без потока ждут ответа дольше, чем в portal-api: ответ приходит в
+    # конце генерации, а описание и распознавание — до 4096 токенов (§12.1).
+    bifrost = BifrostChatModel(
+        http_client,
+        settings.llm,
+        llm_api_key,
+        timeout_seconds=settings.llm.background_timeout_seconds,
+    )
+    model = chat_model or bifrost
     recognizer = ModelPageRecognizer(model, settings.llm)
     # Читатель отдаёт на символ и на картинку больше предела: так превышение отличимо от
     # ровного попадания.
@@ -371,7 +381,14 @@ def build_worker_container(
         reader,
         recognizer,
         ImageCollector(
-            kb_uow, storage, reader, model, background_llm, settings.kb.images, settings.llm
+            kb_uow,
+            storage,
+            reader,
+            bifrost,
+            background_llm,
+            settings.kb.images,
+            settings.llm,
+            settings.kb.worker.background_llm_parallel,
         ),
         RecordingProcessor(kb_uow, media_storage, audio, kb_speech, media),
         embedder,

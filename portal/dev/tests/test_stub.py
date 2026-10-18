@@ -383,12 +383,60 @@ async def test_picture_description_and_fragment_context_depend_on_content(
     # Без изображения это обычный вопрос.
     assert (await _answer(client, _chat(prompt))).startswith("Заглушка. Вопрос:")
 
+    # 701–703 — только у PNG с такой шириной; у прочих ширин и JPEG — обычный ответ.
+    assert await _answer(client, _chat(prompt, _image(_png_of_width(700)))) == (
+        f"Описание изображения-заглушки {hashlib.sha256(_png_of_width(700)).hexdigest()[:8]}."
+    )
+
     context = (
         "Поясни место фрагмента в документе.\n<документ>Договор</документ>\n"
         "<соседи>\nсоседний текст\n</соседи>\n<фрагмент>\n текст фрагмента \n</фрагмент>"
     )
     digest = hashlib.sha256("текст фрагмента".encode()).hexdigest()[:8]
     assert await _answer(client, _chat(context)) == f"Контекстная справка {digest}."
+
+
+def _png_of_width(width: int) -> bytes:
+    """Начало PNG с заголовком `IHDR` нужной ширины — заглушке точки не нужны."""
+    ihdr = b"IHDR" + width.to_bytes(4, "big") + (60).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+    return PNG[:8] + (13).to_bytes(4, "big") + ihdr + b"\x00\x00\x00\x00"
+
+
+async def _described(
+    client: httpx.AsyncClient, width: int, max_tokens: int | None = 2048
+) -> tuple[str, str]:
+    extra = {} if max_tokens is None else {"max_tokens": max_tokens}
+    body = _chat("Опиши изображение из документа.", _image(_png_of_width(width)), **extra)
+    response = await client.post(CHAT, json=body)
+    assert response.status_code == 200, response.text
+    choice = response.json()["choices"][0]
+    return choice["message"]["content"], choice["finish_reason"]
+
+
+async def test_picture_widths_check_description_rules(client: httpx.AsyncClient) -> None:
+    def digest(width: int) -> str:
+        return hashlib.sha256(_png_of_width(width)).hexdigest()[:8]
+
+    # 701 — модель сочла картинку бессодержательной.
+    assert await _described(client, 701) == ("", "stop")
+    # 702 — длинное описание: строки по порядку, всего больше 3000 символов.
+    text, finish = await _described(client, 702)
+    lines = text.split("\n")
+    assert finish == "stop"
+    assert len(text) > 3000
+    assert len("\n".join(lines[:-1])) <= 3000
+    assert lines[0] == f"Описание изображения-заглушки {digest(702)}, строка 1."
+    assert lines[-1] == f"Описание изображения-заглушки {digest(702)}, строка {len(lines)}."
+    # 703 — упор в предел до 4096 токенов, полный ответ с 4096; без предела — полный.
+    cut = (f"Начало описания-заглушки {digest(703)}.", "length")
+    full = (f"Описание изображения-заглушки {digest(703)}.", "stop")
+    assert await _described(client, 703, 2048) == cut
+    assert await _described(client, 703, 4095) == cut
+    assert await _described(client, 703, 4096) == full
+    assert await _described(client, 703, None) == full
+    # Та же ширина в обычном вопросе ничего не меняет.
+    plain = await _answer(client, _chat("Вопрос", _image(_png_of_width(701))))
+    assert plain.startswith("Заглушка. Вопрос:")
 
 
 async def test_sql_test_data_and_fix_protocols(client: httpx.AsyncClient) -> None:

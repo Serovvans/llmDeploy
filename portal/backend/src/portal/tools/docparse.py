@@ -17,6 +17,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from portal.core.errors import (
+    docx_images_too_large,
+    docx_too_large,
     field_error,
     file_too_large,
     file_unreadable,
@@ -35,6 +37,7 @@ from portal.files.names import display_file_name
 from portal.files.ports import (
     DOCX,
     DocumentReader,
+    DocxTooLargeError,
     FileStorage,
     FileTooLargeError,
     MediaType,
@@ -303,10 +306,10 @@ class DocparseService:
 
         Отказ даётся как можно раньше: по числу страниц и по объёму уже известного текста.
         """
-        media_type = self._reader.detect(path, file_name)
-        if media_type not in _MEDIA_TYPES:
-            raise unsupported_file_type()
         try:
+            media_type = self._reader.detect(path, file_name)
+            if media_type not in _MEDIA_TYPES:
+                raise unsupported_file_type()
             page_count = self._reader.page_count(path, media_type)
             if page_count is not None and page_count > self._settings.max_pages:
                 raise too_many_pages(self._settings.max_pages)
@@ -318,6 +321,10 @@ class DocparseService:
                 known += self._estimator.text(text or "")
                 if known > self._budget:
                     raise errors.document_too_long()
+        except DocxTooLargeError as error:
+            raise (
+                docx_images_too_large() if error.reason == "images" else docx_too_large()
+            ) from error
         except UnreadableDocumentError as error:
             raise file_unreadable() from error
         return media_type, page_count, pages

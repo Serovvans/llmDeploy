@@ -100,6 +100,22 @@ class UnreadableDocumentError(Exception):
     """Файл не открывается: повреждён, защищён паролем или превышает пределы распаковки."""
 
 
+DocxLimit = Literal["markup", "images"]
+
+
+class DocxTooLargeError(UnreadableDocumentError):
+    """DOCX превышает пределы по оглавлению архива (§1.5).
+
+    `markup` — разметка или остальное содержимое (`docx_too_large`), `images` — картинки
+    под `word/media/` (`docx_images_too_large`). Кто различает коды, ловит его первым.
+    """
+
+    def __init__(self, reason: DocxLimit) -> None:
+        """Запомнить, какой предел сработал."""
+        super().__init__(reason)
+        self.reason: DocxLimit = reason
+
+
 class FileStorage(Protocol):
     """Хранилище оригиналов; путь никогда не строится из имени пользователя."""
 
@@ -115,6 +131,10 @@ class FileStorage(Protocol):
 
     async def delete(self, key: str) -> None:
         """Удалить файл; отсутствие файла — не ошибка."""
+        ...
+
+    async def free_bytes(self) -> int:
+        """Свободное место на томе `files.root`, байт (§8.1)."""
         ...
 
 
@@ -138,14 +158,23 @@ class DocumentReader(Protocol):
         ...
 
     def embedded_images(
-        self, path: Path, media_type: MediaType, page: int, *, min_side_px: int, min_area_px: int
+        self,
+        path: Path,
+        media_type: MediaType,
+        page: int,
+        *,
+        min_side_px: int,
+        min_area_px: int,
+        known: frozenset[bytes] = frozenset(),
     ) -> list[DocumentImage]:
         """Встроенные растровые картинки страницы по порядку (§8.6).
 
         У DOCX и файла-картинки `page = 1` — все картинки документа. Картинки ниже порогов
         и крупнее `files.image_max_pixels` пропускаются без декодирования. Страница-скан
         PDF и текстовый файл возвращают `[]`. Из DOCX — только части с сигнатурой JPEG или
-        PNG. `UnreadableDocumentError`.
+        PNG. `known` — SHA-256 уже сохранённых картинок: такая картинка проверяется по
+        порогам по заголовку, но не декодируется; на её месте `DocumentImage` с
+        `data = b""`, в предел числа картинок она входит. `UnreadableDocumentError`.
         """
         ...
 

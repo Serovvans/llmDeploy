@@ -151,6 +151,7 @@ async def test_reprocess_commands_need_only_database_and_print_only_numbers(
         "Документов со сбоем переобработки: 1\n"
         "  recognition_failed: 1\n"
         "Пауза: да\n"
+        "Картинок с описанием прежней версии: 0\n"
     )
     # Команда ставит задание по системным часам, стенд живёт по своим.
     await bench.portal.execute("UPDATE kb_jobs SET run_after = :now", now=bench.portal.clock.now())
@@ -183,6 +184,12 @@ async def test_reindex_recreate_collection_refuses_while_jobs_are_leased(
 def test_reindex_flags_do_not_combine(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         cli.main(["reindex", "--only-errors", "--recreate-collection"])
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_reprocess_selections_do_not_combine(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["reprocess", "start", "--all", "--images"])
     assert "not allowed with argument" in capsys.readouterr().err
 
 

@@ -16,7 +16,7 @@ from portal.files.reader import ContentDocumentReader
 from portal.llm.ports import ImagePart, TextPart
 from tests import samples
 from tests.conftest import close_portal, make_portal
-from tests.support import CHAT_BODY, Portal, ask, new_dialog, upload
+from tests.support import CHAT_BODY, Portal, ask, new_dialog, start_docparse, upload
 
 pytestmark = pytest.mark.anyio
 
@@ -135,6 +135,44 @@ async def test_page_and_image_limits(settings: Settings) -> None:
         assert huge.status_code == 422
         assert huge.json()["error"]["code"] == "file_unreadable"
         assert (await upload(client, dialog_id, "ок.png", samples.png(100, 100))).status_code == 201
+    finally:
+        await close_portal(portal)
+
+
+async def test_docx_limits_and_zip_directory_have_their_codes(settings: Settings) -> None:
+    """Вложение чата и разбор: коды пределов DOCX и оглавления ZIP (§1.5, §5.2, §7.3)."""
+    files = settings.files.model_copy(
+        update={"docx_max_xml_bytes": 100_000, "docx_max_media_bytes": 100_000}
+    )
+    portal = await make_portal(settings.model_copy(update={"files": files}))
+    try:
+        client = await portal.employee()
+        dialog_id = await new_dialog(client)
+        text = samples.paragraph("Текст")
+        cases = [
+            (samples.docx_package(text, parts={"word/a.xml": bytes(100_001)}), "docx_too_large"),
+            (
+                samples.docx_package(text, parts={"word/media/a.png": bytes(100_001)}),
+                "docx_images_too_large",
+            ),
+            (
+                samples.zip_directory_claims(samples.docx_file("Текст"), 2 << 20),
+                "file_unreadable",
+            ),
+            (
+                samples.zip_directory_claims(samples.docx_file("Текст"), 2 << 20, zip64=True),
+                "file_unreadable",
+            ),
+        ]
+        for content, code in cases:
+            attached = await upload(client, dialog_id, "документ.docx", content)
+            assert (attached.status_code, attached.json()["error"]["code"]) == (422, code)
+            parsed = await start_docparse(client, "документ.docx", content)
+            assert (parsed.status_code, parsed.json()["error"]["code"]) == (422, code)
+        assert _stored_files(portal) == []
+        # Картинки в пределе: вложение принимается.
+        fitting = samples.docx_package(text, parts={"word/media/a.png": bytes(100_000)})
+        assert (await upload(client, dialog_id, "документ.docx", fitting)).status_code == 201
     finally:
         await close_portal(portal)
 

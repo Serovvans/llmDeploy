@@ -23,6 +23,13 @@ def test_start_values_match_contract_and_fit_together(settings: Settings) -> Non
     assert (kb.tags.max_per_document, kb.tags.max_length, kb.tags.max_selected) == (10, 50, 20)
     assert (kb.rerank.candidates, kb.search.neighbors, kb.worker.chat_slots) == (40, 1, 1)
     assert (settings.media.asr.threads, settings.media.asr.chat_threads) == (8, 2)
+    # Пределы 0.16 (§13.6).
+    images = kb.images
+    assert (images.min_side_px, images.min_area_px, images.max_per_document) == (40, 20_000, 300)
+    assert (images.description_max_tokens, images.description_retry_max_tokens) == (2048, 4096)
+    assert (images.description_max_chars, kb.indexing.document_max_chars) == (4000, 10_000_000)
+    assert (kb.worker.slice_seconds, settings.llm.background_timeout_seconds) == (300, 600)
+    assert kb.indexing.max_fragments == 30_000
 
 
 @pytest.mark.parametrize(

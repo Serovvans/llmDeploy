@@ -90,24 +90,34 @@
 	handle /api/* {
 		import portal-encode
 		# Внешняя граница: заведомо огромное тело не доходит до бэкенда. Предел — чуть
-		# выше наибольшего лимита файла (50 МБ, docs/portal-api.md §13.6); точные
-		# пределы по маршрутам держит бэкенд. Если лимиты файлов в YAML бэкенда
-		# поднимают — поднять и здесь, иначе загрузку оборвёт Caddy.
-		# Исключение — два маршрута загрузки записей: media.max_bytes (2 ГБ) плюс запас
-		# (docs/portal-api.md §13.5). Матчер сравнивает путь без учёта регистра, а «*»
-		# не захватывает «/»: под повышенный предел попадает ровно один сегмент — id диалога.
+		# выше наибольшего лимита файла, кроме базы знаний и записей (docs/portal-api.md
+		# §13.6); точные пределы по маршрутам держит бэкенд. Если лимиты файлов в YAML
+		# бэкенда поднимают — поднять и здесь, иначе загрузку оборвёт Caddy.
+		# Исключения (docs/portal-api.md §13.5): два маршрута загрузки записей —
+		# media.max_bytes (2 ГБ) плюс запас; загрузка документа в базу знаний —
+		# kb.document_max_bytes (200 МБ) плюс запас на поля формы. Матчер сравнивает путь
+		# без учёта регистра, а «*» не захватывает «/»: под повышенный предел записей
+		# попадает ровно один сегмент — id диалога. Путь базы знаний — точный, без
+		# подпутей. Матчер остальных исключает оба, иначе к ним применились бы два правила.
 		@media-upload {
 			method POST
 			path /api/kb/documents/media /api/dialogs/*/attachments/media
 		}
-		@not-media-upload not {
+		@kb-upload {
 			method POST
-			path /api/kb/documents/media /api/dialogs/*/attachments/media
+			path /api/kb/documents
+		}
+		@other not {
+			method POST
+			path /api/kb/documents /api/kb/documents/media /api/dialogs/*/attachments/media
 		}
 		request_body @media-upload {
 			max_size 2150MiB
 		}
-		request_body @not-media-upload {
+		request_body @kb-upload {
+			max_size 210MiB
+		}
+		request_body @other {
 			max_size 64MB
 		}
 		# Срока чтения тела здесь нет намеренно: в Caddy 2.11.4 он по умолчанию не

@@ -7,7 +7,7 @@
 import asyncio
 import logging
 from array import array
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import replace
 from functools import partial
 from itertools import batched
@@ -25,7 +25,7 @@ from portal.files.ports import (
     MediaType,
     UnreadableDocumentError,
 )
-from portal.kb.chunking import split_document
+from portal.kb.chunking import split_document, split_page
 from portal.kb.domain import (
     BULK_CONTEXT_PRIORITY,
     BULK_PRIORITY_FROM,
@@ -43,12 +43,14 @@ from portal.kb.ports import (
     EmbeddingsUnavailableError,
     FragmentPoint,
     PageRecognizer,
+    SparseVector,
     VectorIndex,
     VectorIndexUnavailableError,
 )
 from portal.kb.recordings import RecordingProcessor
 from portal.kb.retrying import retrying
 from portal.kb.search_text import search_text
+from portal.kb.slicing import JobSlice
 from portal.kb.store import KbUnitOfWorkFactory
 from portal.media.transcription import mark_time
 
@@ -114,12 +116,19 @@ class Indexer:
         self._settings = settings
         self._recognition_batch = recognition_batch
 
-    async def index(self, job: Job, on_replaced: Callable[[], object] | None = None) -> None:
+    async def index(
+        self,
+        job: Job,
+        on_replaced: Callable[[], object] | None = None,
+        turn: JobSlice | None = None,
+    ) -> None:
         """Прочитать страницы, разбить на фрагменты, посчитать эмбеддинги, заменить индекс.
 
         Идемпотентно: уже сохранённые страницы не читаются и не распознаются заново, а
         прежний индекс действует до фиксации завершения (§10.6). `on_replaced` вызывается
         сразу после неё: задание выполнено и его строки больше нет, остаётся уборка.
+        `turn` — квант взятия: после пачки распознавания и порции описания картинок
+        задание может уступить место (`JobYieldedError`, §11.1).
         """
         document = await self._start(job.document_id)
         try:
@@ -128,20 +137,25 @@ class Indexer:
                 await self._recordings.transcribe(job, document, self._save_page)
             else:
                 path, media_type = self._original(document)
-                await self._read_pages(job, document, path, media_type)
-                images = await self._images.collect(job, document, path, media_type)
+                await self._read_pages(job, document, path, media_type, turn)
+                images = await self._images.collect(job, document, path, media_type, turn)
             dropped_images = await self._build(job, document, images)
         except BaseException:
             await _uninterrupted(self.prune(document.id))
             raise
         await self._replaced(document, dropped_images, on_replaced)
 
-    async def reprocess(self, job: Job, on_replaced: Callable[[], object] | None = None) -> None:
+    async def reprocess(
+        self,
+        job: Job,
+        on_replaced: Callable[[], object] | None = None,
+        turn: JobSlice | None = None,
+    ) -> None:
         """Построить индекс готового документа заново, не убирая его из поиска (§11.6).
 
         Текст берётся из сохранённых страниц, из файла — только картинки. Состояние
         документа не меняется; документ не в `ready` обрабатывает задание `index`.
-        `on_replaced` — как у `index`.
+        `on_replaced` и `turn` — как у `index`.
         """
         async with self._uow_factory() as uow:
             document = await uow.documents.lock(job.document_id)
@@ -150,7 +164,7 @@ class Indexer:
         try:
             images = CollectedImages()
             if not document.is_recording:
-                images = await self._images.collect(job, document, *self._original(document))
+                images = await self._images.collect(job, document, *self._original(document), turn)
             dropped_images = await self._build(job, document, images)
         except BaseException:
             await _uninterrupted(self.prune(document.id))
@@ -210,9 +224,20 @@ class Indexer:
         """
         async with self._uow_factory() as uow:
             pages = await uow.documents.pages(document.id)
+            # Пояснения неизменённых фрагментов переносятся только при включённом этапе
+            # контекста: при выключенном индекс строится без них (§11.2).
+            contexts = (
+                await uow.documents.contexts_by_text(document.id)
+                if self._settings.context.enabled
+                else {}
+            )
         if not images.described and not any(page.text.strip() for page in pages):
             raise PermanentIndexError("no_text")
-        fragments, texts = self._split(document, pages, images.described)
+        # Разбиение большого документа — секунды работы процессора: в пуле потоков продление
+        # аренды и отметка «воркер жив» не ждут его (§11.2).
+        fragments, texts, lexical = await asyncio.to_thread(
+            self._split, document, pages, images.described, contexts
+        )
         vectors = await self._embed(texts)
         points = [
             FragmentPoint(
@@ -223,9 +248,9 @@ class Indexer:
                 is_cogis=document.is_cogis,
                 tags=(),  # теги ставит завершение — по базе, под блокировкой строки документа
                 dense=vector,
-                lexical=sparse_vector(text),
+                lexical=sparse,
             )
-            for fragment, text, vector in zip(fragments, texts, vectors, strict=True)
+            for fragment, sparse, vector in zip(fragments, lexical, vectors, strict=True)
         ]
         # Запас: поиск его не видит, прежний индекс не тронут.
         await self._prune(document.id)
@@ -274,7 +299,12 @@ class Indexer:
         return document
 
     async def _read_pages(
-        self, job: Job, document: KbDocument, path: Path, media_type: MediaType
+        self,
+        job: Job,
+        document: KbDocument,
+        path: Path,
+        media_type: MediaType,
+        turn: JobSlice | None,
     ) -> None:
         """Сохранить текст каждой ещё не прочитанной страницы; сканы — через распознавание."""
         async with self._uow_factory() as uow:
@@ -297,10 +327,10 @@ class Indexer:
                 (number, await self._read(self._reader.page_image, path, media_type, number))
             )
             if len(scans) == self._recognition_batch:
-                chars = await self._recognize(job, scans, chars)
+                chars = await self._recognize(job, scans, chars, turn)
                 scans = []
         if scans:
-            await self._recognize(job, scans, chars)
+            await self._recognize(job, scans, chars, turn)
 
     async def _read[T](
         self,
@@ -319,19 +349,30 @@ class Indexer:
         except UnreadableDocumentError:
             raise PermanentIndexError("file_unreadable") from None
 
-    async def _recognize(self, job: Job, scans: Sequence[tuple[int, bytes]], chars: int) -> int:
+    async def _recognize(
+        self,
+        job: Job,
+        scans: Sequence[tuple[int, bytes]],
+        chars: int,
+        turn: JobSlice | None,
+    ) -> int:
         """Распознать пачку страниц-сканов и сохранить их текст.
 
         Перед пачкой сверяется, что задание не снято: распознавание занимает GPU основной
         модели, и ждать продления аренды (до трети её срока), чтобы заметить удаление
-        документа, нельзя — всё это время стояло бы задание стирания.
+        документа, нельзя — всё это время стояло бы задание стирания. После пачки — точка
+        уступки места (§11.1).
         """
         async with self._uow_factory() as uow:
             if not await uow.jobs.exists(job.id):
                 raise JobAbandonedError
+        if turn is not None:
+            turn.start()
         texts = await self._recognizer.recognize([image for _, image in scans])
         for (number, _), text in zip(scans, texts, strict=True):
             chars = await self._save_page(job.document_id, PageText(number, text, True), chars)
+        if turn is not None:
+            await turn.check()
         return chars
 
     async def _save_page(self, document_id: UUID, page: PageText, chars: int) -> int:
@@ -348,13 +389,20 @@ class Indexer:
         return chars
 
     def _split(
-        self, document: KbDocument, pages: Sequence[PageText], images: Sequence[KbImage]
-    ) -> tuple[list[Fragment], list[str]]:
-        """Фрагменты документа и их тексты для поиска — пока без пояснений.
+        self,
+        document: KbDocument,
+        pages: Sequence[PageText],
+        images: Sequence[KbImage],
+        contexts: Mapping[tuple[str | None, str], str],
+    ) -> tuple[list[Fragment], list[str], list[SparseVector]]:
+        """Фрагменты документа, их тексты для поиска и лексические векторы; блокирующий.
 
         Текст страниц режется по структуре; у фрагмента расшифровки — таймкод: время
-        последней отметки не позже его начала (§8.7). Затем — по фрагменту на каждую
-        описанную картинку: его текст — описание (§8.6).
+        последней отметки не позже его начала (§8.7). Фрагмент с тем же разделом и текстом,
+        что у прежнего с пояснением, получает это пояснение (`contexts`, §11.2); остальные
+        пока без него. Затем — фрагменты-картинки: действующее описание каждой картинки
+        делится на части по правилам длины фрагмента (§8.6). Фрагментов больше
+        `kb.indexing.max_fragments` — `document_too_long`.
         """
         chunking = self._settings.chunking
         by_number = {page.number: page for page in pages}
@@ -365,38 +413,52 @@ class Indexer:
             chunking.overlap_chars,
             chunking.section_max_chars,
         )
-        fragments = [
-            Fragment(
-                id=uuid4(),
-                document_id=document.id,
-                page_number=span.page_number,
-                ordinal=ordinal,
-                start_offset=span.start,
-                end_offset=span.end,
-                section=span.section,
-                start_ms=mark_time(by_number[span.page_number].marks or (), span.start),
-            )
-            for ordinal, span in enumerate(spans)
-        ]
-        texts = [
-            search_text(
-                document.title,
-                span.section,
-                None,
-                by_number[span.page_number].text[span.start : span.end],
-                chunking,
-            )
-            for span in spans
-        ]
-        for ordinal, image in enumerate(images, len(spans)):
-            # У документа без страниц картинка относится к единственной странице текста.
+        # Предел символов не ограничивает число фрагментов: текст из коротких строк-заголовков
+        # дробится на фрагменты по несколько символов. Проверка — до текстов для поиска и
+        # эмбеддингов, которые воркер держит в памяти целиком.
+        max_fragments = self._settings.indexing.max_fragments
+        if len(spans) > max_fragments:
+            raise PermanentIndexError("document_too_long")
+        fragments: list[Fragment] = []
+        texts: list[str] = []
+        for ordinal, span in enumerate(spans):
+            text = by_number[span.page_number].text[span.start : span.end]
+            context = contexts.get((span.section, text))
             fragments.append(
                 Fragment(
-                    uuid4(), document.id, image.page_number or 1, ordinal, 0, 0, image_id=image.id
+                    id=uuid4(),
+                    document_id=document.id,
+                    page_number=span.page_number,
+                    ordinal=ordinal,
+                    start_offset=span.start,
+                    end_offset=span.end,
+                    section=span.section,
+                    context=context,
+                    start_ms=mark_time(by_number[span.page_number].marks or (), span.start),
                 )
             )
-            texts.append(search_text(document.title, None, None, image.description or "", chunking))
-        return fragments, texts
+            texts.append(search_text(document.title, span.section, context, text, chunking))
+        for image in images:
+            description = image.effective_description or ""
+            for start, end in split_page(description, chunking.max_chars, chunking.overlap_chars):
+                # У документа без страниц картинка относится к единственной странице текста.
+                fragments.append(
+                    Fragment(
+                        uuid4(),
+                        document.id,
+                        image.page_number or 1,
+                        len(fragments),
+                        start,
+                        end,
+                        image_id=image.id,
+                    )
+                )
+                texts.append(
+                    search_text(document.title, None, None, description[start:end], chunking)
+                )
+        if len(fragments) > max_fragments:
+            raise PermanentIndexError("document_too_long")
+        return fragments, texts, [sparse_vector(text) for text in texts]
 
     async def _embed(self, texts: Sequence[str]) -> list[array[float]]:
         """Эмбеддинги пачками; в памяти — плотно упакованные числа одинарной точности."""
@@ -435,6 +497,11 @@ class Indexer:
             if await uow.documents.lock(document_id) is None or not await uow.jobs.exists(job.id):
                 raise JobAbandonedError
             await uow.documents.replace_fragments(document_id, fragments)
+            # Картинки нового индекса: порядок и новое описание вместо прежнего (§8.6).
+            await uow.documents.finish_images(
+                document_id,
+                list(dict.fromkeys(f.image_id for f in fragments if f.image_id is not None)),
+            )
             if images_truncated is not None:
                 await uow.documents.set_images_truncated(document_id, images_truncated)
             # Картинки, которых среди извлечённых больше нет (§8.6): строки — здесь, файлы —

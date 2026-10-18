@@ -110,6 +110,8 @@ async def upload_document(
     request: Request, user: Employee, container: ContainerDep
 ) -> KbDocumentOut:
     """Добавить документ: файл принимается потоком и ставится в очередь индексации."""
+    # До разбора формы: он пишет тело во временный файл на том же диске (§8.1).
+    await container.kb.check_free_space()
     # Число полей `tags` разбор формы не ограничивает: лишние теги — отказ `too_many` по
     # полю `tags` (§8.5), а размер тела ограничен пределом загрузки.
     async with request.form(max_files=1) as form:

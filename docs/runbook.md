@@ -504,6 +504,19 @@ nvidia-smi
 Журналы контейнеров ограничены: до 5 файлов по 50 МБ на сервис. Журнал `sql-sandbox`
 всегда пуст — так задумано (3.7).
 
+Записи `portal-worker`, которые полезно знать (с 0.6, контракт 0.16; поля — только
+идентификаторы, без текста документов):
+
+| Запись | Что значит | Действие |
+|---|---|---|
+| `job yielded` (`job_id`, `document_id`, `kind`, `attempt`) | Задание `index` или `reprocess` отработало квант `kb.worker.slice_seconds` (300 с) и уступило место ждущему заданию не ниже своего приоритета: новой загрузке, вложению чата. Задание вернулось в очередь и продолжит с места остановки; обычный документ на это время показан «В очереди» | Ничего — это норма для длинного скана при одновременных загрузках. Если одно и то же задание уступает десятки раз подряд и не движется — смотрите `make portal-reprocess-status` и ход документа в списке |
+| `image dropped` (`reason`: `empty` или `length`) | `empty` — модель вернула пустое описание; `length` — пусто и после повтора с бо́льшим пределом. Картинка в поиск не попадает | Единичные — норма. Массово — сверить `kb.images.description_*` и время ответа модели |
+| `image description truncated` (`reason`: `length` или `max_chars`) | Описание упёрлось в предел токенов или обрезано до `kb.images.description_max_chars` | Ничего; массово — проверить качество описаний на образцах |
+
+```bash
+sudo docker compose -f deploy/docker-compose.yml logs --no-color --since 2h portal-worker 2>&1 | grep -E 'job yielded|image dropped|image description truncated' | tail -n 50
+```
+
 ### 3.5 Портал: учётные записи, журнал, база знаний
 
 Первого администратора создаёт `make portal-admin` (2.9). Остальные учётные записи
@@ -593,7 +606,38 @@ files:
 
 Секретов в накладке нет: они задаются только в `deploy/.env`. Если поднимаете лимиты
 размера файлов выше 64 МБ, поднимите и `max_size` в `deploy/caddy/Caddyfile`, иначе
-загрузку оборвёт Caddy.
+загрузку оборвёт Caddy. Исключения в Caddyfile: загрузка документа в базу знаний
+(`POST /api/kb/documents`, точный путь) — 210 MiB под `kb.document_max_bytes`; загрузка
+записей — 2150 MiB под `media.max_bytes`. Остальные маршруты `/api/*` — 64 МБ.
+
+**Пределы базы знаний (с 0.6, контракт 0.16).** Значения по умолчанию; меняются
+накладкой. Если в накладке на ВМ уже закреплены прежние значения этих ключей, новые
+пределы не действуют — проверка: `grep -nE 'document_max_bytes|document_max_pages|document_max_chars|min_side_px|max_per_document|description_max_tokens|docx_max_xml_bytes' deploy/portal/config.override.yaml`.
+Удалять только эти ключи и только с прежними значениями: `kb.document_max_bytes: 52428800`, `kb.document_max_pages: 500`, `kb.indexing.document_max_chars: 3000000`, `kb.images.min_side_px: 100`, `kb.images.max_per_document: 50`, `kb.images.description_max_tokens: 512`, `files.docx_max_xml_bytes: 16777216`; например,
+`kb.rerank.document_max_chars` и `kb.tags.max_per_document` — другие настройки, их не трогать.
+
+| Параметр | По умолчанию | Что задаёт |
+|---|---|---|
+| `kb.document_max_bytes` (`kb.yaml`) | 200 МБ | Размер файла документа базы знаний. Поднимаете — поднимите `max_size` маршрута базы знаний в Caddyfile |
+| `kb.document_max_pages` | 3000 | Страниц PDF |
+| `kb.indexing.document_max_chars` | 10 млн | Символов текста документа; больше — ошибка `document_too_long`. Эмбеддинги документа воркер держит в памяти: 10 млн символов — порядка 0,3–0,4 ГБ |
+| `kb.indexing.max_fragments` | 30 000 | Фрагментов документа (текст и картинки); больше — `document_too_long` |
+| `kb.images.max_per_document` | 300 | Картинок в документе |
+| `kb.images.min_side_px`, `min_area_px` | 40, 20 000 | Картинка меньше отбрасывается (значки) |
+| `kb.images.description_max_tokens`, `description_retry_max_tokens` | 2048, 4096 | Предел ответа на описание картинки; упёрся — один повтор с бо́льшим |
+| `kb.images.description_max_chars` | 4000 | Длина сохраняемого описания; длиннее — обрезается |
+| `kb.worker.slice_seconds` | 300 | Квант задания `index` и `reprocess`, после которого оно уступает место (3.4, `job yielded`) |
+| `llm.background_timeout_seconds` | 600 | Срок ответа модели на запросы воркера без потока (распознавание, описания, пояснения). Должен быть меньше срока провайдера `vllm` в Bifrost — 660 с (4.5) |
+| `files.docx_max_xml_bytes` (`app.yaml`) | 64 МБ | Разметка DOCX; больше — `docx_too_large`. Разметка разбирается по одной на процесс |
+| `files.docx_max_unpacked_bytes` | 64 МБ | Распакованное содержимое DOCX, кроме картинок; больше — `docx_too_large` |
+| `files.docx_max_media_bytes` | 256 МБ | Картинки DOCX (`word/media/`) вместе; больше — `docx_images_too_large` |
+| `files.zip_max_directory_bytes` | 1 МБ | Оглавление ZIP (DOCX); больше — `file_unreadable` |
+
+Коды отказа DOCX (`422`, без подробностей) приходят у вложения чата, разбора документов и
+загрузки в базу знаний: `docx_too_large` — «В документе Word слишком много содержимого
+помимо картинок…», `docx_images_too_large` — «Картинки в документе Word занимают слишком
+много места…». Загрузка в базу знаний при свободном месте тома файлов ниже
+`media.min_free_bytes` получает `507 storage_full` (3.9).
 
 **Известное поведение: тяжёлая страница PDF.** PDF в процессе `portal-api` читается
 строго по одному. Пока читается или отрисовывается одна тяжёлая страница, ждут все
@@ -713,6 +757,11 @@ SQL включают (`sql.sandbox.enabled: true`) только после пр�
 | `media.max_bytes`, `media.max_minutes`, `media.chat_max_minutes` | 2 ГБ, 180, 20 | Размер файла, длительность записи базы знаний и вложения чата |
 | `media.failed_source_ttl_hours` (`kb.yaml`) | 168 | Сколько хранится исходник записи с ошибкой обработки; после срока повторная обработка требует повторной загрузки |
 
+С 0.6 тот же порог `media.min_free_bytes` действует и на загрузку документов в базу
+знаний: ниже него `POST /api/kb/documents` отвечает `507 storage_full`, сотрудник видит
+«На сервере заканчивается место для файлов. Сообщите администратору». Вложения чата и
+разбор документов порог не проверяют.
+
 Квота и порог рассчитаны на диск 1 ТБ с томами Docker (`portal-design.md` §3.4); при других
 значениях минимум свободного места — 15 ГБ + 2 × (квота + тома портала). Если квоту
 меняете, поправьте и бюджет `make release-prepare` — константы `RELEASE_*` в
@@ -745,6 +794,7 @@ sudo docker compose -f deploy/docker-compose.yml exec portal-worker du -sh /data
 ```bash
 make portal-reprocess-start          # документы с прежним порядком обработки и со сбоем переобработки
 make portal-reprocess-start ALL=1    # все готовые документы, включая уже переобработанные
+make portal-reprocess-start IMAGES=1 # с 0.6: готовые PDF, DOCX и картинки — описания по новым пределам; с ALL=1 не сочетается
 make portal-reprocess-status         # ход: очередь, сбои, пауза
 make portal-reprocess-pause          # приостановить массовую переобработку
 make portal-reprocess-resume         # возобновить
@@ -759,10 +809,19 @@ make portal-reprocess-resume         # возобновить
 Документов со сбоем переобработки: 2
   recognition_failed: 2
 Пауза: нет
+Картинок с описанием прежней версии: 340
 ```
 
+Последняя строка (с 0.6) — сколько картинок ещё описано по пределам до 0.6; после
+`make portal-reprocess-start IMAGES=1` повторяйте `status`, пока число ждущих заданий
+`reprocess` и `context` не станет 0. Оставшиеся в N картинки — у документов не в «Готов»
+или со сбоем переобработки: они видны в строках сбоев с причиной (`portal-design.md` §10, п. 28). Новое описание заменяет
+прежнее только вместе с новым индексом документа.
+
 - Переобработка идёт с низшим приоритетом, по одному заданию: новые загрузки и вложения
-  чата обслуживаются раньше — и при паузе тоже. Пауза и возобновление не требуют
+  чата обслуживаются раньше — и при паузе тоже. С 0.6 длинное задание не держит место
+  воркера: через `kb.worker.slice_seconds` оно уступает ждущему заданию (`job yielded`,
+  3.4) и потом продолжает с места остановки. Пауза и возобновление не требуют
   перезапуска воркера.
 - Нагрузку на GPU регулирует `kb.worker.background_llm_parallel` (2) — число
   одновременных фоновых обращений к модели; меняется накладкой (3.6) и перезапуском
@@ -993,7 +1052,11 @@ docker compose start caddy
 - `client.disable_content_logging: true` — содержимое запросов и ответов в журнал не
   пишется. В журнале остаются ключ, модель, токены, задержки и текст ошибки модели;
 - `providers.vllm.network_config.allow_private_network: true` — без этого Bifrost v2.2.0
-  отказывает в соединении с vLLM в docker-сети (502 «connection to private IP»).
+  отказывает в соединении с vLLM в docker-сети (502 «connection to private IP»);
+- `providers.vllm.network_config.default_request_timeout_in_seconds: 660` (с 0.6) — срок
+  запроса к vLLM; по умолчанию у Bifrost 300 с, и долгие запросы воркера без потока
+  (описание картинки, распознавание до 4096 токенов) обрывались бы. Должен быть больше
+  `llm.background_timeout_seconds` (600 с, 3.6).
 
 **Применение изменений.** Этапы `make gateway` и `make portal` сами пересоздают Bifrost
 (вместе с Caddy) после запуска стека. Вручную — именно пересоздание, `restart` файл не перечитывает:
@@ -1009,6 +1072,12 @@ sudo docker compose up -d --force-recreate bifrost
 ```bash
 curl -s -u "<логин>" http://127.0.0.1:8081/api/config     # в ответе disable_content_logging: true
 ```
+
+Срок 660 с **[ВМ]**: Bifrost хранит конфигурацию ещё и в `config.db` и сверяет с ней файл
+при старте, поэтому значение из файла может не дойти. После пересоздания найдите
+`default_request_timeout_in_seconds` у провайдера `vllm` в ответе `/api/config` или в
+веб-интерфейсе Bifrost (настройки провайдера); там же проверьте, что `max_retries` не
+обнулился. Если значения нет — задайте его в веб-интерфейсе.
 
 **Очистка накопленного журнала [ВМ].** На ВМ, где Bifrost уже работал со старой
 конфигурацией, в `logs.db` остались тексты прежних запросов. Файл удаляется целиком:
@@ -1030,6 +1099,9 @@ sudo docker compose start bifrost
 идёт после него в фоне (`portal-design.md` §8.2). Краткая последовательность команд для
 ВМ заказчика — `release-0.5.md`; здесь — пояснения к шагам и откат. Весь раздел — **[ВМ]**: на ВМ порядок
 не выполнялся, длительности шагов записывайте по ходу.
+
+Следующие релизы идут тем же порядком (те же цели `release-*`); релиз 0.6 (пределы базы
+знаний) — `release-0.6.md`.
 
 Обозначения в командах:
 - `/opt/llm` — **рабочий клон**: из него запущен сервис (`systemctl cat llm-stack`,
@@ -1326,6 +1398,9 @@ docker-compose.yml коммита …» значит, что `git checkout` пр
 | vLLM: `CUDA out of memory` при старте | Уменьшить `GPU_MEM_UTIL` или `MAX_MODEL_LEN`; при профилях `embeddings` и `rerank` — проверить сумму долей ≤ 0.92 |
 | vllm-embed не стартует | Нехватка памяти в 0.06 или неверный runner — лог `make logs SERVICE=vllm-embed`; временно убрать `embeddings` из `COMPOSE_PROFILES` |
 | Клиент: `CERTIFICATE_VERIFY_FAILED` | `corp`: у клиента нет корпоративного CA или в `fullchain.pem` нет промежуточного сертификата. `internal`: клиенту не передан `caddy-root.crt` (3.2) или корень сменился после потери `llm_caddy-data`. Клиент обращается по IP, а не по `LLM_HOSTNAME` |
+| Портал: загрузка в базу знаний — «На сервере заканчивается место для файлов» (`507 storage_full`) | Свободного места тома файлов меньше `media.min_free_bytes`: `df -h /var/lib/docker`, освободить место (3.9) |
+| Портал: на файл 64–200 МБ в базу знаний сотрудник видит «Запрос слишком большой. Сократите текст или выберите файл поменьше» (413 от Caddy) | Caddy запущен с Caddyfile до 0.6: `sudo docker compose -f deploy/docker-compose.yml up -d --force-recreate --no-deps caddy` |
+| Портал: документы с `document_too_long`, добавленные до 0.6 | `make portal-reindex ONLY_ERRORS=1` — обработаются по новым пределам |
 | Клиент: 401/403 | Нет ключа, ключ неверный или отозван (`make keys`) |
 | Клиент: 404 | Путь не из разрешённых: Caddy пропускает только `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models` |
 | Клиент: 429 | Исчерпан лимит ключа; поднять лимит в UI Bifrost или выдать отдельный ключ |

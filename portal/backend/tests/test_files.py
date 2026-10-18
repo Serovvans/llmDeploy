@@ -2,17 +2,25 @@
 
 import hashlib
 import io
+import shutil
 import threading
 import time
+import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import docx
 import pytest
 from PIL import Image
 
 from portal.core.settings import FilesSettings
-from portal.files.ports import DOCX, FileTooLargeError, UnreadableDocumentError
+from portal.files.ports import (
+    DOCX,
+    DocxTooLargeError,
+    FileTooLargeError,
+    UnreadableDocumentError,
+)
 from portal.files.reader import ContentDocumentReader
 from portal.files.storage import DiskFileStorage
 from portal.files.text import decode_text, looks_like_text, read_text, store_as_utf8
@@ -40,6 +48,8 @@ def _reader(
         "image_max_pixels": 10_000_000,
         "docx_max_unpacked_bytes": 1_000_000,
         "docx_max_xml_bytes": 1_000_000,
+        "docx_max_media_bytes": 1_000_000,
+        "zip_max_directory_bytes": 1_000_000,
         "reader_workers": 1,
     }
     settings = FilesSettings(root=tmp_path, pdf_render_scale=2.0, **{**values, **overrides})
@@ -301,6 +311,14 @@ def test_text_files_are_never_read_whole(tmp_path: Path, monkeypatch: pytest.Mon
             volume["bytes"] += len(data)
             return data
 
+        def seek(self, offset: int, whence: int = 0) -> int:
+            position: int = self._file.seek(offset, whence)
+            return position
+
+        def tell(self) -> int:
+            position: int = self._file.tell()
+            return position
+
         def __enter__(self) -> "Counting":
             return self
 
@@ -311,7 +329,8 @@ def test_text_files_are_never_read_whole(tmp_path: Path, monkeypatch: pytest.Mon
     reader = _reader(tmp_path, text_max_chars=1000)
     assert reader.detect(path, "большой.txt") == "text/plain"
     assert reader.page_text(path, "text/plain", 1) == "я" * 1000
-    assert volume["bytes"] < 100_000
+    # Запись конца ZIP ищется в последних 64 КБ файла (§1.5), остальное — начало файла.
+    assert volume["bytes"] < 200_000
 
 
 def test_text_detection_and_reading_by_parts(tmp_path: Path) -> None:
@@ -576,3 +595,586 @@ async def test_storage_has_area_for_document_pictures(tmp_path: Path) -> None:
     storage = DiskFileStorage(tmp_path)
     stored = await storage.save("kb-images", _chunks(b"png"), 3)
     assert stored.key.startswith("kb-images/") and storage.path(stored.key).read_bytes() == b"png"
+
+
+def test_known_pictures_are_not_decoded_but_keep_their_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`known`: место и порог — по заголовку, без декодирования; в предел входит (§8.6)."""
+    encoded: list[bytes] = []
+    real_encode = ContentDocumentReader._encode
+
+    def spy(self: ContentDocumentReader, image: Any, image_format: str, sha256: bytes) -> Any:
+        encoded.append(sha256)
+        return real_encode(self, image, image_format, sha256)
+
+    monkeypatch.setattr(ContentDocumentReader, "_encode", spy)
+    first, small, second, third = (
+        _picture(300, 200, "red"),
+        _picture(50, 50, "green"),
+        _picture(300, 200, "blue"),
+        _picture(300, 200, "black"),
+    )
+    digest = {picture: hashlib.sha256(picture).digest() for picture in (first, small, second)}
+    document = tmp_path / "doc"
+    document.write_bytes(samples.docx_with_pictures(first, small, second, third))
+    reader = _reader(tmp_path, max_images=2)
+    known = frozenset({digest[first], digest[small]})
+    images = reader.embedded_images(document, DOCX, 1, min_side_px=100, min_area_px=1, known=known)
+    # Известная картинка ниже порога по-прежнему отбрасывается; третья не читается.
+    assert [(image.data, image.sha256) for image in images[:1]] == [(b"", digest[first])]
+    assert [image.sha256 for image in images] == [digest[first], digest[second]]
+    assert images[1].data and encoded == [digest[second]]
+
+    pdf = tmp_path / "doc.pdf"
+    picture = samples.jpeg(400, 300)
+    pdf.write_bytes(samples.pdf_with_picture(picture))
+    (plain,) = reader.embedded_images(pdf, "application/pdf", 1, min_side_px=100, min_area_px=1)
+    (placeholder,) = reader.embedded_images(
+        pdf, "application/pdf", 1, min_side_px=100, min_area_px=1, known=frozenset({plain.sha256})
+    )
+    assert (placeholder.data, placeholder.sha256, placeholder.media_type) == (
+        b"", plain.sha256, "image/jpeg",
+    )  # fmt: skip
+    image_file = tmp_path / "image"
+    image_file.write_bytes(first)
+    (own,) = reader.embedded_images(
+        image_file, "image/png", 1, min_side_px=100, min_area_px=1, known=known
+    )
+    assert own.data == b"" and len(encoded) == 2
+
+
+async def test_storage_reports_free_space_of_its_volume(tmp_path: Path) -> None:
+    """`free_bytes` — свободное место тома корня; корня до первой загрузки может не быть."""
+    root = tmp_path / "files"
+    free = await DiskFileStorage(root).free_bytes()
+    assert root.is_dir() and 0 < free <= shutil.disk_usage(tmp_path).total
+
+
+def _docx_reason(reader: ContentDocumentReader, path: Path) -> str:
+    with pytest.raises(DocxTooLargeError) as caught:
+        reader.page_count(path, DOCX)
+    return caught.value.reason
+
+
+def test_docx_limits_are_counted_by_the_directory(tmp_path: Path) -> None:
+    """Картинки — части под `word/media/`, кроме разметки; у них свой предел (§1.5)."""
+    reader = _reader(
+        tmp_path,
+        docx_max_unpacked_bytes=200_000,
+        docx_max_xml_bytes=100_000,
+        docx_max_media_bytes=300_000,
+    )
+    text = samples.paragraph("Текст")
+    path = tmp_path / "doc"
+    # Картинки в общий предел не входят: 250 КБ при пределе остального 200 КБ.
+    path.write_bytes(samples.docx_package(text, parts={"word/media/a.png": bytes(250_000)}))
+    assert reader.page_count(path, DOCX) is None
+    assert reader.page_text(path, DOCX, 1) == "Текст"
+    path.write_bytes(samples.docx_package(text, parts={"word/media/a.png": bytes(350_000)}))
+    assert _docx_reason(reader, path) == "images"
+    # Разметка под word/media/ — разметка, а не картинки.
+    path.write_bytes(samples.docx_package(text, parts={"word/media/a.xml": bytes(150_000)}))
+    assert _docx_reason(reader, path) == "markup"
+    # Картинка вне word/media/ — «остальное» (известное ограничение).
+    path.write_bytes(samples.docx_package(text, parts={"word/pics/a.png": bytes(250_000)}))
+    assert _docx_reason(reader, path) == "markup"
+    # Оба предела превышены — сначала остальное.
+    both = {"word/pics/a.png": bytes(250_000), "word/media/b.png": bytes(350_000)}
+    path.write_bytes(samples.docx_package(text, parts=both))
+    assert _docx_reason(reader, path) == "markup"
+    # Тот же отказ у текста и картинок: пределы проверяются до чтения частей.
+    with pytest.raises(DocxTooLargeError):
+        reader.page_text(path, DOCX, 1)
+    with pytest.raises(DocxTooLargeError):
+        reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+
+
+def test_docx_main_part_is_found_by_package_relation(tmp_path: Path) -> None:
+    """Основная часть — цель связи `officeDocument`, а не имя `word/document.xml`."""
+    decoy = {"word/document.xml": b"<x/>"}
+    path = tmp_path / "doc"
+    path.write_bytes(
+        samples.docx_package(samples.paragraph("Основной текст"), main="word/main.xml", parts=decoy)
+    )
+    reader = _reader(tmp_path)
+    assert reader.detect(path, "a.docx") == DOCX
+    assert reader.page_text(path, DOCX, 1) == "Основной текст"
+
+
+def test_broken_docx_media_part_does_not_spoil_text(tmp_path: Path) -> None:
+    """Текст не читает частей `word/media/`: неверная контрольная сумма ему не мешает."""
+    picture = _picture(300, 200)
+    source = samples.docx_package(
+        samples.paragraph("Текст") + '<w:p><w:r><a:blip r:embed="rId1"/></w:r></w:p>',
+        relations={"rId1": "media/a.png"},
+        parts={"word/media/a.png": picture},
+        stored=True,
+    )
+    tail = source.index(picture) + len(picture) - 1
+    path = tmp_path / "doc"
+    path.write_bytes(source[:tail] + bytes([source[tail] ^ 0xFF]) + source[tail + 1 :])
+    reader = _reader(tmp_path)
+    assert reader.page_count(path, DOCX) is None
+    assert reader.page_text(path, DOCX, 1) == "Текст"
+    # Испорченная картинка пропускается, документ не роняет.
+    assert reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1) == []
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        {"word/document.xml": b"not xml"},
+        {"word/document.xml": b"<w:other xmlns:w='urn:x'/>"},
+        {"_rels/.rels": b"<Relationships/>"},
+    ],
+    ids=["not-xml", "foreign-root", "no-office-document"],
+)
+def test_docx_with_broken_main_part_opens_but_has_no_text(
+    tmp_path: Path, parts: dict[str, bytes]
+) -> None:
+    """`page_count` читает только оглавление; негодную разметку находит `page_text`."""
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_package("", parts=parts))
+    reader = _reader(tmp_path)
+    assert reader.detect(path, "a.docx") == DOCX
+    assert reader.page_count(path, DOCX) is None
+    with pytest.raises(UnreadableDocumentError):
+        reader.page_text(path, DOCX, 1)
+    with pytest.raises(UnreadableDocumentError):
+        reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+
+
+def test_long_docx_markup_gives_the_whole_text(tmp_path: Path) -> None:
+    """Разметка больше прежних 16 МБ читается целиком у читателя без предела текста."""
+    line = "абвгдежзий" * 100
+    count = 10_000
+    source = samples.docx_package("".join(samples.paragraph(line) for _ in range(count)))
+    path = tmp_path / "doc"
+    path.write_bytes(source)
+    with zipfile.ZipFile(path) as archive:
+        assert archive.getinfo("word/document.xml").file_size > 16 * 1024 * 1024
+    reader = _reader(tmp_path, docx_max_unpacked_bytes=64 << 20, docx_max_xml_bytes=64 << 20)
+    assert reader.page_count(path, DOCX) is None
+    text = reader.page_text(path, DOCX, 1)
+    assert text == "\n".join([line] * count)
+
+
+def _table(rows: str, columns: int | None) -> str:
+    grid = "" if columns is None else "<w:tblGrid>" + "<w:gridCol/>" * columns + "</w:tblGrid>"
+    return f"<w:tbl>{grid}{rows}</w:tbl>"
+
+
+def _cell(text: str = "", *, merge: str | None = None, span: int | None = None) -> str:
+    props = ("" if span is None else f'<w:gridSpan w:val="{span}"/>') + (
+        ""
+        if merge is None
+        else "<w:vMerge/>"
+        if merge == "continue"
+        else f'<w:vMerge w:val="{merge}"/>'
+    )
+    return f"<w:tc><w:tcPr>{props}</w:tcPr>{samples.paragraph(text) if text else '<w:p/>'}</w:tc>"
+
+
+def test_docx_merged_table_cells_read_as_python_docx_does(tmp_path: Path) -> None:
+    """Объединённые ячейки дают тот же текст, что `_Row.cells` python-docx (§1.5)."""
+    document = docx.Document()
+    table = document.add_table(rows=4, cols=4)
+    for row in range(4):
+        for column in range(4):
+            table.cell(row, column).text = f" я{row}{column} "
+    table.cell(0, 0).merge(table.cell(0, 2))  # по горизонтали
+    table.cell(1, 3).merge(table.cell(3, 3))  # по вертикали
+    table.cell(2, 0).merge(table.cell(3, 1))  # блок 2×2
+    buffer = io.BytesIO()
+    document.save(buffer)
+    path = tmp_path / "doc"
+    path.write_bytes(buffer.getvalue())
+    loaded = docx.Document(str(path)).tables[0]
+    expected = [" | ".join(cell.text.strip() for cell in row.cells) for row in loaded.rows]
+    assert "я13" in expected[3] and "я20" in expected[3]  # объединения действительно есть
+    assert _reader(tmp_path).page_text(path, DOCX, 1) == "\n".join(expected)
+
+
+def test_docx_vertical_merge_over_many_rows_is_read_in_linear_time(tmp_path: Path) -> None:
+    """Сплошное вертикальное объединение 900×10: у python-docx — кубическое время (§1.5)."""
+    first = "<w:tr>" + _cell("к", merge="restart") * 10 + "</w:tr>"
+    rest = ("<w:tr>" + _cell(merge="continue") * 10 + "</w:tr>") * 899
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_package(_table(first + rest, 10)))
+    started = time.monotonic()
+    text = _reader(tmp_path).page_text(path, DOCX, 1)
+    assert time.monotonic() - started < 1
+    assert text == "\n".join([" | ".join(["к"] * 10)] * 900)
+    # С пределом текста таблица обрывается, не дочитываясь.
+    limited = _reader(tmp_path, text_max_chars=50).page_text(path, DOCX, 1)
+    assert limited == "\n".join([" | ".join(["к"] * 10)] * 2)[:50]
+
+
+@pytest.mark.parametrize(("columns", "expected"), [(3, "ш | ш | ш"), (None, "ш")])
+def test_docx_cell_span_repeats_no_more_than_grid_columns(
+    tmp_path: Path, columns: int | None, expected: str
+) -> None:
+    """`gridSpan` 10^9 не разворачивается: повтор ячейки — не больше колонок сетки."""
+    path = tmp_path / "doc"
+    row = "<w:tr>" + _cell("ш", span=10**9) + "</w:tr>"
+    path.write_bytes(samples.docx_package(_table(row, columns)))
+    started = time.monotonic()
+    assert _reader(tmp_path).page_text(path, DOCX, 1) == expected
+    assert time.monotonic() - started < 1
+
+
+def test_docx_wide_merged_cell_stops_at_text_limit(tmp_path: Path) -> None:
+    """Длинная ячейка во всю ширину сетки повторяется лишь до предела текста."""
+    row = "<w:tr>" + _cell("д" * 1000, span=10_000) + "</w:tr>"
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_package(_table(row, 10_000)))
+    text = _reader(tmp_path, text_max_chars=2500).page_text(path, DOCX, 1)
+    assert text == " | ".join(["д" * 1000] * 3)[:2500]
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        "<w:tr>" + _cell(merge="continue") + "</w:tr>",
+        "<w:tr>"
+        + _cell("а", span=2)
+        + "</w:tr><w:tr>"
+        + _cell()
+        + _cell(merge="continue")
+        + "</w:tr>",
+    ],
+    ids=["first-row", "no-cell-above"],
+)
+def test_docx_vertical_merge_without_start_is_unreadable(tmp_path: Path, rows: str) -> None:
+    """Продолжение объединения без ячейки с тем же смещением строкой выше — как у python-docx."""
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_package(_table(rows, 2)))
+    with pytest.raises(UnreadableDocumentError):
+        _reader(tmp_path).page_text(path, DOCX, 1)
+
+
+def test_docx_markup_is_parsed_one_tree_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Дерево разметки — одно на процесс; картинки декодируются уже вне блокировки (§1.5)."""
+    from portal.files import reader as module
+
+    real_parse = module._parse_markup
+
+    state = {"active": 0, "peak": 0, "calls": 0}
+    counter = threading.Lock()
+
+    def parse(data: bytes) -> Any:
+        with counter:
+            state["active"] += 1
+            state["calls"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.01)
+        try:
+            return real_parse(data)
+        finally:
+            with counter:
+                state["active"] -= 1
+
+    decoded_under_lock: list[bool] = []
+    real_encode = ContentDocumentReader._encode
+
+    def encode(self: ContentDocumentReader, image: Any, image_format: str, sha256: bytes) -> Any:
+        decoded_under_lock.append(module._DOCX_LOCK.locked())
+        return real_encode(self, image, image_format, sha256)
+
+    monkeypatch.setattr(module, "_parse_markup", parse)
+    monkeypatch.setattr(ContentDocumentReader, "_encode", encode)
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_with_pictures(_picture(300, 200)))
+    reader = _reader(tmp_path)
+    assert len(reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)) == 1
+    assert decoded_under_lock == [False]
+
+    def work() -> None:
+        for _ in range(3):
+            reader.page_text(path, DOCX, 1)
+            reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert state["peak"] == 1 and state["calls"] > 40
+
+
+@pytest.mark.parametrize("zip64", [False, True], ids=["eocd", "zip64-eocd"])
+def test_zip_with_oversized_directory_is_refused_before_opening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zip64: bool
+) -> None:
+    """Размер оглавления — из записи конца, как его прочтёт `zipfile`; архив не открывается."""
+    source = samples.docx_file("Текст")
+    reader = _reader(tmp_path, zip_max_directory_bytes=100_000)
+    path = tmp_path / "doc"
+    path.write_bytes(source)
+    assert reader.detect(path, "a.docx") == DOCX  # обычный DOCX проходит
+    path.write_bytes(samples.zip_directory_claims(source, 100_001, zip64=zip64))
+    opened: list[object] = []
+    monkeypatch.setattr(zipfile, "ZipFile", lambda *args, **kwargs: opened.append(args))
+    with pytest.raises(UnreadableDocumentError):
+        reader.detect(path, "a.docx")
+    with pytest.raises(UnreadableDocumentError):
+        reader.page_count(path, DOCX)
+    with pytest.raises(UnreadableDocumentError):
+        reader.page_text(path, DOCX, 1)
+    assert opened == []
+
+
+def test_docx_pictures_from_vml_and_alternate_content(tmp_path: Path) -> None:
+    """Картинки VML; DrawingML с запасным VML даёт одну картинку; внешние не читаются (§8.6)."""
+    one, two = _picture(300, 200, "red"), _picture(300, 200, "blue")
+    body = (
+        "<w:p><w:r><mc:AlternateContent>"
+        '<mc:Choice Requires="wps"><w:drawing><a:blip r:embed="rId1"/></w:drawing></mc:Choice>'
+        '<mc:Fallback><w:pict><v:shape><v:imagedata r:id="rId2"/></v:shape></w:pict>'
+        "</mc:Fallback></mc:AlternateContent></w:r></w:p>"
+        '<w:p><w:r><w:pict><v:shape><v:imagedata r:id="rId3"/></v:shape></w:pict></w:r></w:p>'
+        '<w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p>'
+        '<w:p><w:r><w:drawing><a:blip r:embed="rId5"/></w:drawing></w:r></w:p>'
+    )
+    relations = {
+        "rId1": "media/one.png",
+        "rId2": "media/one.png",
+        "rId3": "/word/media/two.png",
+        "rId4": "../word/media/copy.png",
+        "rId5": "http://example.com/x.png",
+    }
+    media = {"word/media/one.png": one, "word/media/two.png": two, "word/media/copy.png": one}
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_package(body, relations=relations, parts=media))
+    images = _reader(tmp_path).embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+    assert [image.sha256 for image in images] == [
+        hashlib.sha256(one).digest(),
+        hashlib.sha256(two).digest(),
+    ]
+    # Без файла связей основной части картинок нет.
+    path.write_bytes(samples.docx_package(body, parts=media))
+    assert _reader(tmp_path).embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1) == []
+
+
+def test_many_distinct_picture_references_are_listed_in_linear_time(tmp_path: Path) -> None:
+    """100 000 ссылок на разные связи без частей: повтор ищется не по списку (§8.6)."""
+    one, two = _picture(300, 200, "red"), _picture(300, 200, "blue")
+    count = 100_000
+    refs = [f'<a:blip r:embed="rId{index}"/>' for index in range(count)]
+    relations = {f"rId{index}": f"media/missing{index}.png" for index in range(count)}
+    relations |= {"rIdOne": "media/one.png", "rIdTwo": "media/two.png"}
+    body = (
+        '<w:p><w:r><a:blip r:embed="rIdTwo"/>'
+        + "".join(refs)
+        + '<a:blip r:embed="rIdOne"/><a:blip r:embed="rIdTwo"/></w:r></w:p>'
+    )
+    media = {"word/media/one.png": one, "word/media/two.png": two}
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_package(body, relations=relations, parts=media))
+    reader = _reader(tmp_path, docx_max_unpacked_bytes=64 << 20, docx_max_xml_bytes=64 << 20)
+    started = time.monotonic()
+    images = reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+    assert time.monotonic() - started < 10  # со списком — около 30 с
+    assert [image.sha256 for image in images] == [
+        hashlib.sha256(two).digest(),
+        hashlib.sha256(one).digest(),
+    ]
+
+
+def test_docx_parse_memory_is_returned_before_the_lock_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """После каждого разбора разметки память отдаётся системе ещё под блокировкой (§1.5)."""
+    from portal.files import reader as module
+
+    trimmed_under_lock: list[bool] = []
+
+    def trim(pad: int) -> int:
+        trimmed_under_lock.append(module._DOCX_LOCK.locked())
+        return 1
+
+    monkeypatch.setattr(module, "_MALLOC_TRIM", trim)
+    reader = _reader(tmp_path)
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_with_pictures(_picture(300, 200)))
+    reader.page_text(path, DOCX, 1)
+    reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+    path.write_bytes(samples.docx_package("", parts={"word/document.xml": b"not xml"}))
+    with pytest.raises(UnreadableDocumentError):
+        reader.page_text(path, DOCX, 1)
+    assert trimmed_under_lock == [True, True, True]
+
+
+_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _held_trees(error: BaseException | None) -> list[str]:
+    """Элементы lxml и крупные байты в кадрах трассировки ошибки и всех её причин."""
+    from lxml import etree
+
+    held: list[str] = []
+    pending = [error]
+    while pending:
+        current = pending.pop()
+        if current is None:
+            continue
+        tb = current.__traceback__
+        while tb is not None:
+            frame = tb.tb_frame
+            held += [
+                f"{frame.f_code.co_name}.{name}"
+                for name, value in frame.f_locals.items()
+                if isinstance(value, etree._Element)
+                or (isinstance(value, bytes | bytearray) and len(value) >= 1 << 20)
+            ]
+            tb = tb.tb_next
+        pending += [current.__cause__, current.__context__]
+    return held
+
+
+def _broken_markup() -> bytes:
+    """Основная часть больше 1 МБ с синтаксической ошибкой в конце."""
+    return f"<w:document xmlns:w='{_W}'><w:body>".encode() + b"<w:p/>" * 300_000 + b"<w:p"
+
+
+@pytest.mark.parametrize("safety_net", [True, False], ids=["cleared", "no-clear"])
+@pytest.mark.parametrize(
+    ("parts", "calls"),
+    [
+        (
+            {"word/document.xml": f"<w:foo xmlns:w='{_W}'><w:body/></w:foo>".encode()},
+            ("page_text", "embedded_images"),
+        ),
+        (
+            {"word/document.xml": f"<w:document xmlns:w='{_W}'><w:p/></w:document>".encode()},
+            ("page_text", "embedded_images"),
+        ),
+        ({"word/_rels/document.xml.rels": b"not xml"}, ("embedded_images",)),
+        ({"word/document.xml": _broken_markup()}, ("page_text", "embedded_images")),
+    ],
+    ids=["foreign-root", "no-body", "broken-relations", "syntax-error"],
+)
+def test_docx_refusal_does_not_keep_the_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parts: dict[str, bytes],
+    calls: tuple[str, ...],
+    safety_net: bool,
+) -> None:
+    """Отказ из-под блокировки разметки не держит дерево в кадрах трассировки (§1.5).
+
+    Иначе `malloc_trim` застаёт дерево живым, и память потока не возвращается системе.
+    Без очистки кадров в `_docx_markup` (`no-clear`) дерево не должно попадать в ошибку и так;
+    байты части с синтаксической ошибкой держит кадр разбора в трассировке причины — их
+    освобождает только очистка по всей цепочке причин.
+    """
+    import traceback
+
+    if not safety_net:
+        monkeypatch.setattr(traceback, "clear_frames", lambda tb: None)
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_package(samples.paragraph("Текст"), parts=parts))
+    reader = _reader(tmp_path, docx_max_unpacked_bytes=16 << 20, docx_max_xml_bytes=16 << 20)
+    for call in calls:
+        with pytest.raises(UnreadableDocumentError) as caught:
+            if call == "page_text":
+                reader.page_text(path, DOCX, 1)
+            else:
+                reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+        held = _held_trees(caught.value)
+        if safety_net or len(parts.get("word/document.xml", b"")) < 1 << 20:
+            assert held == [], call
+        else:
+            assert held, call  # без очистки причин проверка выше ловит удержание
+    if calls == ("embedded_images",):  # связи картинок тексту не нужны
+        assert reader.page_text(path, DOCX, 1) == "Текст"
+
+
+def test_docx_markup_is_parsed_in_a_thread_per_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Разметку разбирает свой поток на документ, и он завершён к возврату (§1.5).
+
+    lxml держит словарь имён на поток всё время его жизни: в потоках пула имена всех
+    разобранных документов копились бы. Ошибка из потока доходит до вызывающего.
+    """
+    from portal.files import reader as module
+
+    real_parse = module._parse_markup
+    parsed_in: list[threading.Thread] = []
+
+    def parse(data: bytes) -> Any:
+        parsed_in.append(threading.current_thread())
+        return real_parse(data)
+
+    monkeypatch.setattr(module, "_parse_markup", parse)
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_with_pictures(_picture(300, 200)))
+    reader = _reader(tmp_path)
+    reader.page_text(path, DOCX, 1)
+    reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+    path.write_bytes(samples.docx_package("", parts={"word/document.xml": b"not xml"}))
+    with pytest.raises(UnreadableDocumentError):
+        reader.page_text(path, DOCX, 1)
+    assert threading.current_thread() not in parsed_in
+    assert not any(thread.is_alive() for thread in parsed_in)
+    # page_text: связи пакета и тело; embedded_images: ещё связи тела; отказ: связи и тело.
+    assert [len({id(t) for t in parsed_in[a:b]}) for a, b in ((0, 2), (2, 5), (5, 7))] == [1] * 3
+    assert len({id(thread) for thread in parsed_in}) == 3
+
+
+def _rss_bytes() -> int:
+    """Резидентная память процесса после возврата свободной памяти системе (Linux, glibc)."""
+    import ctypes
+    import os
+
+    ctypes.CDLL(None).malloc_trim(0)
+    pages = int(Path("/proc/self/statm").read_text().split()[1])
+    return pages * os.sysconf("SC_PAGE_SIZE")
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/statm").exists(), reason="RSS и malloc_trim — только Linux с glibc"
+)
+def test_docx_markup_names_do_not_accumulate(tmp_path: Path) -> None:
+    """Документы с уникальными именами элементов не копят память процесса (§1.5).
+
+    Без потока на документ словарь имён lxml вызывающего потока растёт на каждый
+    документ: здесь — на ~100 МБ за серию.
+    """
+    reader = _reader(tmp_path, docx_max_unpacked_bytes=64 << 20, docx_max_xml_bytes=64 << 20)
+    path = tmp_path / "doc"
+
+    def read(seed: int) -> None:
+        names = "".join(f"<x:e{seed}n{index} x:a{seed}n{index}='1'/>" for index in range(100_000))
+        body = f"<w:p xmlns:x='urn:x{seed}'>{names}</w:p>" + samples.paragraph("Текст")
+        path.write_bytes(samples.docx_package(body))
+        assert reader.page_text(path, DOCX, 1) == "Текст"
+
+    read(0)  # прогрев: библиотеки, потоки, области распределения
+    before = _rss_bytes()
+    for seed in range(1, 9):
+        read(seed)
+    assert _rss_bytes() - before < 20 << 20
+
+
+def test_docx_xpath_limit_means_unreadable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Выборка python-docx больше 10 млн узлов (предел XPath libxml2) — файл нечитаем.
+
+    Настоящее тело из 10,5 млн абзацев — это ~2 ГБ памяти на тест; отказ libxml2
+    подставлен, проверен он на образе стенда.
+    """
+    from docx.oxml.document import CT_Body
+    from lxml import etree
+
+    def refuse(self: CT_Body) -> list[Any]:
+        raise etree.XPathEvalError("Memory allocation failed : growing nodeset hit limit")
+
+    monkeypatch.setattr(CT_Body, "inner_content_elements", property(refuse))
+    path = tmp_path / "doc"
+    path.write_bytes(samples.docx_file("Текст"))
+    with pytest.raises(UnreadableDocumentError):
+        _reader(tmp_path).page_text(path, DOCX, 1)

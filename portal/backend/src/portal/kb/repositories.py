@@ -13,8 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from portal.core.audit import SqlAuditLog
 from portal.core.pagination import SortOrder
 from portal.core.ports import AuditLog, Clock
+from portal.files.ports import DOCX
 from portal.kb.domain import (
     BULK_PRIORITY_FROM,
+    DESCRIPTION_VERSION,
     INDEX_VERSION,
     DocumentStatus,
     DocumentView,
@@ -152,8 +154,19 @@ _FRAGMENTS_WITH_PAGES = kb_fragments.join(
         kb_pages.c.number == kb_fragments.c.page_number,
     ),
 )
-# Текст найденного: у фрагмента-картинки — её описание (§8.6).
-_FOUND_TEXT = sa.func.coalesce(kb_images.c.description, _FRAGMENT_TEXT).label("text")
+# Текст найденного (§8.6, §9.13): у фрагмента-картинки — его часть описания; у записанного
+# до 0.16 (`end_offset = 0`) — описание целиком.
+_FOUND_TEXT = sa.case(
+    (kb_fragments.c.image_id.is_(None), _FRAGMENT_TEXT),
+    (kb_fragments.c.end_offset == 0, kb_images.c.description),
+    else_=sa.func.substr(
+        kb_images.c.description,
+        kb_fragments.c.start_offset + 1,
+        kb_fragments.c.end_offset - kb_fragments.c.start_offset,
+    ),
+).label("text")
+# Документы, из которых могли выпасть картинки: переобработка `--images` (§11.6).
+_WITH_IMAGES = ("application/pdf", DOCX, "image/jpeg", "image/png")
 _PAGE_COLUMNS = (
     kb_pages.c.number,
     kb_pages.c.text,
@@ -584,15 +597,43 @@ class SqlDocumentRepository:
         """Сохранить строку картинки."""
         await self._connection.execute(sa.insert(kb_images).values(**_values(image, kb_images)))
 
-    async def describe_image(self, image_id: UUID, description: str) -> None:
-        """Записать описание картинки."""
+    async def describe_image(self, image_id: UUID, description: str, *, pending: bool) -> None:
+        """Записать описание текущей версии: в `pending_description` либо в `description`."""
+        values: dict[str, Any] = (
+            {"pending_description": description}
+            if pending
+            else {"description": description, "description_version": DESCRIPTION_VERSION}
+        )
         await self._connection.execute(
-            sa.update(kb_images).where(kb_images.c.id == image_id).values(description=description)
+            sa.update(kb_images).where(kb_images.c.id == image_id).values(**values)
         )
 
-    async def delete_image(self, image_id: UUID) -> None:
-        """Удалить строку картинки; её фрагмент уходит каскадом."""
-        await self._connection.execute(sa.delete(kb_images).where(kb_images.c.id == image_id))
+    async def finish_images(self, document_id: UUID, image_ids: Sequence[UUID]) -> None:
+        """Порядок картинок нового индекса и перенос нового описания (§10.6, шаг 2.1)."""
+        if not image_ids:
+            return
+        await self._connection.execute(
+            sa.update(kb_images)
+            .where(kb_images.c.id == sa.bindparam("image_id"))
+            .values(ordinal=sa.bindparam("new_ordinal")),
+            [
+                {"image_id": image_id, "new_ordinal": ordinal}
+                for ordinal, image_id in enumerate(image_ids)
+            ],
+        )
+        await self._connection.execute(
+            sa.update(kb_images)
+            .where(
+                kb_images.c.document_id == document_id,
+                kb_images.c.id.in_(image_ids),
+                kb_images.c.pending_description.is_not(None),
+            )
+            .values(
+                description=kb_images.c.pending_description,
+                description_version=DESCRIPTION_VERSION,
+                pending_description=None,
+            )
+        )
 
     async def set_images_truncated(self, document_id: UUID, truncated: bool) -> None:
         """Отметить, что картинок в документе больше лимита."""
@@ -661,6 +702,18 @@ class SqlDocumentRepository:
                 kept.add(fragment_id)
         return kept
 
+    async def contexts_by_text(self, document_id: UUID) -> dict[tuple[str | None, str], str]:
+        """Пояснения текстовых фрагментов по (раздел, текст); первый по порядку — главный."""
+        rows = await self._connection.execute(
+            _fragment_texts(document_id)
+            .add_columns(kb_fragments.c.context)
+            .where(kb_fragments.c.context.is_not(None))
+        )
+        contexts: dict[tuple[str | None, str], str] = {}
+        for row in rows:
+            contexts.setdefault((row.section, row.text), row.context)
+        return contexts
+
     async def delete(self, document_id: UUID) -> None:
         """Стереть строку документа; страницы, фрагменты и задания уходят каскадом."""
         await self._connection.execute(
@@ -681,12 +734,14 @@ class SqlDocumentRepository:
         rows = await self._connection.execute(query.order_by(kb_documents.c.created_at))
         return [row.id for row in rows]
 
-    async def ids_for_reprocess(self, *, all_ready: bool) -> list[UUID]:
+    async def ids_for_reprocess(self, *, all_ready: bool, images: bool = False) -> list[UUID]:
         """Готовые неудалённые документы для массовой переобработки, по времени добавления."""
         query = sa.select(kb_documents.c.id).where(
             kb_documents.c.deleted_at.is_(None), kb_documents.c.status == "ready"
         )
-        if not all_ready:
+        if images:
+            query = query.where(kb_documents.c.media_type.in_(_WITH_IMAGES))
+        elif not all_ready:
             query = query.where(
                 sa.or_(
                     kb_documents.c.index_version < INDEX_VERSION,
@@ -715,18 +770,49 @@ class SqlDocumentRepository:
             .order_by(kb_documents.c.reprocess_error)
         )
         paused = await self._connection.scalar(sa.select(kb_queue_control.c.bulk_paused))
+        old_descriptions = await self._connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(kb_images.join(kb_documents, kb_documents.c.id == kb_images.c.document_id))
+            .where(
+                live,
+                kb_images.c.description_version < DESCRIPTION_VERSION,
+                kb_images.c.description != "",
+            )
+        )
         return ReprocessStatus(
             current=current or 0,
             reprocess_jobs=waiting.get("reprocess", 0),
             context_jobs=waiting.get("context", 0),
             errors={code: count for code, count in errors},
             paused=bool(paused),
+            old_descriptions=old_descriptions or 0,
         )
 
 
 def _unleased(now: datetime) -> sa.ColumnElement[bool]:
     """Задание никто не держит в аренде: не взято либо аренда истекла (§11.1)."""
     return sa.or_(kb_jobs.c.locked_until.is_(None), kb_jobs.c.locked_until <= now)
+
+
+def _main_slot(busy_documents: Collection[UUID]) -> list[sa.ColumnElement[bool]]:
+    """Какие задания берёт основное место (§11.1), кроме срока и аренды.
+
+    Не `transcribe`; при паузе — не массовая переобработка; `index` и `reprocess`
+    документа из `busy_documents` ждут.
+    """
+    paused = sa.exists().where(kb_queue_control.c.bulk_paused)
+    conditions = [
+        kb_jobs.c.kind != "transcribe",
+        (kb_jobs.c.priority < BULK_PRIORITY_FROM) | ~paused,
+    ]
+    if busy_documents:
+        conditions.append(
+            ~(
+                kb_jobs.c.kind.in_(("index", "reprocess"))
+                & kb_jobs.c.document_id.in_(busy_documents)
+            )
+        )
+    return conditions
 
 
 class SqlJobQueue:
@@ -803,20 +889,36 @@ class SqlJobQueue:
         Задания `transcribe` не берутся; при паузе — и задания массовой переобработки;
         `index` и `reprocess` документа из `busy_documents` ждут.
         """
-        paused = sa.exists().where(kb_queue_control.c.bulk_paused)
-        conditions = [
-            kb_jobs.c.kind != "transcribe",
-            (kb_jobs.c.priority < BULK_PRIORITY_FROM) | ~paused,
-        ]
-        if busy_documents:
-            conditions.append(
-                ~(
-                    kb_jobs.c.kind.in_(("index", "reprocess"))
-                    & kb_jobs.c.document_id.in_(busy_documents)
-                )
-            )
-        row = await self._claim(now, lease_until, *conditions)
+        row = await self._claim(now, lease_until, *_main_slot(busy_documents))
         return Job(**row._asdict()) if row else None
+
+    async def bulk_paused(self) -> bool:
+        """Приостановлена ли массовая переобработка."""
+        return bool(await self._connection.scalar(sa.select(kb_queue_control.c.bulk_paused)))
+
+    async def has_waiting(
+        self, now: datetime, busy_documents: Collection[UUID], up_to_priority: int
+    ) -> bool:
+        """Ждёт ли задание, которое основное место взяло бы сейчас, не ниже приоритетом."""
+        query = sa.select(
+            sa.exists().where(
+                kb_jobs.c.run_after <= now,
+                _unleased(now),
+                kb_jobs.c.priority <= up_to_priority,
+                *_main_slot(busy_documents),
+            )
+        )
+        return bool(await self._connection.scalar(query))
+
+    async def yield_turn(self, job_id: UUID, requeued_at: datetime | None) -> bool:
+        """Снять аренду уступившего задания; попытки — с нуля, `run_after` прежний (§11.1)."""
+        values: dict[str, Any] = {"locked_until": None, "attempts": 0}
+        if requeued_at is not None:
+            values["created_at"] = requeued_at
+        result = await self._connection.execute(
+            sa.update(kb_jobs).where(kb_jobs.c.id == job_id).values(**values)
+        )
+        return result.rowcount > 0
 
     async def claim_transcription(
         self, now: datetime, lease_until: datetime

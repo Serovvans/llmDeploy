@@ -15,12 +15,15 @@ from uuid import UUID, uuid4
 
 from portal.core.errors import (
     AppError,
+    docx_images_too_large,
+    docx_too_large,
     field_error,
     file_too_large,
     file_unreadable,
     forbidden,
     not_found,
     service_unavailable,
+    storage_full,
     too_many_pages,
     unauthenticated,
     unsupported_file_type,
@@ -32,6 +35,7 @@ from portal.core.settings import KbSettings
 from portal.files.names import display_file_name
 from portal.files.ports import (
     DocumentReader,
+    DocxTooLargeError,
     FileStorage,
     FileTooLargeError,
     MediaStorage,
@@ -189,13 +193,15 @@ class KbService:
         document_executor: Executor,
         clock: Clock,
         settings: KbSettings,
+        min_free_bytes: int,
     ) -> None:
         """Получить зависимости явно.
 
         `document_executor` — потоки чтения документов, отдельные от общего пула.
         `index` нужен только правке тегов: других записей в Qdrant у API нет (§10).
         `media` — файлы записей; `sessions` — проверка, что сессия долгой загрузки записи
-        ещё существует (§1.6).
+        ещё существует (§1.6). `min_free_bytes` — порог свободного места тома файлов, тот
+        же, что у записей (`media.min_free_bytes`, §8.1).
         """
         self._uow_factory = uow_factory
         self._storage = storage
@@ -206,6 +212,7 @@ class KbService:
         self._document_executor = document_executor
         self._clock = clock
         self._settings = settings
+        self._min_free_bytes = min_free_bytes
 
     def _selected_tag_keys(self, tags: Sequence[str]) -> list[str]:
         """Ключи тегов отбора; проверяется только формат: несуществующий тег — не ошибка."""
@@ -257,6 +264,15 @@ class KbService:
         if view is None:
             raise not_found()
         return view
+
+    async def check_free_space(self) -> None:
+        """Место на томе файлов до приёма тела (§8.1): меньше порога — `storage_full`.
+
+        Проверяется до разбора формы: разбор уже пишет файл во временный файл на том же
+        диске.
+        """
+        if await self._storage.free_bytes() < self._min_free_bytes:
+            raise storage_full()
 
     async def add(
         self,
@@ -411,12 +427,20 @@ class KbService:
         return self._added(user, document, target.tags)
 
     def _inspect(self, path: Path, file_name: str) -> tuple[MediaType, int | None]:
-        """Тип по содержимому, читаемость и число страниц; блокирующий вызов."""
-        media_type = self._reader.detect(path, file_name)
-        if media_type is None:
-            raise unsupported_file_type()
+        """Тип по содержимому, читаемость и число страниц; блокирующий вызов.
+
+        Разметку DOCX здесь никто не разбирает: пределы DOCX проверяются по оглавлению
+        архива, испорченную разметку найдёт воркер (§1.5, §8.1).
+        """
         try:
+            media_type = self._reader.detect(path, file_name)
+            if media_type is None:
+                raise unsupported_file_type()
             page_count = self._reader.page_count(path, media_type)
+        except DocxTooLargeError as error:
+            raise (
+                docx_images_too_large() if error.reason == "images" else docx_too_large()
+            ) from None
         except UnreadableDocumentError:
             raise file_unreadable() from None
         max_pages = self._settings.document_max_pages
