@@ -22,3 +22,4 @@ htmlcov/
 
 # ключ разработчика для прямого доступа к моделям
 scripts/.env.dev
+deploy/.env.deploy_copy
