@@ -69,6 +69,9 @@ def override_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
             "session": {"stream_recheck_seconds": 1},
         },
         "files": {"root": str(directory / "files")},
+        # Порог свободного места (10 ГБ) на машине разработчика не выдержать: загрузки в
+        # тестах его не проверяют, кроме тех, что задают его сами (§1.6, §8.1).
+        "media": {"min_free_bytes": 0},
         # Короткие ожидания: тесты потока не должны ждать секунды.
         "dialogs": {"stop_grace_seconds": 1, "title_wait_seconds": 1, "keepalive_seconds": 0.2},
     }

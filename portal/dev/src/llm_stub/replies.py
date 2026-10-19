@@ -29,6 +29,13 @@ _SQL_DATA_MARK = re.compile(r"\[\[stub:sql-data\]\](.*?)\[\[/stub:sql-data\]\]",
 _SQL_FIX_MARK = re.compile(r"\[\[stub:sql-fix\]\](.*?)\[\[/stub:sql-fix\]\]", re.DOTALL)
 _NO_SQL_DATA = '{"statements": []}'
 _WORD = re.compile(r"[^\W_]+")
+# Особые ширины PNG в запросе описания картинки (§12.2): проверка правил описания §8.6.
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_EMPTY_WIDTH = 701
+_LONG_WIDTH = 702
+_CUT_WIDTH = 703
+_LONG_DESCRIPTION_CHARS = 3000
+_FULL_DESCRIPTION_TOKENS = 4096
 
 
 @dataclass(frozen=True)
@@ -98,7 +105,38 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:8]
 
 
-def protocol_reply(turn: UserTurn) -> str | None:
+def _png_width(data: bytes) -> int | None:
+    """Ширина PNG из заголовка `IHDR`; `None` — это не PNG."""
+    if not data.startswith(_PNG_SIGNATURE) or data[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(data[16:20], "big")
+
+
+def image_description(image: bytes, max_tokens: int | None) -> tuple[str, str]:
+    """Описание картинки и `finish_reason`; особые ширины PNG 701–703 (§12.2).
+
+    701 — пустой ответ; 702 — описание длиннее 3000 символов; 703 — при `max_tokens`
+    меньше 4096 начало описания с `length`, иначе обычный ответ. Без `max_tokens` предела
+    нет — обычный ответ.
+    """
+    digest = _digest(image)
+    width = _png_width(image)
+    if width == _EMPTY_WIDTH:
+        return "", "stop"
+    if width == _LONG_WIDTH:
+        text = ""
+        number = 0
+        while len(text) <= _LONG_DESCRIPTION_CHARS:
+            number += 1
+            line = f"Описание изображения-заглушки {digest}, строка {number}."
+            text = f"{text}\n{line}" if text else line
+        return text, "stop"
+    if width == _CUT_WIDTH and max_tokens is not None and max_tokens < _FULL_DESCRIPTION_TOKENS:
+        return f"Начало описания-заглушки {digest}.", "length"
+    return f"Описание изображения-заглушки {digest}.", "stop"
+
+
+def protocol_reply(turn: UserTurn, max_tokens: int | None = None) -> str | None:
     """Ответ на запрос одного из протоколов 0.15; `None` — это не такой запрос.
 
     Проверяется раньше остальных правил: пометка `[[stub:reply]]` из вопроса теста,
@@ -109,7 +147,7 @@ def protocol_reply(turn: UserTurn) -> str | None:
         asked = _block(_block(turn.text, "диалог"), "пользователь")
         return " ".join(part for part in (asked, _block(turn.text, "вопрос")) if part)
     if first_line == IMAGE_PROMPT and len(turn.images) == 1:
-        return f"Описание изображения-заглушки {_digest(turn.images[0])}."
+        return image_description(turn.images[0], max_tokens)[0]
     if first_line == CONTEXT_PROMPT:
         return f"Контекстная справка {_digest(_block(turn.text, 'фрагмент').encode())}."
     if first_line == SQL_DATA_PROMPT:
@@ -122,10 +160,13 @@ def protocol_reply(turn: UserTurn) -> str | None:
 
 
 def reply_text(
-    turn: UserTurn, response_format: Mapping[str, Any] | None, images_in_request: int
+    turn: UserTurn,
+    response_format: Mapping[str, Any] | None,
+    images_in_request: int,
+    max_tokens: int | None = None,
 ) -> str:
     """Текст ответа: протоколы 0.15, затем первое подходящее правило контракта, сверху вниз."""
-    if (by_protocol := protocol_reply(turn)) is not None:
+    if (by_protocol := protocol_reply(turn, max_tokens)) is not None:
         return by_protocol
     if (marked := _REPLY_MARK.search(turn.text)) is not None:
         return marked.group(1)
@@ -138,6 +179,15 @@ def reply_text(
     if any(line.startswith("[1] ") for line in turn.text.splitlines()):
         answer += " [1]"
     return answer
+
+
+def finish_reason(turn: UserTurn, max_tokens: int | None) -> str:
+    """`length` — пометка `[[stub:length]]` или описание картинки шириной 703 до 4096 токенов."""
+    if "[[stub:length]]" in turn.text:
+        return "length"
+    if turn.text.partition("\n")[0] == IMAGE_PROMPT and len(turn.images) == 1:
+        return image_description(turn.images[0], max_tokens)[1]
+    return "stop"
 
 
 def text_parts(text: str, *, slow: bool) -> list[str]:

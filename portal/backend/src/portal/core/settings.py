@@ -147,6 +147,8 @@ class LlmSettings(_Section):
     recognition_attempts: int = Field(ge=1)
     recognition_retry_pause_seconds: float = Field(ge=0)
     recognition_system_prompt: str = Field(min_length=1)
+    # Срок ответа на запросы воркера без потока (§12.1); объявляет rag-engineer в kb.yaml.
+    background_timeout_seconds: int = Field(ge=1)
 
 
 class FilesSettings(_Section):
@@ -158,6 +160,8 @@ class FilesSettings(_Section):
     image_max_pixels: int = Field(ge=1)
     docx_max_unpacked_bytes: int = Field(ge=1)
     docx_max_xml_bytes: int = Field(ge=1)
+    docx_max_media_bytes: int = Field(ge=1)
+    zip_max_directory_bytes: int = Field(ge=1)
     pdf_render_scale: float = Field(gt=0)
     reader_workers: int = Field(ge=1)
 
@@ -197,6 +201,7 @@ class KbIndexingSettings(_Section):
     """Пределы конвейера индексации."""
 
     document_max_chars: int = Field(ge=1)
+    max_fragments: int = Field(ge=1)
 
 
 class KbChunkingSettings(_Section):
@@ -275,6 +280,7 @@ class KbWorkerSettings(_Section):
     heartbeat_stale_seconds: float = Field(gt=0)
     chat_slots: int = Field(ge=1)
     background_llm_parallel: int = Field(ge=1)
+    slice_seconds: float = Field(gt=0)
 
     @model_validator(mode="after")
     def _check_heartbeat(self) -> Self:
@@ -300,6 +306,8 @@ class KbImagesSettings(_Section):
     min_area_px: int = Field(ge=1)
     max_per_document: int = Field(ge=1)
     description_max_tokens: int = Field(ge=1)
+    description_retry_max_tokens: int = Field(ge=1)
+    description_max_chars: int = Field(ge=1)
     system_prompt: str = Field(min_length=1)
 
 

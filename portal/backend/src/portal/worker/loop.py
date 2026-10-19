@@ -17,11 +17,12 @@ from portal.core.ports import Clock
 from portal.core.settings import KbWorkerSettings
 from portal.dialogs.ports import AttachmentTranscripts
 from portal.files.ports import MediaStorage
-from portal.kb.domain import ErrorCode, Job, TranscriptionJob
+from portal.kb.domain import BULK_PRIORITY_FROM, ErrorCode, Job, TranscriptionJob
 from portal.kb.explaining import Contextualizer
 from portal.kb.indexing import Indexer
-from portal.kb.outcomes import JobAbandonedError, PermanentIndexError
+from portal.kb.outcomes import JobAbandonedError, JobYieldedError, PermanentIndexError
 from portal.kb.ports import RecognitionFailedError, VectorIndex
+from portal.kb.slicing import JobSlice
 from portal.kb.store import KbUnitOfWorkFactory
 from portal.media.ports import AudioToolsError, SpeechRecognitionError
 from portal.worker.sweep import RecordingJanitor
@@ -45,6 +46,28 @@ def _job_fields(job: Job) -> dict[str, object]:
         "kind": job.kind,
         "attempt": job.attempts,
     }
+
+
+class _Lease:
+    """Продление аренды взятого задания (§11.1)."""
+
+    def __init__(self, renewal: asyncio.Task[None], stopping: asyncio.Event) -> None:
+        """Запомнить задачу продления и признак её остановки."""
+        self._renewal = renewal
+        self._stopping = stopping
+
+    def cancel(self) -> None:
+        """Прекратить продление сразу: строки задания уже нет, продлевать нечего."""
+        self._renewal.cancel()
+
+    async def stop(self) -> None:
+        """Остановить продление и дождаться идущего — перед тем как вернуть задание в очередь.
+
+        Иначе продление, зафиксированное после возврата, вернуло бы аренду, и задание
+        было бы невидимо до её истечения (§11.1, §11.5).
+        """
+        self._stopping.set()
+        await asyncio.wait({self._renewal})
 
 
 def _exhausted_code(error: Exception) -> ErrorCode:
@@ -228,20 +251,21 @@ class Worker:
         self,
         job_id: UUID,
         fields: dict[str, object],
-        execute: Callable[[Callable[[], object]], Awaitable[None]],
+        execute: Callable[[_Lease], Awaitable[None]],
         release: Callable[[], Awaitable[None]],
     ) -> None:
         """Выполнить взятое задание, продлевая аренду; исключения наружу не выходят.
 
-        `execute` получает функцию «продление больше не нужно»: её вызывает задание,
-        которое зафиксировало завершение и ещё убирает за собой, — иначе продление не
-        нашло бы строки и приняло выполненное задание за снятое.
+        `execute` получает аренду: `cancel` вызывает задание, которое зафиксировало
+        завершение и ещё убирает за собой, — иначе продление не нашло бы строки и приняло
+        выполненное задание за снятое; `stop` — перед возвратом задания в очередь.
         """
         current = asyncio.current_task()
         assert current is not None
-        renewal = asyncio.create_task(self._keep_lease(job_id, fields, current))
+        stopping = asyncio.Event()
+        renewal = asyncio.create_task(self._keep_lease(job_id, fields, current, stopping))
         try:
-            await execute(renewal.cancel)
+            await execute(_Lease(renewal, stopping))
         except asyncio.CancelledError:
             if job_id in self._withdrawn:
                 self._withdrawn.discard(job_id)
@@ -259,7 +283,7 @@ class Worker:
         finally:
             renewal.cancel()
 
-    async def _execute(self, job: Job, settled: Callable[[], object]) -> None:
+    async def _execute(self, job: Job, lease: _Lease) -> None:
         if job.kind != "delete" and job.attempts > self._settings.max_attempts:
             # Предел достигнут ещё до взятия: на задании погибал сам процесс воркера (§11.1).
             logger.warning("job attempts exhausted", extra=_job_fields(job))
@@ -267,15 +291,22 @@ class Worker:
                 await self._indexer.prune(job.document_id)
             await self._give_up(job, "internal_error")
             return
+        turn = JobSlice(
+            job, self._uow_factory, self._clock, self._settings.slice_seconds, self._processing
+        )
+        finished = True
         try:
             if job.kind == "delete":
                 await self._indexer.erase(job)
             elif job.kind == "context":
-                await self._contextualize(job)
+                finished = await self._contextualize(job, lease)
             elif job.kind == "reprocess":
-                await self._indexer.reprocess(job, settled)
+                await self._indexer.reprocess(job, lease.cancel, turn)
             else:
-                await self._indexer.index(job, settled)
+                await self._indexer.index(job, lease.cancel, turn)
+        except JobYieldedError:
+            await lease.stop()
+            await self._yield(job)
         except JobAbandonedError:
             await self._finish(job)
             logger.info("job abandoned", extra=_job_fields(job))
@@ -286,24 +317,57 @@ class Worker:
             logger.warning("job failed", extra={**_job_fields(job), **_failure(error)})
             await self._retry_later(job, _exhausted_code(error))
         else:
-            logger.info("job done", extra=_job_fields(job))
+            if finished:
+                logger.info("job done", extra=_job_fields(job))
 
-    async def _contextualize(self, job: Job) -> None:
+    async def _contextualize(self, job: Job, lease: _Lease) -> bool:
         """Одна порция пояснений; затем задание возвращает место воркера (§11.5).
 
         Выполненное задание снимает сам этап — в той же транзакции, где он убедился, что
-        фрагментов без пояснения нет.
+        фрагментов без пояснения нет. Возвращает, завершено ли задание: порция, после
+        которой оно вернулось в очередь, — не завершение.
         """
         if await self._contextualizer.run(job):
+            await lease.stop()
             async with self._uow_factory() as uow:
                 await uow.jobs.requeue(job.id)
+            return False
+        return True
+
+    async def _yield(self, job: Job) -> None:
+        """Уступка основного места (§11.1): работа сохранена, попытка не засчитывается.
+
+        Обычное задание встаёт за ждущими своего приоритета, массовое сохраняет место
+        среди массовых. Документ задания `index` — «в очереди» до следующего взятия.
+        """
+        requeued_at = None if job.priority >= BULK_PRIORITY_FROM else self._clock.now()
+        async with self._uow_factory() as uow:
+            document = await uow.documents.lock(job.document_id)
+            yielded = await uow.jobs.yield_turn(job.id, requeued_at)
+            if yielded and job.kind == "index" and document is not None:
+                await uow.documents.set_status(job.document_id, "queued")
+        logger.info("job yielded", extra=_job_fields(job))
 
     async def _keep_lease(
-        self, job_id: UUID, fields: dict[str, object], task: asyncio.Task[None]
+        self,
+        job_id: UUID,
+        fields: dict[str, object],
+        task: asyncio.Task[None],
+        stopping: asyncio.Event,
     ) -> None:
-        """Продлевать аренду; если задания больше нет — прекратить его работу."""
+        """Продлевать аренду, пока не выставлен `stopping`; задания нет — прекратить работу.
+
+        Остановка ждёт идущего продления, а не обрывает его: после остановки продления
+        уже не будет.
+        """
+        interval = self._settings.lease_seconds / _RENEWALS_PER_LEASE
         while True:
-            await asyncio.sleep(self._settings.lease_seconds / _RENEWALS_PER_LEASE)
+            try:
+                await asyncio.wait_for(stopping.wait(), interval)
+            except TimeoutError:
+                pass
+            else:
+                return
             try:
                 async with self._uow_factory() as uow:
                     kept = await uow.jobs.renew(job_id, self._clock.now() + self._lease)

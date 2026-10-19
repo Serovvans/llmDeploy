@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import re
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import uuid4
@@ -52,3 +53,12 @@ class DiskFileStorage:
     async def delete(self, key: str) -> None:
         """Удалить файл; отсутствие файла — не ошибка."""
         await asyncio.to_thread(self.path(key).unlink, missing_ok=True)
+
+    async def free_bytes(self) -> int:
+        """Свободное место на томе корня; до первой загрузки корня может не быть."""
+
+        def free() -> int:
+            self._root.mkdir(parents=True, exist_ok=True)
+            return shutil.disk_usage(self._root).free
+
+        return await asyncio.to_thread(free)

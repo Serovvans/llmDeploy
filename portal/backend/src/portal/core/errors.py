@@ -130,6 +130,25 @@ def file_unreadable() -> AppError:
     )
 
 
+def docx_too_large() -> AppError:
+    """В DOCX разметки или прочего содержимого, кроме картинок, больше предела (§1.5)."""
+    return AppError(
+        422,
+        "docx_too_large",
+        "В документе Word слишком много содержимого помимо картинок. Разделите его на части.",
+    )
+
+
+def docx_images_too_large() -> AppError:
+    """Картинки DOCX вместе больше предела (§1.5)."""
+    return AppError(
+        422,
+        "docx_images_too_large",
+        "Картинки в документе Word занимают слишком много места. "
+        "Уменьшите их или разделите документ на части.",
+    )
+
+
 def too_many_pages(max_pages: int) -> AppError:
     """В PDF больше страниц, чем разрешено его области (§1.5)."""
     return AppError(
@@ -172,3 +191,12 @@ def media_quota_exceeded(reason: Literal["total", "user", "free_space"]) -> AppE
         else "Место под записи закончилось, обратитесь к администратору."
     )
     return AppError(507, "media_quota_exceeded", message, details={"reason": reason})
+
+
+def storage_full() -> AppError:
+    """На томе файлов меньше порога свободного места (§8.1); размеры не раскрываются."""
+    return AppError(
+        507,
+        "storage_full",
+        "На сервере заканчивается место для файлов. Сообщите администратору.",
+    )

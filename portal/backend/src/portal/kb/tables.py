@@ -80,6 +80,8 @@ kb_images = sa.Table(
     sa.Column("width", sa.Integer, nullable=False),
     sa.Column("height", sa.Integer, nullable=False),
     sa.Column("description", sa.Text),
+    sa.Column("description_version", sa.SmallInteger, nullable=False, server_default="1"),
+    sa.Column("pending_description", sa.Text),
 )
 
 kb_fragments = sa.Table(

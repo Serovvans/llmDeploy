@@ -225,6 +225,32 @@ async def test_text_volume_is_limited_by_configuration(settings: Settings, tmp_p
         await close_portal(bench.portal)
 
 
+async def test_fragment_count_is_limited_before_embeddings(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Короткие строки-заголовки укладываются в предел символов, но не в предел фрагментов."""
+    tuned = kb_settings(
+        settings,
+        tmp_path,
+        indexing=settings.kb.indexing.model_copy(update={"max_fragments": 3}),
+    )
+    bench = await make_kb_bench(tuned)
+    try:
+        client = await bench.portal.employee()
+        many = await added(client, "заголовки.md", "# а\nx\n".encode() * 4)
+        await bench.drain()
+        assert await _status(bench, many) == ("error", "document_too_long")
+        assert await _jobs(bench) == []  # ошибка постоянная: задание снято сразу
+        assert bench.embedder.batches == []  # к модели эмбеддингов не обращались
+        assert await bench.points() == 0
+        fits = await added(client, "три.md", "# б\ny\n".encode() * 3)
+        await bench.drain()
+        assert await _status(bench, fits) == ("ready", None)
+        assert len(await bench.portal.rows("SELECT 1 FROM kb_fragments")) == 3
+    finally:
+        await close_portal(bench.portal)
+
+
 # --- идемпотентность и повторы ---
 
 

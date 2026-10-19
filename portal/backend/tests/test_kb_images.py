@@ -1,6 +1,7 @@
 """Картинки документов: извлечение, описание, фрагмент-картинка, выдача (§8.6)."""
 
 import hashlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ import pytest
 from portal.core.settings import Settings
 from portal.files.ports import DocumentImage
 from portal.kb.ports import VectorIndexUnavailableError
-from portal.llm.ports import ModelUnavailableError
+from portal.llm.ports import Completion, ModelUnavailableError
 from tests import samples
 from tests.conftest import close_portal, make_kb_bench
 from tests.kb_support import SHARED, KbBench, added, kb_settings
@@ -216,7 +217,8 @@ async def test_picture_file_is_both_a_scan_and_a_picture(bench: KbBench) -> None
     )
     # Текст распознан как страница-скан, сам файл — одна картинка на той же странице.
     assert [(f.page_number, f.image_id) for f in fragments] == [(1, None), (1, image.id)]
-    assert (fragments[1].start_offset, fragments[1].end_offset) == (0, 0)
+    # Границы фрагмента-картинки — его часть описания; короткое описание — целиком.
+    assert (fragments[1].start_offset, fragments[1].end_offset) == (0, len(image.description))
     assert _image_files(portal)[0].read_bytes().startswith(PNG_SIGNATURE)
 
 
@@ -267,3 +269,177 @@ async def test_model_failure_on_description_ends_as_recognition_failed(
     await bench.drain()
     (described,) = await _images(portal)
     assert described.id == image.id and described.description
+
+
+def _image_log(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
+    """Записи журнала об описаниях: сообщение и причина; текста описаний в них нет."""
+    records = [record for record in caplog.records if record.name == "portal.kb.images"]
+    for record in records:
+        assert {"document_id", "image_id", "reason"} <= set(vars(record))
+        assert "Описание" not in record.getMessage() and "Ж" not in str(vars(record))
+    return [(record.getMessage(), record.__dict__["reason"]) for record in records]
+
+
+async def test_stub_widths_drop_split_and_retry_descriptions(
+    bench: KbBench, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ширины заглушки 701–703 (§12.2): пустое описание, длинное, упёршееся в предел."""
+    portal = bench.portal
+    client = await portal.employee()
+    pictures = samples.png(701, 200), samples.png(702, 200), samples.png(703, 200)
+    await added(client, "скриншоты.docx", samples.docx_with_pictures(*pictures))
+    with caplog.at_level(logging.WARNING, logger="portal.kb.images"):
+        await bench.drain()
+
+    # Пустое описание: картинка отброшена при замене индекса, её файла нет.
+    long, full = await portal.rows(
+        "SELECT id, ordinal, description, description_version, pending_description"
+        " FROM kb_images ORDER BY ordinal"
+    )
+    assert [(row.ordinal, row.description_version) for row in (long, full)] == [(0, 2), (1, 2)]
+    assert len(_image_files(portal)) == 2 and long.pending_description is None
+    assert _image_log(caplog) == [("image dropped", "empty")]
+    # Упёршееся в предел описание запрошено ещё раз с бо́льшим пределом и пришло целиком.
+    images = bench.settings.images
+    assert full.description.startswith("Описание изображения-заглушки")
+    assert sorted(tokens or 0 for tokens in bench.model.max_tokens) == [
+        images.description_max_tokens
+    ] * 3 + [images.description_retry_max_tokens]
+
+    # Длинное описание — несколько фрагментов одной картинки по правилам длины фрагмента.
+    parts = await portal.rows(
+        "SELECT ordinal, start_offset, end_offset FROM kb_fragments WHERE image_id = :id"
+        " ORDER BY ordinal",
+        id=long.id,
+    )
+    max_chars = bench.settings.chunking.max_chars
+    assert len(long.description) > 3000 and len(parts) >= 3
+    assert parts[0].start_offset == 0 and parts[-1].end_offset == len(long.description)
+    assert all(0 < part.end_offset - part.start_offset <= max_chars for part in parts)
+    texts = await portal.rows("SELECT ordinal FROM kb_fragments WHERE image_id IS NULL")
+    assert min(part.ordinal for part in parts) > max(row.ordinal for row in texts)
+
+    # Источник — часть описания: она и цитата, и текст для модели.
+    found = await bench.knowledge.retrieve("строка 40", await portal.user_id("ivanov"), SHARED)
+    source = next(source for source in found.sources if source.image_id == long.id)
+    assert source.quote in long.description and len(source.quote) <= max_chars
+    assert "строка 40." in source.quote and source.quote != long.description
+
+
+async def test_descriptions_cut_by_limits_are_kept_or_dropped_and_logged(
+    image_bench: MakeBench, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Упор в предел и после повтора, обрезка по длине (§8.6); текст в журнал не попадает."""
+    bench = await image_bench(worker={"background_llm_parallel": 1})
+    portal = bench.portal
+    client = await portal.employee()
+    bench.model.completions = [
+        Completion("", "length"),
+        Completion("", "length"),
+        Completion("Нача", "length"),
+        Completion("  Начало описания схемы\x00 ", "length"),
+        Completion("Ж" * 5000, "stop"),
+    ]
+    pictures = (samples.png(300, 200, color) for color in ("red", "green", "blue"))
+    await added(client, "схемы.docx", samples.docx_with_pictures(*pictures))
+    with caplog.at_level(logging.WARNING, logger="portal.kb.images"):
+        await bench.drain()
+
+    rows = await _images(portal)
+    max_chars = bench.settings.images.description_max_chars
+    assert [row.description for row in rows] == ["Начало описания схемы", "Ж" * max_chars]
+    images = bench.settings.images
+    first, retry = images.description_max_tokens, images.description_retry_max_tokens
+    assert bench.model.max_tokens == [first, retry, first, retry, first]
+    assert _image_log(caplog) == [
+        ("image dropped", "length"),
+        ("image description truncated", "length"),
+        ("image description truncated", "max_chars"),
+    ]
+
+
+async def test_old_descriptions_are_replaced_only_together_with_the_index(
+    bench: KbBench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Переобработка 0.16 (§8.6, §11.6): пока индекс не заменён, ищется прежнее описание."""
+    portal = bench.portal
+    client = await portal.employee()
+    user = await portal.user_id("ivanov")
+    await added(client, "схема.docx", samples.docx_with_pictures(samples.png(300, 200)))
+    await added(client, "заметка.txt", "Текстовая заметка без картинок.".encode())
+    await bench.drain()
+    (image,) = await _images(portal)
+    # Как до 0.16: описание прежних правил, фрагмент-картинка — описание целиком.
+    await portal.execute(
+        "UPDATE kb_images SET description = 'Старое описание схемы', description_version = 1"
+    )
+    await portal.execute(
+        "UPDATE kb_fragments SET start_offset = 0, end_offset = 0 WHERE image_id IS NOT NULL"
+    )
+    asked = _descriptions_asked(bench)
+    assert (await bench.reprocessor.status()).old_descriptions == 1
+    assert await bench.reprocessor.start(all_ready=False, images=True) == 1  # TXT не берётся
+
+    async def broken(*_: Any) -> None:
+        raise VectorIndexUnavailableError
+
+    original = bench.index.stage_document
+    monkeypatch.setattr(bench.index, "stage_document", broken)
+    assert await bench.drain() == 1
+    (pending,) = await portal.rows(
+        "SELECT description, description_version, pending_description FROM kb_images"
+    )
+    assert (pending.description, pending.description_version) == ("Старое описание схемы", 1)
+    assert pending.pending_description == image.description
+    found = await bench.knowledge.retrieve(image.description, user, SHARED)
+    assert [source.quote for source in found.sources if source.image_id] == [
+        "Старое описание схемы"
+    ]
+
+    monkeypatch.setattr(bench.index, "stage_document", original)
+    await portal.execute("UPDATE kb_jobs SET run_after = :now", now=portal.clock.now())
+    assert await bench.drain() == 1
+    (replaced,) = await portal.rows(
+        "SELECT id, description, description_version, pending_description FROM kb_images"
+    )
+    assert tuple(replaced) == (image.id, image.description, 2, None)
+    assert _descriptions_asked(bench) == asked + 1  # новое описание из попытки не потеряно
+    assert (await bench.reprocessor.status()).old_descriptions == 0
+    found = await bench.knowledge.retrieve(image.description, user, SHARED)
+    assert [source.quote for source in found.sources if source.image_id] == [image.description]
+
+
+async def test_reprocessing_orders_pictures_by_new_index_and_passes_saved_ones_as_known(
+    bench: KbBench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    portal = bench.portal
+    client = await portal.employee()
+    await added(client, "схема.docx", samples.docx_with_pictures(samples.png(300, 200, "red")))
+    await bench.drain()
+    (red,) = await portal.rows("SELECT id, sha256 FROM kb_images")
+    blue = DocumentImage(
+        samples.png(310, 210, "blue"), "image/png", 310, 210, hashlib.sha256(b"blue").digest()
+    )
+    original = bench.reader.embedded_images
+    known: list[frozenset[bytes]] = []
+
+    def blue_first(*args: Any, **kwargs: Any) -> list[DocumentImage]:
+        known.append(kwargs["known"])
+        return [blue, *original(*args, **kwargs)]
+
+    monkeypatch.setattr(bench.reader, "embedded_images", blue_first)
+    assert await bench.reprocessor.start(all_ready=True) == 1
+    await bench.drain()
+
+    # Сохранённая картинка не декодируется заново; порядок — по новому индексу.
+    assert known == [frozenset({bytes(red.sha256)})]
+    rows = await portal.rows("SELECT id, ordinal, sha256 FROM kb_images ORDER BY ordinal")
+    assert [(bytes(row.sha256), row.ordinal) for row in rows] == [
+        (blue.sha256, 0),
+        (bytes(red.sha256), 1),
+    ]
+    assert rows[1].id == red.id
+    fragments = await portal.rows(
+        "SELECT image_id FROM kb_fragments WHERE image_id IS NOT NULL ORDER BY ordinal"
+    )
+    assert [fragment.image_id for fragment in fragments] == [rows[0].id, red.id]

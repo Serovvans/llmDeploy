@@ -53,8 +53,8 @@ make portal-admin LOGIN=<логин> NAME="<ФИО>"   # первый админ
 make backup DIR=<каталог вне репозитория>      # резервная копия
 ```
 
-Обновление работающего сервиса до версии портала 0.5 — не повтор этапа, а порядок релиза
-(по шагам — [`docs/release-0.5.md`](docs/release-0.5.md), пояснения — runbook §4.6): `make release-prepare`, `make release-rehearse`, `make release-backup`,
+Обновление работающего сервиса до новой версии портала — не повтор этапа, а порядок релиза
+(по шагам: 0.5 — [`docs/release-0.5.md`](docs/release-0.5.md), 0.6 — [`docs/release-0.6.md`](docs/release-0.6.md); пояснения — runbook §4.6): `make release-prepare`, `make release-rehearse`, `make release-backup`,
 `make portal`, при сбое — `make release-rollback`; затем переобработка документов —
 `make portal-reprocess-start` (runbook §3.10).
 

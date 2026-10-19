@@ -359,6 +359,22 @@ async def test_document_is_ready_at_once_and_explanations_come_in_portions(
     assert all("справка" not in source.quote.lower() for source in found.sources)
 
 
+async def test_context_job_logs_done_once_after_the_last_portion(
+    explaining: KbBench, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Порция, после которой задание вернулось в очередь, — не завершение задания."""
+    bench = explaining
+    ivanov, _ = await _user(bench)
+    await added(ivanov, "Договор.txt", SECTIONS.encode())
+    assert await bench.worker.run_once()
+
+    with caplog.at_level(logging.INFO, logger="portal.worker.loop"):
+        assert await bench.drain() > 1  # несколько порций одного задания
+    assert await _jobs(bench) == []
+    done = [record for record in caplog.records if record.getMessage() == "job done"]
+    assert [getattr(record, "kind", None) for record in done] == ["context"]
+
+
 async def _retry_now(bench: KbBench) -> None:
     await bench.portal.execute("UPDATE kb_jobs SET run_after = :now", now=bench.portal.clock.now())
 

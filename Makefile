@@ -69,8 +69,10 @@ FROM ?=
 GPU_MEM_UTIL ?=
 LIVE ?=
 RERANK ?=
-# Переобработка: ALL=1 — все готовые документы, а не только с прежним индексом.
+# Переобработка: ALL=1 — все готовые документы, а не только с прежним индексом;
+# IMAGES=1 — готовые PDF, DOCX и картинки (после 0.16). Вместе не допускаются.
 ALL ?=
+IMAGES ?=
 # Сквозные тесты: один браузер из playwright.config.ts (make dev-test PROJECT=chromium).
 PROJECT ?=
 # Эти значения попадают в команды только через окружение ("$$NAME"), а не подстановкой
@@ -200,8 +202,9 @@ portal-eval-search: ## Оценить поиск базы знаний на ко
 
 # Массовая переобработка после релиза (docs/portal-design.md §8.2): документ остаётся в
 # поиске с прежним индексом, пока не готов новый. Не путать с portal-reindex.
-portal-reprocess-start: ## Поставить документы на переобработку без выпадения из поиска ([ALL=1] — все готовые)
-	$(COMPOSE) exec -T portal-worker portal reprocess start $(if $(ALL),--all)
+portal-reprocess-start: ## Поставить документы на переобработку без выпадения из поиска ([ALL=1] — все готовые | [IMAGES=1] — PDF, DOCX, картинки)
+	@[[ -z "$(ALL)" || -z "$(IMAGES)" ]] || { echo "ALL=1 и IMAGES=1 вместе не допускаются: укажите один из них" >&2; exit 1; }
+	$(COMPOSE) exec -T portal-worker portal reprocess start $(if $(ALL),--all) $(if $(IMAGES),--images)
 
 portal-reprocess-pause: ## Приостановить массовую переобработку
 	$(COMPOSE) exec -T portal-worker portal reprocess pause

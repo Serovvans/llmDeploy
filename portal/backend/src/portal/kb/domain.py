@@ -38,6 +38,8 @@ BULK_PRIORITY_FROM = 35
 BULK_CONTEXT_PRIORITY = 35
 # Порядок обработки, которым строят индекс задания `index` и `reprocess` (§9.11).
 INDEX_VERSION = 2
+# Правила, по которым составлено описание картинки: 1 — до 0.16, 2 — правила 0.16 (§8.6).
+DESCRIPTION_VERSION = 2
 # Расшифровка записи во вложении чата (§11.7): раньше заданий индексации.
 TRANSCRIBE_PRIORITY = 10
 # Сколько раз берётся задание `transcribe`: одна повторная попытка сразу, без паузы.
@@ -147,6 +149,7 @@ class ReprocessStatus:
     context_jobs: int
     errors: dict[str, int]  # код причины → сколько документов с `reprocess_error`
     paused: bool
+    old_descriptions: int = 0  # картинок с непустым описанием прежней версии (с 0.16)
 
 
 @dataclass(frozen=True)
@@ -166,7 +169,11 @@ class PageText:
 
 @dataclass(frozen=True)
 class KbImage:
-    """Картинка документа (§8.6, §9.18); `description is None` — ещё не описана."""
+    """Картинка документа (§8.6, §9.18); `description is None` — ещё не описана.
+
+    `''` — модель ответила пустым: картинка уйдёт при замене индекса. Описание прежней
+    версии заменяется новым в `pending_description`, пока индекс не заменён.
+    """
 
     id: UUID
     document_id: UUID
@@ -178,6 +185,20 @@ class KbImage:
     width: int
     height: int
     description: str | None = None
+    description_version: int = 1
+    pending_description: str | None = None
+
+    @property
+    def effective_description(self) -> str | None:
+        """Действующее описание: по нему строится новый индекс (§8.6)."""
+        return self.description if self.pending_description is None else self.pending_description
+
+    @property
+    def needs_description(self) -> bool:
+        """Нет описания текущей версии: картинку надо описать (§8.6)."""
+        return self.description is None or (
+            self.description_version < DESCRIPTION_VERSION and self.pending_description is None
+        )
 
 
 @dataclass(frozen=True)
@@ -213,7 +234,7 @@ class FoundFragment:
     `page` — страница для источника (`None` у документа без страниц); `page_number` и
     границы — место в тексте страницы: по ним склеиваются соседние фрагменты. `section`
     и `context` служат только поиску и дальше него не идут (§8.4). У фрагмента-картинки
-    `text` — её описание, у фрагмента расшифровки заполнен `start_ms`.
+    `text` — его часть описания (§8.6), у фрагмента расшифровки заполнен `start_ms`.
     """
 
     fragment_id: UUID

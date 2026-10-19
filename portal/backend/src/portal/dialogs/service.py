@@ -14,6 +14,8 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 from portal.core.errors import (
+    docx_images_too_large,
+    docx_too_large,
     field_error,
     file_too_large,
     file_unreadable,
@@ -40,6 +42,7 @@ from portal.dialogs.ports import DialogUnitOfWorkFactory
 from portal.files.names import display_file_name
 from portal.files.ports import (
     DocumentReader,
+    DocxTooLargeError,
     FileStorage,
     FileTooLargeError,
     MediaType,
@@ -495,10 +498,10 @@ class DialogService:
 
     def _inspect(self, path: Path, file_name: str, size_bytes: int) -> _FileFacts:
         """Разобрать принятый файл; блокирующая работа — вызывается в пуле потоков."""
-        media_type = self._reader.detect(path, file_name)
-        if media_type is None:
-            raise unsupported_file_type()
         try:
+            media_type = self._reader.detect(path, file_name)
+            if media_type is None:
+                raise unsupported_file_type()
             page_count = self._reader.page_count(path, media_type)
             if media_type == "application/pdf" and page_count is not None:
                 max_pages = self._settings.attachment_max_pages
@@ -506,6 +509,10 @@ class DialogService:
                     raise too_many_pages(max_pages)
                 return self._inspect_pdf(path, page_count, size_bytes)
             text = self._reader.page_text(path, media_type, 1)
+        except DocxTooLargeError as error:
+            raise (
+                docx_images_too_large() if error.reason == "images" else docx_too_large()
+            ) from error
         except UnreadableDocumentError as error:
             raise file_unreadable() from error
         if media_type in _TEXT_TYPES:

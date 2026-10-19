@@ -14,3 +14,7 @@ class PermanentIndexError(Exception):
 
 class JobAbandonedError(Exception):
     """Документа или задания больше нет: работу надо прекратить."""
+
+
+class JobYieldedError(Exception):
+    """Задание отдаёт основное место в точке уступки (§11.1): работа сохранена, это не сбой."""

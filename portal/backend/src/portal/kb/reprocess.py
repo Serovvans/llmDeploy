@@ -13,14 +13,16 @@ class Reprocessor:
         self._uow_factory = uow_factory
         self._clock = clock
 
-    async def start(self, *, all_ready: bool) -> int:
+    async def start(self, *, all_ready: bool, images: bool = False) -> int:
         """Поставить задания готовым документам; результат — скольким они поставлены.
 
-        Без `all_ready` — документам с прежним порядком обработки или с отметкой о сбое.
-        Повторный запуск безопасен: второе задание на документ не создаётся.
+        `all_ready` — всем; `images` — PDF, DOCX и файлам-картинкам, из которых могли
+        выпасть картинки (§11.6); без обоих — документам с прежним порядком обработки или
+        с отметкой о сбое. Повторный запуск безопасен: второе задание на документ не
+        создаётся.
         """
         async with self._uow_factory() as uow:
-            document_ids = await uow.documents.ids_for_reprocess(all_ready=all_ready)
+            document_ids = await uow.documents.ids_for_reprocess(all_ready=all_ready, images=images)
         started = 0
         for document_id in document_ids:
             async with self._uow_factory() as uow:

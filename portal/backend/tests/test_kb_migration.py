@@ -1,4 +1,4 @@
-"""Миграция `0006` на базе с данными версии до 0.15 (docs/portal-api.md §9.20).
+"""Миграции `0006` и `0007` на базе с данными прежних версий (docs/portal-api.md §9.20, §9.21).
 
 Сервис обновляется с данными: существующие документы, фрагменты и задания после миграции
 годны без правки, ни одна строка не теряется.
@@ -34,6 +34,13 @@ INSERT INTO kb_jobs (id, document_id, kind, created_at)
 VALUES (:index_job, :ready, 'index', now()), (:delete_job, :gone, 'delete', now());
 """
 
+_IMAGE_0_15 = """
+INSERT INTO kb_images
+    (id, document_id, ordinal, sha256, storage_key, media_type, width, height, description)
+VALUES (gen_random_uuid(), :ready, 0, '\\x03', 'kb-images/1', 'image/png', 300, 200,
+    'Схема участка.')
+"""
+
 
 async def _run(settings: Settings, statements: str, **params: Any) -> list[Sequence[Any]]:
     """Выполнить операторы по одному; вернуть строки последнего, если он их отдаёт."""
@@ -60,10 +67,17 @@ def test_migration_keeps_existing_documents_and_jobs_usable(settings: Settings) 
 
     command.upgrade(config, "0005")
     asyncio.run(_run(target, _SEED, **ids))
+    command.upgrade(config, "0006")
+    asyncio.run(_run(target, _IMAGE_0_15, **ids))
     command.upgrade(config, "head")
 
     def query(statement: str) -> list[Sequence[Any]]:
         return asyncio.run(_run(target, statement, **ids))
+
+    # Картинка версии 0.15: описание прежних правил, нового описания ещё нет (§9.21).
+    assert query("SELECT description, description_version, pending_description FROM kb_images") == [
+        ("Схема участка.", 1, None)
+    ]
 
     assert query(
         "SELECT scope, storage_key, index_version, seconds_done, images_truncated, "

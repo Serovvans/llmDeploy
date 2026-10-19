@@ -95,6 +95,12 @@ function fileRefusal(error: unknown, limits: PortalConfig['docparse']): string |
   if (isApiError(error, 'unsupported_file_type')) {
     return texts.kb.upload.unsupported;
   }
+  if (isApiError(error, 'docx_too_large')) {
+    return texts.kb.upload.docxTooLarge;
+  }
+  if (isApiError(error, 'docx_images_too_large')) {
+    return texts.kb.upload.docxImagesTooLarge;
+  }
   return isApiError(error, 'file_unreadable') ? texts.kb.upload.unreadable : null;
 }
 

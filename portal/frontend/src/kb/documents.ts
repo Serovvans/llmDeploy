@@ -242,5 +242,14 @@ function rejectionText(error: unknown, { config, media, withTags }: UploadContex
     const max = typeof error.details.max_pages === 'number' ? error.details.max_pages : config?.kb.document_max_pages;
     return max === undefined ? errorText(error) : t.upload.tooManyPages(max);
   }
+  if (isApiError(error, 'docx_too_large')) {
+    return t.upload.docxTooLarge;
+  }
+  if (isApiError(error, 'docx_images_too_large')) {
+    return t.upload.docxImagesTooLarge;
+  }
+  if (isApiError(error, 'storage_full')) {
+    return t.upload.storageFull;
+  }
   return errorText(error);
 }

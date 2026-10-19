@@ -14,6 +14,7 @@ from PIL import Image
 from portal.core.settings import LlmSettings
 from portal.llm.ports import (
     ChatRequest,
+    Completion,
     ContentDelta,
     ContextOverflowError,
     Finished,
@@ -67,16 +68,27 @@ def _encode_message(message: ModelMessage, max_side: int) -> dict[str, Any]:
 
 
 class BifrostChatModel:
-    """Реализация порта `ChatModel` поверх `POST /v1/chat/completions`."""
+    """Реализация портов `ChatModel` и `CompletionModel` поверх `POST /v1/chat/completions`."""
 
-    def __init__(self, client: httpx.AsyncClient, settings: LlmSettings, api_key: str) -> None:
-        """Получить HTTP-клиент, параметры и ключ портала."""
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        settings: LlmSettings,
+        api_key: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        """Получить HTTP-клиент, параметры и ключ портала.
+
+        `timeout_seconds` — срок ожидания ответа; `None` — `llm.first_token_timeout_seconds`
+        (`portal-api`), воркер передаёт `llm.background_timeout_seconds` (§12.1).
+        """
         self._client = client
         self._settings = settings
         self._headers = {"Authorization": f"Bearer {api_key}"}
-        self._timeout = httpx.Timeout(
-            settings.first_token_timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS
-        )
+        if timeout_seconds is None:
+            timeout_seconds = settings.first_token_timeout_seconds
+        self._timeout = httpx.Timeout(timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS)
 
     async def stream(
         self, request: ChatRequest
@@ -113,6 +125,10 @@ class BifrostChatModel:
 
     async def complete(self, request: ChatRequest) -> str:
         """Ответ целиком: `choices[0].message.content`."""
+        return (await self.complete_with_reason(request)).text
+
+    async def complete_with_reason(self, request: ChatRequest) -> Completion:
+        """Ответ целиком с причиной окончания; нет поля `finish_reason` — `"stop"`."""
         payload = await self._payload(request, stream=False)
         try:
             response = await self._client.post(
@@ -125,10 +141,15 @@ class BifrostChatModel:
         if response.status_code != httpx.codes.OK:
             raise self._refusal(response)
         try:
-            content = response.json()["choices"][0]["message"]["content"]
-        except (ValueError, LookupError, TypeError) as error:
+            choice = response.json()["choices"][0]
+            content = choice["message"].get("content")
+            finish = choice.get("finish_reason")
+        except (ValueError, LookupError, TypeError, AttributeError) as error:
             raise ModelUnavailableError from error
-        return content if isinstance(content, str) else ""
+        return Completion(
+            text=content if isinstance(content, str) else "",
+            finish_reason="length" if finish == "length" else "stop",
+        )
 
     @property
     def _url(self) -> str:

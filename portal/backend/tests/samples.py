@@ -2,6 +2,7 @@
 
 import io
 import struct
+import zipfile
 import zlib
 
 import docx
@@ -93,6 +94,80 @@ def docx_with_pictures(*pictures: bytes) -> bytes:
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
+
+
+_DOCX_NAMESPACES = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'xmlns:v="urn:schemas-microsoft-com:vml" '
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+)
+_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_REL_TYPES = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def paragraph(text: str) -> str:
+    """Абзац разметки DOCX для `docx_package`."""
+    return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+
+def docx_package(
+    body: str,
+    *,
+    relations: dict[str, str] | None = None,
+    parts: dict[str, bytes] | None = None,
+    main: str = "word/document.xml",
+    stored: bool = False,
+) -> bytes:
+    """DOCX, собранный вручную, — для частей пакета, которых python-docx не пишет.
+
+    `body` — содержимое `w:body` основной части `main`; `relations` — её связи-картинки
+    (идентификатор → цель; цель `http…` — внешняя), `None` — файла связей нет; `parts` —
+    остальные части архива; `stored` — без сжатия.
+    """
+    links = "".join(
+        f'<Relationship Id="{ref}" Type="{_REL_TYPES}/image" Target="{target}"'
+        + (' TargetMode="External"/>' if target.startswith("http") else "/>")
+        for ref, target in (relations or {}).items()
+    )
+    folder, _, name = main.rpartition("/")
+    files = {
+        "[Content_Types].xml": b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/'
+        b'content-types"/>',
+        "_rels/.rels": (
+            f'<Relationships xmlns="{_RELS}"><Relationship Id="rId1" '
+            f'Type="{_REL_TYPES}/officeDocument" Target="{main}"/></Relationships>'
+        ).encode(),
+        main: f"<w:document {_DOCX_NAMESPACES}><w:body>{body}</w:body></w:document>".encode(),
+        **({} if relations is None else {f"{folder}/_rels/{name}.rels": (
+            f'<Relationships xmlns="{_RELS}">{links}</Relationships>'.encode()
+        )}),
+        **(parts or {}),
+    }  # fmt: skip
+    buffer = io.BytesIO()
+    method = zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED
+    with zipfile.ZipFile(buffer, "w", method) as archive:
+        for part_name, content in files.items():
+            archive.writestr(part_name, content)
+    return buffer.getvalue()
+
+
+def zip_directory_claims(source: bytes, size: int, *, zip64: bool = False) -> bytes:
+    """ZIP, запись конца которого заявляет одну запись и оглавление размером `size`.
+
+    `zip64` — размер заявлен в записи ZIP64 EOCD, а обычная запись конца честная.
+    """
+    end = source.rindex(b"PK\x05\x06")
+    record = bytearray(source[end : end + 22])
+    struct.pack_into("<HH", record, 8, 1, 1)
+    if not zip64:
+        struct.pack_into("<I", record, 12, size)
+        return source[:end] + bytes(record)
+    offset = struct.unpack_from("<I", record, 16)[0]
+    zip64_end = struct.pack("<4sQHHLLQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0, 1, 1, size, offset)
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, end, 1)
+    return source[:end] + zip64_end + locator + bytes(record)
 
 
 def pdf_with_picture(picture_jpeg: bytes, text: str = TEXT_LAYER, copies: int = 1) -> bytes:

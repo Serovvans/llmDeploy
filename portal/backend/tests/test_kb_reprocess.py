@@ -367,3 +367,62 @@ async def test_stopping_the_worker_does_not_interrupt_cleanup_after_replacement(
     assert await _document(bench, document_id) == ("ready", 2, None)
     assert await bench.points() == len(await _fragment_ids(bench, document_id))
     assert await _jobs(bench) == []
+
+
+CONTEXT_PROMPT = "Поясни место фрагмента в документе."
+PARAGRAPHS = "\n\n".join(
+    " ".join(f"Пункт {n}.{k} положения о кадастровой оценке участков." for k in range(12))
+    for n in range(1, 4)
+)
+_FRAGMENTS = """
+SELECT f.context, substr(p.text, f.start_offset + 1, f.end_offset - f.start_offset) AS text
+FROM kb_fragments f JOIN kb_pages p ON p.document_id = f.document_id AND p.number = f.page_number
+WHERE f.image_id IS NULL ORDER BY f.ordinal
+"""
+
+
+def _explanations_asked(bench: KbBench) -> int:
+    return sum(prompt.startswith(CONTEXT_PROMPT) for prompt in bench.model.prompts)
+
+
+async def test_reprocessing_carries_explanations_of_unchanged_fragments(
+    explaining: KbBench,
+) -> None:
+    """Перенос пояснений (§11.2): тот же раздел и текст — пояснение без модели."""
+    bench = explaining
+    portal = bench.portal
+    client = await portal.employee()
+    await added(client, "положение.txt", PARAGRAPHS.encode())
+    await bench.drain()
+    before = await portal.rows(_FRAGMENTS)
+    assert len(before) >= 3 and all(row.context for row in before)
+    # Пустое пояснение тоже переносится; изменённый последний фрагмент — нет.
+    await portal.execute(
+        "UPDATE kb_fragments SET context = '' WHERE ordinal = 0 AND image_id IS NULL"
+    )
+    await portal.execute("UPDATE kb_pages SET text = text || ' Дополнение.'")
+    asked = _explanations_asked(bench)
+
+    assert await bench.reprocessor.start(all_ready=True) == 1
+    assert await bench.worker.run_once()  # reprocess
+    after = await portal.rows(_FRAGMENTS)
+    assert after[0].context == "" and after[-1].text.endswith("Дополнение.")
+    assert [row.context for row in after[1:-1]] == [row.context for row in before[1:-1]]
+    assert after[-1].context is None
+    await bench.drain()
+    assert _explanations_asked(bench) == asked + 1  # только изменённый
+    assert await _jobs(bench) == []
+
+
+async def test_explanations_are_not_carried_when_the_stage_is_off(bench: KbBench) -> None:
+    """Флаг выключен: индекс строится без пояснений, переобработка убирает их (§11.2)."""
+    portal = bench.portal
+    client = await portal.employee()
+    await added(client, "положение.txt", PARAGRAPHS.encode())
+    await bench.drain()
+    await portal.execute("UPDATE kb_fragments SET context = 'Пояснение прежней сборки'")
+    assert await bench.reprocessor.start(all_ready=True) == 1
+    await bench.drain()
+    contexts = [row.context for row in await portal.rows(_FRAGMENTS)]
+    assert contexts and set(contexts) == {None}
+    assert await _jobs(bench) == []

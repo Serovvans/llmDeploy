@@ -15,6 +15,7 @@ from portal.core.settings import LlmSettings, Settings
 from portal.llm.bifrost import BifrostChatModel, shrink_image
 from portal.llm.ports import (
     ChatRequest,
+    Completion,
     ContentDelta,
     ContextOverflowError,
     Finished,
@@ -164,6 +165,44 @@ async def test_xhigh_effort_is_left_to_model_default(
             assert "reasoning_effort" not in payload
         else:
             assert payload["reasoning_effort"] == sent
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected"),
+    [
+        ({"message": {"content": "ок"}, "finish_reason": "stop"}, Completion("ок", "stop")),
+        ({"message": {"content": "нача"}, "finish_reason": "length"}, Completion("нача", "length")),
+        ({"message": {"content": None}, "finish_reason": "stop"}, Completion("", "stop")),
+        ({"message": {}}, Completion("", "stop")),
+        (
+            {"message": {"content": "ок"}, "finish_reason": "content_filter"},
+            Completion("ок", "stop"),
+        ),
+    ],
+)
+async def test_completion_carries_finish_reason(
+    settings: Settings, choice: dict[str, Any], expected: Completion
+) -> None:
+    """§12.1: `length` — только при `finish_reason = "length"`; нет текста — пустая строка."""
+    model = _mock_model(settings.llm, lambda _: httpx.Response(200, json={"choices": [choice]}))
+    assert await model.complete_with_reason(_request("вопрос")) == expected
+    assert await model.complete(_request("вопрос")) == expected.text
+
+
+async def test_timeout_defaults_to_first_token_and_can_be_overridden(settings: Settings) -> None:
+    """Срок воркера передаётся конструктором; без него — срок `portal-api` (§12.1)."""
+    seen: list[float | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await BifrostChatModel(client, settings.llm, "k").complete(_request("вопрос"))
+    await BifrostChatModel(client, settings.llm, "k", timeout_seconds=600).complete(
+        _request("вопрос")
+    )
+    assert seen == [settings.llm.first_token_timeout_seconds, 600]
 
 
 async def test_connection_failures_and_timeouts(settings: Settings) -> None:

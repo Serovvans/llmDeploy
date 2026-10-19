@@ -59,8 +59,8 @@ export const CONFIG = {
     test_run: { enabled: true, dialect: 'postgres' },
   },
   kb: {
-    document_max_bytes: 52428800,
-    document_max_pages: 500,
+    document_max_bytes: 209715200,
+    document_max_pages: 3000,
     document_extensions: ['.pdf', '.docx', '.txt', '.md', '.jpg', '.jpeg', '.png'],
     tags: { max_per_document: 10, max_length: 50, max_selected: 20 },
   },

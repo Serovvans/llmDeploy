@@ -1248,6 +1248,8 @@ describe('разбор документов', () => {
     [422, 'too_many_pages', { max_pages: 40 }, 'В документе больше 40 страниц. Разделите его на части и разберите их по отдельности'],
     [422, 'document_too_long', undefined, t.tooLong],
     [422, 'file_unreadable', undefined, texts.kb.upload.unreadable],
+    [422, 'docx_too_large', undefined, 'В документе слишком много содержимого помимо картинок. Разделите его на части'],
+    [422, 'docx_images_too_large', undefined, 'Картинки в документе занимают слишком много места. Уменьшите их или разделите документ на части'],
     [415, 'unsupported_file_type', undefined, texts.kb.upload.unsupported],
   ])('отказ до начала разбора %s %s — под областью выбора файла', async (status, code, details, text) => {
     const { server, user } = setupDocs('/documents');

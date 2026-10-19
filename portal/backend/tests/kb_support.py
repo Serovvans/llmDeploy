@@ -39,6 +39,7 @@ from portal.kb.rewrite import QueryRewriter
 from portal.llm.estimator import RatioTokenEstimator
 from portal.llm.ports import (
     ChatRequest,
+    Completion,
     ContentDelta,
     Finished,
     ImagePart,
@@ -113,12 +114,14 @@ class ScriptedRecognizer:
 
 
 class ProtocolModel:
-    """Подмена порта `ChatModel` для протоколов 0.15: отвечает по правилам заглушки стенда.
+    """Подмена портов `ChatModel` и `CompletionModel`: отвечает по правилам заглушки стенда.
 
     Переписывание — последний вопрос пользователя из истории и новый вопрос; пояснение —
-    «Контекстная справка <хеш фрагмента>.». `failures` — сколько ближайших запросов
-    закончатся сбоем `error`; `fail_when` — сбоем кончается всякий запрос с этой
-    подстрокой; `gate` — запрос ждёт, пока тест его не отпустит.
+    «Контекстная справка <хеш фрагмента>.»; описание картинки — с особыми ширинами PNG
+    701–703 (§12.2). `failures` — сколько ближайших запросов закончатся сбоем `error`;
+    `fail_when` — сбоем кончается всякий запрос с этой подстрокой; `gate` — запрос ждёт,
+    пока тест его не отпустит; `completions` — ответы с причиной окончания по очереди,
+    вместо правил заглушки.
     """
 
     def __init__(self) -> None:
@@ -128,6 +131,8 @@ class ProtocolModel:
         self.error: Exception = RuntimeError("model down")
         self.answer: str | None = None
         self.gate: asyncio.Event | None = None
+        self.completions: list[Completion] = []
+        self.max_tokens: list[int | None] = []
 
     def stream(
         self, request: ChatRequest
@@ -151,6 +156,17 @@ class ProtocolModel:
         reply = replies.protocol_reply(replies.UserTurn(text, images))
         assert reply is not None, "запрос не по протоколу §12.1"
         return reply
+
+    async def complete_with_reason(self, request: ChatRequest) -> Completion:
+        text = await self.complete(request)
+        self.max_tokens.append(request.max_tokens)
+        if self.completions:
+            return self.completions.pop(0)
+        images = [p.data for p in request.messages[-1].parts if isinstance(p, ImagePart)]
+        if self.answer is not None or len(images) != 1:
+            return Completion(text, "stop")
+        described, reason = replies.image_description(images[0], request.max_tokens)
+        return Completion(described, "length" if reason == "length" else "stop")
 
 
 class WordOverlapReranker:
@@ -358,7 +374,16 @@ async def make_bench(portal: Portal, settings: Settings) -> KbBench:
         media,
         reader,
         recognizer,
-        ImageCollector(uow, storage, reader, model, background_llm, kb.images, llm),
+        ImageCollector(
+            uow,
+            storage,
+            reader,
+            model,
+            background_llm,
+            kb.images,
+            llm,
+            kb.worker.background_llm_parallel,
+        ),
         RecordingProcessor(
             uow, media, audio, SpeechPool(speech, asr.threads - asr.chat_threads), media_settings
         ),

@@ -147,9 +147,11 @@ def create_app(chunk_delay_ms: int) -> Starlette:
                 return JSONResponse(payload, status_code=status)
 
         slow = "[[stub:slow]]" in turn.text
-        text = replies.reply_text(turn, body.get("response_format"), images)
+        limit = body.get("max_tokens")
+        max_tokens = limit if isinstance(limit, int) else None
+        text = replies.reply_text(turn, body.get("response_format"), images, max_tokens)
         parts = replies.text_parts(text, slow=slow)
-        finish_reason = "length" if "[[stub:length]]" in turn.text else "stop"
+        finish_reason = replies.finish_reason(turn, max_tokens)
         if body.get("stream"):
             delay = _SLOW_DELAY_SECONDS if slow else chunk_delay_ms / 1000
             broken = "[[stub:break]]" in turn.text
