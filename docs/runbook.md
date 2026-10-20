@@ -513,6 +513,14 @@ nvidia-smi
 | `image dropped` (`reason`: `empty` или `length`) | `empty` — модель вернула пустое описание; `length` — пусто и после повтора с бо́льшим пределом. Картинка в поиск не попадает | Единичные — норма. Массово — сверить `kb.images.description_*` и время ответа модели |
 | `image description truncated` (`reason`: `length` или `max_chars`) | Описание упёрлось в предел токенов или обрезано до `kb.images.description_max_chars` | Ничего; массово — проверить качество описаний на образцах |
 
+Запись `portal-api` «prompt usage» (с 0.7, раз за ответ; только числа: `answer_id`,
+`estimated_tokens`, `prompt_tokens`, `text_chars`, `images`) — пары «оценка — факт» для
+калибровки `llm.chars_per_token` (2.0) и `llm.tokens_per_image` (3200), порядок — `release-0.7.md`:
+
+```bash
+sudo docker compose -f deploy/docker-compose.yml logs --no-color --since 72h portal-api 2>&1 | grep '"prompt usage"' | tail -n 50
+```
+
 ```bash
 sudo docker compose -f deploy/docker-compose.yml logs --no-color --since 2h portal-worker 2>&1 | grep -E 'job yielded|image dropped|image description truncated' | tail -n 50
 ```
@@ -723,6 +731,7 @@ files:
 | `kb.context.enabled` | `true` | Пояснения к фрагментам не дописываются; новые документы индексируются без них |
 | `kb.rewrite.enabled` | `true` | Поиск идёт по тексту последнего сообщения |
 | `kb.images.enabled` | `true` | Картинки из документов не извлекаются; уже извлечённые показываются и находятся |
+| `memory.enabled` | `true` | Нет кнопки «Память диалога», индикатора и панели; маршруты памяти отвечают 403 `feature_disabled`; запрос к модели собирается как в 0.6, `stream_options` не шлётся; уже сохранённые выборы пар действуют |
 | `media.enabled` | `true` | Аудио и видео не принимаются ни в базу знаний, ни в чат; уже расшифрованные доступны |
 
 ```yaml
@@ -1101,7 +1110,8 @@ sudo docker compose start bifrost
 не выполнялся, длительности шагов записывайте по ходу.
 
 Следующие релизы идут тем же порядком (те же цели `release-*`); релиз 0.6 (пределы базы
-знаний) — `release-0.6.md`.
+знаний) — `release-0.6.md`; релиз 0.7 («Память диалога», миграция `0008`, флаг
+`memory.enabled`, калибровка оценки) — `release-0.7.md`.
 
 Обозначения в командах:
 - `/opt/llm` — **рабочий клон**: из него запущен сервис (`systemctl cat llm-stack`,
