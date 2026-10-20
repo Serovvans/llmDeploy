@@ -554,6 +554,12 @@ class CogisSettings(_Section):
     no_documentation_notice: str = Field(min_length=1)
 
 
+class MemorySettings(_Section):
+    """«Память диалога» (docs/portal-api.md §5.10, §13.6)."""
+
+    enabled: bool
+
+
 class MediaFfmpegSettings(_Section):
     """Пределы одного запуска ffmpeg и ffprobe (docs/portal-api.md §8.7)."""
 
@@ -618,6 +624,7 @@ class Settings(_Section):
     docparse: DocparseSettings
     sql: SqlSettings
     cogis: CogisSettings
+    memory: MemorySettings
     media: MediaSettings
 
     common_passwords: frozenset[str] = Field(repr=False)

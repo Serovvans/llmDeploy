@@ -14,6 +14,7 @@ from portal.dialogs.domain import (
     Dialog,
     DialogKind,
     Docparse,
+    MemoryMode,
     Message,
     MessageStatus,
     SummaryStatus,
@@ -24,7 +25,27 @@ from portal.dialogs.tables import attachments, dialogs, docparses, messages
 type _Row = sa.Row[*tuple[Any, ...]]
 
 _MESSAGE_FIELDS = tuple(Message.__dataclass_fields__)
-_MESSAGE_COLUMNS = [messages.c[name] for name in _MESSAGE_FIELDS]
+_QUESTION = messages.alias("question")
+# Режим пары хранится у вопроса; ответ (позиция вопроса + 1) читается с режимом вопроса
+# (docs/portal-api.md §9.7). Поиск вопроса идёт по уникальному индексу (dialog_id, position).
+_PAIR_MODE = sa.case(
+    (
+        messages.c.role == "assistant",
+        sa.func.coalesce(
+            sa.select(_QUESTION.c.memory_mode)
+            .where(
+                _QUESTION.c.dialog_id == messages.c.dialog_id,
+                _QUESTION.c.position == messages.c.position - 1,
+            )
+            .scalar_subquery(),
+            messages.c.memory_mode,
+        ),
+    ),
+    else_=messages.c.memory_mode,
+).label("memory_mode")
+_MESSAGE_COLUMNS = [
+    _PAIR_MODE if name == "memory_mode" else messages.c[name] for name in _MESSAGE_FIELDS
+]
 
 
 def _dialog(row: _Row) -> Dialog:
@@ -174,6 +195,26 @@ class SqlDialogRepository:
             .order_by(messages.c.position)
         )
         return [_message(row) for row in await self._connection.execute(query)]
+
+    async def get_message(
+        self, owner_id: UUID, dialog_id: UUID, message_id: UUID
+    ) -> Message | None:
+        """Сообщение диалога владельца."""
+        query = self._messages_of(owner_id, dialog_id).where(messages.c.id == message_id)
+        row = (await self._connection.execute(query)).first()
+        return _message(row) if row else None
+
+    async def set_memory_mode(self, owner_id: UUID, message_id: UUID, mode: MemoryMode) -> None:
+        """Записать режим пары у её вопроса."""
+        await self._connection.execute(
+            sa.update(messages)
+            .where(
+                messages.c.id == message_id,
+                messages.c.dialog_id.in_(_owned(owner_id)),
+                messages.c.role == "user",
+            )
+            .values(memory_mode=mode)
+        )
 
     async def first_question(self, owner_id: UUID, dialog_id: UUID) -> str | None:
         """Текст первого непустого вопроса диалога."""

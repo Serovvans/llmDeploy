@@ -7,10 +7,16 @@ import styles from './Notice.module.css';
 
 export type NoticeKind = 'info' | 'warning' | 'error';
 
+interface NoticeAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface NoticeProps {
   kind: NoticeKind;
   children: React.ReactNode;
-  action?: { label: string; onClick: () => void };
+  /** Одно действие или, с версии концепции 0.14, до двух — через « · » (§4.6). */
+  action?: NoticeAction | [NoticeAction, NoticeAction];
 }
 
 const ICONS = {
@@ -22,16 +28,24 @@ const ICONS = {
 /** Сообщение по месту (концепция §4.6): вид различают иконка и подложка, текст всегда `--p-text`. */
 export function Notice({ kind, children, action }: NoticeProps) {
   const Icon = ICONS[kind];
+  const actions = action === undefined ? [] : Array.isArray(action) ? action : [action];
   return (
     <div className={`${styles.notice} ${styles[kind]}`} role={kind === 'error' ? 'alert' : 'status'}>
       <span className={styles.icon} aria-hidden="true">
         <Icon />
       </span>
       <span className={styles.text}>{children}</span>
-      {action && (
-        <Link component="button" onClick={action.onClick}>
-          {action.label}
-        </Link>
+      {actions.length > 0 && (
+        <span className={styles.actions}>
+          {actions.map((item, index) => (
+            <span key={item.label}>
+              {index > 0 && <span aria-hidden="true">{' · '}</span>}
+              <Link component="button" onClick={item.onClick}>
+                {item.label}
+              </Link>
+            </span>
+          ))}
+        </span>
       )}
     </div>
   );

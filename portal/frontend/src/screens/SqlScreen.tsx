@@ -211,6 +211,11 @@ export function SqlScreen() {
         // Какой из двух текстов верен, известно только с настройками портала.
         note={config ? (testRun ? t.note.withRun : t.note.withoutRun) : undefined}
         onRegenerate={regenerateAnswer}
+        onMemorySchemaMissing={() => {
+          // Схему удалили в другой вкладке: выбор станет «Без схемы», оценка повторится без неё (концепция §4.9).
+          void loadSchemas();
+          SingleToast.push(t.schemas.alreadyRemoved);
+        }}
         // Первый запрос настроек ещё идёт: отказа не было, отправка ждёт ответа.
         sendPending={!config && !configFailed}
         beforeSend={() => {

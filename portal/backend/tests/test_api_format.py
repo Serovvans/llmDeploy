@@ -172,7 +172,9 @@ async def test_config_is_available_on_any_login_step(portal: Portal) -> None:
         response = await client.get("/api/config")
     assert response.status_code == 200
     config = response.json()
-    assert set(config) == {"password", "dialogs", "chat", "kb", "media", "docparse", "sql"}
+    assert set(config) == {
+        "password", "dialogs", "chat", "kb", "media", "docparse", "sql", "memory",
+    }  # fmt: skip
     assert config["password"] == {"min_length": 12, "max_length": 128}
     assert config["dialogs"] == {"message_max_chars": 32000}
     assert config["chat"] == {
@@ -211,6 +213,8 @@ async def test_config_is_available_on_any_login_step(portal: Portal) -> None:
         # Флаг проверки на тестовых данных по умолчанию выключен (§13.6).
         "test_run": {"enabled": False, "dialect": "postgres"},
     }
+    # «Память диалога» по умолчанию включена; в 0.7 у раздела только флаг (§4).
+    assert config["memory"] == {"enabled": True}
 
 
 async def test_oversized_body_is_refused_before_session_check(portal: Portal) -> None:

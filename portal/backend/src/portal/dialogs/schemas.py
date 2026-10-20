@@ -12,11 +12,13 @@ from portal.dialogs.domain import (
     Dialog,
     DialogKind,
     Docparse,
+    MemoryMode,
     MessageRole,
     MessageStatus,
     SummaryStatus,
     TranscriptionStatus,
 )
+from portal.dialogs.memory import MemoryEstimate, MemoryLevel
 from portal.dialogs.service import MessageView
 from portal.files.ports import MediaType, RecordingType
 from portal.kb.ports import Collection
@@ -65,6 +67,33 @@ class DocparseMessageRequest(RequestModel):
     """Вопрос по разобранному документу."""
 
     content: str
+
+
+class MemoryModeRequest(RequestModel):
+    """`PATCH /api/dialogs/{id}/messages/{message_id}`: режим пары (§5.10.4)."""
+
+    memory_mode: MemoryMode
+
+
+class ChatMemoryQuery(BaseModel):
+    """Строка запроса оценки памяти в чате; параметры другого вида не читаются."""
+
+    mode: AnswerMode
+    search: Literal["true", "false"]
+
+
+class SqlMemoryQuery(BaseModel):
+    """Строка запроса оценки памяти в SQL-помощнике; нет `schema_id` — без схемы."""
+
+    action: Literal["write", "explain", "debug", "optimize"]
+    dialect: str
+    schema_id: UUID | None = None
+
+
+class CogisMemoryQuery(BaseModel):
+    """Строка запроса оценки памяти в помощнике CoGIS."""
+
+    action: Literal["write", "explain", "debug"]
 
 
 class SqlRegenerateRequest(RequestModel):
@@ -214,6 +243,7 @@ class MessageOut(BaseModel):
     sql_run: dict[str, Any] | None
     sql_dangers: list[str] | None
     dropped_messages: int
+    memory_mode: MemoryMode
     created_at: ApiTime
 
     @classmethod
@@ -237,6 +267,7 @@ class MessageOut(BaseModel):
             sql_run=message.sql_run,
             sql_dangers=message.sql_dangers,
             dropped_messages=message.dropped_messages,
+            memory_mode=message.memory_mode,
             created_at=message.created_at,
         )
 
@@ -246,3 +277,39 @@ class MessageListOut(BaseModel):
 
     items: list[MessageOut]
     next_cursor: str | None
+
+
+class MemoryPairOut(BaseModel):
+    """Пара «вопрос + ответ» в объекте `Memory` (§5.10.3)."""
+
+    question_id: UUID
+    answer_id: UUID
+    question_preview: str
+    answer_preview: str
+    attachments: int
+    memory_mode: MemoryMode
+    tokens: int
+    dropped: bool
+
+
+class MemoryOut(BaseModel):
+    """Объект `Memory`: заполненность памяти диалога и его пары (§5.10.3)."""
+
+    level: MemoryLevel
+    percent: int
+    used_tokens: int
+    limit_tokens: int
+    pairs: list[MemoryPairOut]
+
+    @classmethod
+    def of(cls, estimate: MemoryEstimate) -> "MemoryOut":
+        """Собрать из оценки."""
+        return cls(
+            level=estimate.level,
+            percent=estimate.percent,
+            used_tokens=estimate.used_tokens,
+            limit_tokens=estimate.limit_tokens,
+            pairs=[
+                MemoryPairOut.model_validate(pair, from_attributes=True) for pair in estimate.pairs
+            ],
+        )

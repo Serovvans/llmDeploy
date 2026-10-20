@@ -3,7 +3,17 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useReducer,
 
 import { api, isAbort, isApiError, NetworkError, StreamBrokenError } from '../api/client';
 import type { StreamEvent } from '../api/stream';
-import type { AnswerMode, Attachment, Dialog, DialogKind, KbScope, Message, PortalConfig, QuestionParams } from '../api/types';
+import type {
+  AnswerMode,
+  Attachment,
+  Dialog,
+  DialogKind,
+  KbScope,
+  MemoryMode,
+  Message,
+  PortalConfig,
+  QuestionParams,
+} from '../api/types';
 import { errorText, texts } from '../texts';
 import {
   checkFile,
@@ -90,6 +100,10 @@ interface ChatApi {
   openDialog: (kind: DialogKind, id: string) => void;
   refreshDialog: (id: string) => void;
   loadOlder: (id: string) => void;
+  /** Подгружает более ранние сообщения, пока в ленте не появится `messageId`; `false` — не нашлось или сбой. */
+  loadOlderUntil: (id: string, messageId: string) => Promise<boolean>;
+  /** Режим пары в ленте — сразу, до ответа сервера; при отказе экран возвращает прежний (концепция §4.9). */
+  showMemoryMode: (id: string, questionId: string, mode: MemoryMode) => void;
   setText: (key: string, text: string) => void;
   setNotice: (key: string, notice: string | null) => void;
   addFiles: (key: string, files: File[], onCreated: OnCreated) => void;
@@ -273,6 +287,33 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       (error: unknown) => SingleToast.push(errorText(error), { use: 'error' }),
     );
   }, []);
+
+  const loadOlderUntil = useCallback(async (id: string, messageId: string): Promise<boolean> => {
+    const view = stateRef.current.dialogs[id];
+    if (view?.messages.some((message) => message.id === messageId)) {
+      return true;
+    }
+    let cursor = view?.olderCursor ?? null;
+    while (cursor) {
+      try {
+        const page = await api.listMessages(id, cursor);
+        dispatch({ type: 'messagesLoaded', id, items: page.items, nextCursor: page.next_cursor, older: true });
+        if (page.items.some((message) => message.id === messageId)) {
+          return true;
+        }
+        cursor = page.next_cursor;
+      } catch (error) {
+        SingleToast.push(errorText(error), { use: 'error' });
+        return false;
+      }
+    }
+    return false;
+  }, []);
+
+  const showMemoryMode = useCallback(
+    (id: string, questionId: string, mode: MemoryMode) => dispatch({ type: 'memoryModeChanged', id, questionId, mode }),
+    [],
+  );
 
   /** Чат создаётся на сервере при первой отправке или первом вложении (контракт §5.2). */
   const ensureDialog = useCallback(async (key: string, onCreated: OnCreated): Promise<string> => {
@@ -736,6 +777,8 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       openDialog,
       refreshDialog,
       loadOlder,
+      loadOlderUntil,
+      showMemoryMode,
       setText,
       setNotice,
       addFiles,
@@ -761,6 +804,8 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       openDialog,
       refreshDialog,
       loadOlder,
+      loadOlderUntil,
+      showMemoryMode,
       setText,
       setNotice,
       addFiles,

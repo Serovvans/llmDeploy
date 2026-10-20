@@ -26,6 +26,7 @@ from portal.llm.ports import (
     ReasoningDelta,
     ReasoningEffort,
     TextPart,
+    Usage,
 )
 from tests import samples
 from tests.conftest import close_portal, make_portal
@@ -296,3 +297,83 @@ async def test_chat_through_real_client_and_stub(settings: Settings) -> None:
             assert len(partial) == 1 and partial[0].content.startswith("Заглушка.")
         finally:
             await close_portal(portal)
+
+
+# --- фактический расход запроса (0.7, §5.10.10, §12.1) ---
+
+_TEXT = 'data: {"choices":[{"delta":{"content":"текст"},"finish_reason":null}]}'
+_FINISH = 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+_USAGE = 'data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":3}}'
+
+
+class _Body(httpx.AsyncByteStream):
+    """Тело потока по строкам; `failure` поднимается после последней строки — обрыв хвоста."""
+
+    def __init__(self, lines: list[str], failure: Exception | None = None) -> None:
+        self._lines = lines
+        self._failure = failure
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for line in self._lines:
+            yield f"{line}\n\n".encode()
+        if self._failure is not None:
+            raise self._failure
+
+
+def _streaming(lines: list[str], failure: Exception | None = None) -> Any:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_Body(lines, failure))
+
+    return handler
+
+
+def _with_usage(include: bool = True) -> ChatRequest:
+    return replace(_request("вопрос"), include_usage=include)
+
+
+async def test_stream_options_are_sent_only_when_usage_is_asked(settings: Settings) -> None:
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        if sent[-1]["stream"]:
+            return httpx.Response(200, text="\n\n".join([_TEXT, _FINISH, "data: [DONE]"]))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
+
+    model = _mock_model(settings.llm, handler)
+    await _collect(model, _with_usage())
+    await _collect(model, _with_usage(False))
+    # Без потока поля нет даже при include_usage: оно стандартно только для потока.
+    await model.complete(_with_usage())
+    assert sent[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in sent[1] and "stream_options" not in sent[2]
+
+
+async def test_usage_chunk_without_choices_gives_usage_before_finish(settings: Settings) -> None:
+    separate = [_TEXT, _FINISH, _USAGE, "data: [DONE]"]
+    events = await _collect(_mock_model(settings.llm, _streaming(separate)), _with_usage())
+    assert events == [ContentDelta("текст"), Usage(42), Finished("stop")]
+    # Шлюз может положить usage и в сам фрагмент с finish_reason; тело без [DONE] — тоже конец.
+    inline = [_TEXT, _FINISH.replace("]}", '],"usage":{"prompt_tokens":7}}')]
+    events = await _collect(_mock_model(settings.llm, _streaming(inline)), _with_usage())
+    assert events == [ContentDelta("текст"), Usage(7), Finished("stop")]
+    # Без include_usage хвост не читается и Usage нет, даже если шлюз его прислал.
+    events = await _collect(_mock_model(settings.llm, _streaming(separate)), _with_usage(False))
+    assert events == [ContentDelta("текст"), Finished("stop")]
+
+
+@pytest.mark.parametrize(
+    ("tail", "failure"),
+    [
+        ([], None),  # usage не пришёл
+        (["data: not json", 'data: {"usage":{"prompt_tokens":"много"}}'], None),
+        ([_USAGE], httpx.ReadTimeout("tail stalled")),
+        ([_USAGE], httpx.RemoteProtocolError("tail broken")),
+    ],
+)
+async def test_tail_after_finish_never_spoils_the_answer(
+    settings: Settings, tail: list[str], failure: Exception | None
+) -> None:
+    handler = _streaming([_TEXT, _FINISH, *tail], failure)
+    events = await _collect(_mock_model(settings.llm, handler), _with_usage())
+    assert events == [ContentDelta("текст"), Finished("stop")]

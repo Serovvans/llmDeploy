@@ -30,6 +30,7 @@ function message(patch: Partial<Message>): Message {
     sql_run: null,
     sql_dangers: null,
     dropped_messages: 0,
+    memory_mode: 'full',
     created_at: '2026-10-05T09:00:00Z',
     ...patch,
   };
@@ -327,5 +328,49 @@ describe('состояние чата', () => {
     expect(historyGroup(at(4, 23), thursday)).toBe('earlier');
     // В понедельник и вторник «на этой неделе» пусто: всё раньше вчера — «раньше».
     expect(historyGroup(at(4), new Date(2026, 9, 6, 10))).toBe('earlier');
+  });
+});
+
+describe('память диалога в ленте', () => {
+  const loaded: ChatAction = {
+    type: 'messagesLoaded',
+    id: ID,
+    // Сервер отдаёт от новых к старым.
+    items: [
+      message({ id: 'a-2' }),
+      message({ id: 'u-2', role: 'user' }),
+      message({ id: 'a-1' }),
+      message({ id: 'u-1', role: 'user' }),
+    ],
+    nextCursor: null,
+    older: false,
+  };
+
+  it('режим пары меняется у вопроса и его ответа, соседняя пара не затронута', () => {
+    const state = run([loaded, { type: 'memoryModeChanged', id: ID, questionId: 'u-1', mode: 'excluded' }]);
+    expect(state.dialogs[ID]?.messages.map((item) => [item.id, item.memory_mode])).toEqual([
+      ['u-1', 'excluded'],
+      ['a-1', 'excluded'],
+      ['u-2', 'full'],
+      ['a-2', 'full'],
+    ]);
+  });
+
+  it('пара старше загруженных сообщений ленту не меняет', () => {
+    const before = run([loaded]);
+    expect(chatReducer(before, { type: 'memoryModeChanged', id: ID, questionId: 'u-0', mode: 'excluded' })).toEqual(before);
+  });
+
+  it('новый ответ повторной генерации несёт режим своего вопроса, ответ на новый вопрос — «Учитывать»', () => {
+    const excluded = run([loaded, { type: 'memoryModeChanged', id: ID, questionId: 'u-2', mode: 'text_only' }]);
+    const regenerated = chatReducer(excluded, { type: 'generationStarted', id: ID, question: null, now: 1 });
+    expect(regenerated.dialogs[ID]?.messages.at(-1)?.memory_mode).toBe('text_only');
+    const asked = chatReducer(excluded, {
+      type: 'generationStarted',
+      id: ID,
+      question: { content: 'Ещё вопрос', attachments: [], withTags: false, testRun: false },
+      now: 1,
+    });
+    expect(asked.dialogs[ID]?.messages.slice(-2).map((item) => item.memory_mode)).toEqual(['full', 'full']);
   });
 });

@@ -15,7 +15,7 @@ from uuid import uuid4
 import pytest
 
 from portal.core.settings import Settings
-from portal.dialogs.context import Turn, data_block, fit_history
+from portal.dialogs.context import Turn, data_block, fit_memory
 from portal.dialogs.export import xml_safe
 from portal.dialogs.footnotes import cited_numbers
 from portal.dialogs.generation import clean_title
@@ -193,7 +193,7 @@ def test_history_is_fitted_in_one_pass() -> None:
     estimator = RatioTokenEstimator(chars_per_token=3.0, tokens_per_image=1000)
     history = [Turn("user" if index % 2 == 0 else "assistant", "x" * N) for index in range(20_000)]
     started = time.perf_counter()
-    dropped = fit_history("система", history, Turn("user", "вопрос"), 25_000, estimator)
+    dropped = fit_memory("система", history, Turn("user", "вопрос"), 25_000, estimator).dropped
     assert time.perf_counter() - started < TIME_LIMIT_SECONDS
     assert dropped == 19_998
 

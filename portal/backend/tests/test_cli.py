@@ -172,7 +172,7 @@ async def test_audit_prints_filtered_journal(
 @pytest.mark.usefixtures("command_line")
 async def test_migrate_is_idempotent(portal: Portal) -> None:
     assert await _in_thread("migrate") == 0
-    assert (await portal.rows("SELECT version_num FROM alembic_version"))[0].version_num == "0007"
+    assert (await portal.rows("SELECT version_num FROM alembic_version"))[0].version_num == "0008"
 
 
 def test_missing_environment_is_reported_without_traceback(

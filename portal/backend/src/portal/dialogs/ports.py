@@ -17,6 +17,7 @@ from portal.dialogs.domain import (
     Dialog,
     DialogKind,
     Docparse,
+    MemoryMode,
     Message,
     MessageStatus,
     SummaryStatus,
@@ -85,6 +86,16 @@ class DialogRepository(Protocol):
 
     async def history(self, owner_id: UUID, dialog_id: UUID, before_position: int) -> list[Message]:
         """Сообщения диалога до позиции, по порядку."""
+        ...
+
+    async def get_message(
+        self, owner_id: UUID, dialog_id: UUID, message_id: UUID
+    ) -> Message | None:
+        """Сообщение диалога владельца; у ответа `memory_mode` — режим его вопроса."""
+        ...
+
+    async def set_memory_mode(self, owner_id: UUID, message_id: UUID, mode: MemoryMode) -> None:
+        """Записать режим пары у её вопроса (§5.10.4)."""
         ...
 
     async def first_question(self, owner_id: UUID, dialog_id: UUID) -> str | None:

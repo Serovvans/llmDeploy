@@ -11,6 +11,7 @@ DialogKind = Literal["chat", "sql", "cogis", "docparse"]
 MessageRole = Literal["user", "assistant"]
 MessageStatus = Literal["complete", "streaming", "stopped", "length_limit", "error"]
 AnswerMode = Literal["fast", "thorough"]
+MemoryMode = Literal["full", "text_only", "excluded"]
 TranscriptionStatus = Literal["queued", "processing", "ready", "error"]
 
 TITLE_MAX_LENGTH = 200
@@ -37,7 +38,9 @@ class Message:
     нашёл поиск; оба `None`, если поиск в базе знаний не выполнялся (§5.1). `sql_check` —
     проверка блоков `sql` ответа, `sql_dangers` — опасные операции в запросе из вопроса;
     оба только в диалоге `sql` (§7.1). `sql_run` — итог проверки блоков ответа на тестовых
-    данных (§7.4); `None` — проверки не было или её итог не сохранён.
+    данных (§7.4); `None` — проверки не было или её итог не сохранён. `memory_mode` —
+    режим пары «вопрос + ответ» в памяти диалога (§5.10.1): хранится у вопроса, у ответа
+    при чтении — режим его вопроса.
     """
 
     id: UUID
@@ -57,6 +60,7 @@ class Message:
     dropped_messages: int
     created_at: datetime
     sql_run: dict[str, Any] | None = None
+    memory_mode: MemoryMode = "full"
 
 
 @dataclass

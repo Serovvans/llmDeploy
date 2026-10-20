@@ -34,6 +34,7 @@ from portal.llm.ports import (
     ImagePart,
     ReasoningDelta,
     TextPart,
+    Usage,
 )
 
 NEW_PASSWORD = "Надёжный-пароль-2026"
@@ -65,7 +66,7 @@ def run_during(
     monkeypatch.setattr(target, method, wrapper)
 
 
-type ModelStep = ReasoningDelta | ContentDelta | Finished | Exception | asyncio.Event
+type ModelStep = ReasoningDelta | ContentDelta | Usage | Finished | Exception | asyncio.Event
 
 DEFAULT_ANSWER: tuple[ModelStep, ...] = (
     ReasoningDelta("Думаю."),
@@ -101,7 +102,7 @@ class ScriptedModel:
 
     async def stream(
         self, request: ChatRequest
-    ) -> AsyncIterator[ReasoningDelta | ContentDelta | Finished]:
+    ) -> AsyncIterator[ReasoningDelta | ContentDelta | Usage | Finished]:
         self.requests.append(request)
         script = self.scripts.pop(0) if self.scripts else DEFAULT_ANSWER
         try:

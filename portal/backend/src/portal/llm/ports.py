@@ -35,12 +35,16 @@ class ModelMessage:
 
 @dataclass(frozen=True)
 class ChatRequest:
-    """Запрос к модели: только то, что выражается стандартными полями OpenAI API."""
+    """Запрос к модели: только то, что выражается стандартными полями OpenAI API.
+
+    `include_usage` — просить у шлюза фактический расход запроса в потоке (§12.1).
+    """
 
     messages: Sequence[ModelMessage]
     reasoning_effort: ReasoningEffort
     max_tokens: int
     json_schema: Mapping[str, Any] | None = None
+    include_usage: bool = False
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,13 @@ class ContentDelta:
 
 
 @dataclass(frozen=True)
+class Usage:
+    """Фактическое число токенов запроса по данным шлюза (§5.10.10)."""
+
+    prompt_tokens: int
+
+
+@dataclass(frozen=True)
 class Finished:
     """Модель завершила ответ; без этого события ответ полным не считается."""
 
@@ -69,8 +80,12 @@ class ChatModel(Protocol):
 
     def stream(
         self, request: ChatRequest
-    ) -> AsyncIterator[ReasoningDelta | ContentDelta | Finished]:
-        """Потоковый ответ; последним приходит `Finished`."""
+    ) -> AsyncIterator[ReasoningDelta | ContentDelta | Usage | Finished]:
+        """Потоковый ответ; последним приходит `Finished`.
+
+        `Usage` — не больше одного раза, только при `include_usage` и только прямо перед
+        `Finished`; читающий поток отличает его от `ContentDelta` явно.
+        """
         ...
 
     async def complete(self, request: ChatRequest) -> str:

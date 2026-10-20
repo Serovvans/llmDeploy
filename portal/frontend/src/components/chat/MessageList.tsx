@@ -1,8 +1,9 @@
 import { IconArrowADownRegular16 } from '@skbkontur/icons/IconArrowADownRegular16';
 import { IconArrowRoundSyncForwardRegular16 } from '@skbkontur/icons/IconArrowRoundSyncForwardRegular16';
 import { IconCopyRegular16 } from '@skbkontur/icons/IconCopyRegular16';
+import { IconEyeOffRegular16 } from '@skbkontur/icons/IconEyeOffRegular16';
 import { IconNetDownloadRegular16 } from '@skbkontur/icons/IconNetDownloadRegular16';
-import { Button, Link, Modal, ScrollContainer, Spinner } from '@skbkontur/react-ui';
+import { Button, Link, Loader, Modal, ScrollContainer, Spinner } from '@skbkontur/react-ui';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import { attachmentFileUrl } from '../../api/client';
@@ -12,6 +13,7 @@ import { answerErrorText } from '../../chat/files';
 import type { ChatMessage, DialogView, Generation } from '../../chat/state';
 import { useCopy } from '../../hooks/useCopy';
 import { useFocusReturn } from '../../hooks/useFocusReturn';
+import type { FeedMemory } from '../../memory/useMemoryUi';
 import { texts } from '../../texts';
 import { Notice } from '../Notice';
 import { TitleHint } from '../TitleHint';
@@ -116,7 +118,7 @@ function Answer(props: AnswerProps) {
   const figures = figuresOf(sources ?? [], brokenFigures);
 
   return (
-    <div className={styles.answer}>
+    <div className={message.memory_mode === 'excluded' ? `${styles.answer} ${styles.excludedAnswer}` : styles.answer}>
       {generation && isWaiting(generation) && (
         <p className={styles.state}>
           <Spinner type="mini" caption={null} />
@@ -240,6 +242,38 @@ function Answer(props: AnswerProps) {
   );
 }
 
+interface MemoryMarkProps {
+  text: string;
+  label?: string;
+  icon?: React.ReactElement;
+  /** Открыть панель памяти на этом вопросе; `null` — функция выключена, пометка — обычный текст (Д-36). */
+  onOpen: (() => void) | null;
+}
+
+/** Пометка выбора пары в ленте (концепция §4.9, «Лента»): читается перед вопросом или под вложениями. */
+function MemoryMark({ text, label, icon, onOpen }: MemoryMarkProps) {
+  return (
+    <p className={styles.memoryMark}>
+      {onOpen ? (
+        <Link component="button" use="grayed" icon={icon} aria-label={label} onClick={onOpen}>
+          {text}
+        </Link>
+      ) : (
+        <>
+          {icon && (
+            <span className={styles.memoryMarkIcon} aria-hidden="true">
+              {icon}
+            </span>
+          )}
+          {text}
+        </>
+      )}
+    </p>
+  );
+}
+
+const NO_MEMORY: FeedMemory = { onOpenPair: null, marked: null, reveal: null, revealing: false };
+
 /** Что сообщает экранному чтению область состояния: фазы, а не текст ответа по словам (концепция §9). */
 function phaseText(view: DialogView): string {
   if (view.generation) {
@@ -280,11 +314,15 @@ interface MessageListProps {
   nothingFoundText?: string;
   /** Содержимое над сообщениями в той же прокрутке (результат разбора документа). */
   header?: React.ReactNode;
+  /** Память диалога: пометки пар ведут в панель, пара из описи отмечается и прокручивается. */
+  memory?: FeedMemory;
 }
 
 /** Лента-протокол (концепция §4.2): слева пометка «Вы» или «Ответ», вопрос — на подложке, ответ — текстом. */
 export function MessageList(props: MessageListProps) {
   const { dialogId, view, onRegenerate, onLoadOlder, onOpenSource, openingFragment } = props;
+  const memory = props.memory ?? NO_MEMORY;
+  const { reveal } = memory;
   const scroll = useRef<ScrollContainer>(null);
   const list = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -311,6 +349,18 @@ export function MessageList(props: MessageListProps) {
     return () => observer.disconnect();
   }, [following]);
 
+  // Переход из описи памяти: лента прокручивается к вопросу и больше не следует за ответом.
+  useEffect(() => {
+    if (!reveal) {
+      return;
+    }
+    const row = list.current?.querySelector(`[data-message-id="${reveal.questionId}"]`);
+    if (row) {
+      setFollowing(false);
+      row.scrollIntoView({ block: 'start' });
+    }
+  }, [reveal]);
+
   return (
     <div ref={list} className={styles.list}>
       <ScrollContainer
@@ -329,12 +379,33 @@ export function MessageList(props: MessageListProps) {
               </Link>
             </p>
           )}
-          {view.messages.map((message, index) => (
-            <div key={message.id} className={styles.row}>
+          {view.messages.map((message, index) => {
+            const previous = view.messages[index - 1];
+            const pairId = message.role === 'user' ? message.id : previous?.role === 'user' ? previous.id : null;
+            const marked = pairId !== null && pairId === memory.marked;
+            const openPair = memory.onOpenPair && pairId ? () => memory.onOpenPair?.(pairId) : null;
+            return (
+            <div
+              key={message.id}
+              data-message-id={message.id}
+              className={marked ? `${styles.row} ${styles.marked}` : styles.row}
+            >
               <div className={styles.who}>{message.role === 'user' ? t.you : t.answer}</div>
               {message.role === 'user' ? (
                 <div className={styles.questionColumn}>
-                <div className={styles.question}>
+                {message.memory_mode === 'excluded' && (
+                  <MemoryMark
+                    text={texts.memory.excluded}
+                    label={texts.memory.excludedLabel}
+                    icon={<IconEyeOffRegular16 />}
+                    onOpen={openPair}
+                  />
+                )}
+                <div
+                  className={
+                    message.memory_mode === 'excluded' ? `${styles.question} ${styles.questionExcluded}` : styles.question
+                  }
+                >
                   {message.content && <p className={styles.questionText}>{message.content}</p>}
                   {message.attachments.length > 0 && (
                     <div className={styles.attachments}>
@@ -358,6 +429,9 @@ export function MessageList(props: MessageListProps) {
                     </div>
                   )}
                 </div>
+                {message.memory_mode === 'text_only' && message.attachments.length > 0 && (
+                  <MemoryMark text={texts.memory.textOnly} onOpen={openPair} />
+                )}
                 {/* Опасные операции во вставленном запросе — под вопросом, на всю ширину колонки (§5.7). */}
                 {message.sql_dangers?.map((danger) => (
                   <Notice key={danger} kind="warning">
@@ -378,9 +452,17 @@ export function MessageList(props: MessageListProps) {
                 />
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       </ScrollContainer>
+      {memory.revealing && (
+        <div className={styles.revealing}>
+          <Loader active caption={texts.common.loading}>
+            <div className={styles.revealingBox} />
+          </Loader>
+        </div>
+      )}
       <p className="p-visually-hidden" role="status">
         {phaseText(view)}
       </p>

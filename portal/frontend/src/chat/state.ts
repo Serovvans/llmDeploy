@@ -1,6 +1,6 @@
 /** Состояние чата: история, сообщения диалогов, идущие ответы и черновики панели запроса. Чистые функции. */
 import type { StreamEvent } from '../api/stream';
-import type { Attachment, Dialog, DialogKind, Message, Source, SqlRun } from '../api/types';
+import type { Attachment, Dialog, DialogKind, MemoryMode, Message, Source, SqlRun } from '../api/types';
 import type { MediaFailure } from './files';
 import { footnoteNumbers } from './footnotes';
 
@@ -117,6 +117,8 @@ export type ChatAction =
   | { type: 'streamEvent'; id: string; event: StreamEvent; now: number }
   | { type: 'generationStopped'; id: string }
   | { type: 'generationRejected'; id: string; messages: ChatMessage[] }
+  /** Режим пары сменён (или возвращён после отказа): у вопроса `questionId` и его ответа (контракт §5.10.1). */
+  | { type: 'memoryModeChanged'; id: string; questionId: string; mode: MemoryMode }
   | { type: 'draftUpdated'; key: string; update: (draft: Draft) => Draft }
   | { type: 'draftMoved'; from: string; to: string };
 
@@ -156,6 +158,7 @@ function localMessage(role: 'user' | 'assistant', now: number, patch: Partial<Ch
     sql_run: null,
     sql_dangers: null,
     dropped_messages: 0,
+    memory_mode: 'full',
     created_at: new Date(now).toISOString(),
     ...patch,
   };
@@ -382,10 +385,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           : replaced?.role === 'assistant'
             ? replaced.asked_with_tags
             : undefined;
+        // Новый ответ относится к паре своего вопроса и несёт её режим, как у сервера.
+        const memoryMode = action.question ? 'full' : (kept.at(-1)?.memory_mode ?? 'full');
         return {
           ...view,
           status: 'ready',
-          messages: [...kept, ...question, localMessage('assistant', action.now, { asked_with_tags: askedWithTags })],
+          messages: [
+            ...kept,
+            ...question,
+            localMessage('assistant', action.now, { asked_with_tags: askedWithTags, memory_mode: memoryMode }),
+          ],
           generation: {
             phase: 'sending',
             startedAt: action.now,
@@ -422,6 +431,20 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case 'generationRejected':
       return withView(state, action.id, (view) => ({ ...view, messages: action.messages, generation: null }));
+    case 'memoryModeChanged':
+      return withView(state, action.id, (view) => {
+        const index = view.messages.findIndex((message) => message.id === action.questionId);
+        if (index < 0) {
+          // Пара старше загруженных сообщений: лента её не показывает.
+          return view;
+        }
+        const messages = view.messages.map((message, i) =>
+          i === index || (i === index + 1 && message.role === 'assistant')
+            ? { ...message, memory_mode: action.mode }
+            : message,
+        );
+        return { ...view, messages };
+      });
     case 'draftUpdated':
       return {
         ...state,

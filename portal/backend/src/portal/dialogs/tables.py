@@ -38,6 +38,7 @@ messages = sa.Table(
     sa.Column("sql_dangers", postgresql.ARRAY(sa.Text)),
     sa.Column("dropped_messages", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("memory_mode", sa.Text, nullable=False, server_default="full"),
 )
 
 attachments = sa.Table(

@@ -13,6 +13,7 @@ import { Composer } from '../components/chat/Composer';
 import { HistoryPanel } from '../components/chat/HistoryPanel';
 import { MarkdownView } from '../components/chat/MarkdownView';
 import { MessageList } from '../components/chat/MessageList';
+import { MemoryLayout } from '../components/memory/MemoryLayout';
 import { ConfigNotice } from '../components/ConfigNotice';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { DataTable } from '../components/DataTable';
@@ -24,6 +25,7 @@ import { useDocparse, type DocparseRun, type DocparseView } from '../docparse/Do
 import { useCopy } from '../hooks/useCopy';
 import { useFocusReturn } from '../hooks/useFocusReturn';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { useMemoryUi } from '../memory/useMemoryUi';
 import { megabytes } from '../kb/documents';
 import { useSession } from '../session/SessionContext';
 import { texts } from '../texts';
@@ -335,6 +337,18 @@ export function DocumentsScreen() {
     }
   };
 
+  // Память диалога — на экране результата, с момента, когда разбор сохранён (концепция §5.9).
+  const resultShown =
+    id !== undefined && stored !== 'not_found' && stored !== 'failed' && view !== null && dialogView?.status === 'ready';
+  const memory = useMemoryUi({
+    kind: 'docparse',
+    dialogId: id ?? null,
+    view: dialogView,
+    available: resultShown,
+    params: {},
+    busy: summaryStreaming || answering !== null || answerElsewhere,
+  });
+
   const dialog: Dialog | null = id
     ? (history.items.find((item) => item.id === id) ?? {
         id,
@@ -390,6 +404,7 @@ export function DocumentsScreen() {
         onLoadOlder={() => chat.loadOlder(id)}
         onOpenSource={() => undefined}
         openingFragment={null}
+        memory={memory.feed}
       />
     );
     // Пока содержание пишется, панель запроса ведёт себя как во время ответа: «Остановить» — для содержания.
@@ -401,6 +416,7 @@ export function DocumentsScreen() {
         answer={busy}
         placeholder={t.placeholder}
         waitText={summaryStreaming ? t.waitSummary : undefined}
+        meter={memory.meter}
         onTextChange={(text) => chat.setText(id, text)}
         onSend={() => chat.send(id, {}, () => undefined)}
         onStop={() => (summaryStreaming ? docparse.stop() : chat.stop(id))}
@@ -408,6 +424,13 @@ export function DocumentsScreen() {
       />
     );
   }
+
+  // При выключенной памяти диалога заметка — как до неё: по последнему ответу (концепция §5.9).
+  const longDialog = memory.active ? (
+    memory.longDialog
+  ) : lastMessage?.role === 'assistant' && lastMessage.dropped_messages > 0 ? (
+    <Notice kind="info">{labels.longDialog}</Notice>
+  ) : null;
 
   return (
     <div className={styles.screen}>
@@ -423,6 +446,7 @@ export function DocumentsScreen() {
       />
       <div className={styles.area}>
         <PageHeader title={title}>
+          {memory.toggle}
           {dialog && view && (
             <span data-opener="header">
               <Hint text={texts.users.actions} pos="left">
@@ -434,13 +458,19 @@ export function DocumentsScreen() {
             </span>
           )}
         </PageHeader>
-        <div className={styles.body}>{body}</div>
-        {composer && lastMessage?.role === 'assistant' && lastMessage.dropped_messages > 0 && (
-          <div className={styles.longDialog}>
-            <Notice kind="info">{labels.longDialog}</Notice>
-          </div>
-        )}
-        {composer}
+        <MemoryLayout
+          panel={memory.panel}
+          bottom={
+            composer && (
+              <>
+                {longDialog && <div className={styles.longDialog}>{longDialog}</div>}
+                {composer}
+              </>
+            )
+          }
+        >
+          <div className={styles.body}>{body}</div>
+        </MemoryLayout>
       </div>
       {removing && (
         <ConfirmModal

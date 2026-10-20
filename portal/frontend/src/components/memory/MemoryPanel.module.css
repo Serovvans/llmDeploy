@@ -1,0 +1,203 @@
+/* Колонка 320 px справа от ленты; слева линия, без тени (концепция §3.2, §7.3). */
+.panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  min-height: 0;
+  border-left: 1px solid var(--p-line);
+  background: var(--p-bg);
+}
+
+/*
+ * Окно уже 1440 px: панель — поверх ленты, не сдвигая её, от строки заголовка до панели запроса
+ * с заметкой о длинном диалоге (концепция §3.3, Д-32). Высоту нижнего блока задаёт MemoryLayout.
+ */
+@media (max-width: 1439.98px) {
+  .panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: var(--p-memory-bottom, 0);
+    z-index: 2;
+  }
+}
+
+.head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 8px 0 16px;
+}
+
+.heading {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.level {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 16px 16px;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.levelTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.warningIcon {
+  display: inline-flex;
+  color: var(--p-warning-icon);
+}
+
+/* Полоса на всю ширину панели, 6 px. */
+.bar {
+  height: 6px;
+  border-radius: 3px;
+}
+
+.explain,
+.muted {
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.pairs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+}
+
+.pairsTitle {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 -8px;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.row:hover {
+  background: var(--p-surface-2);
+}
+
+.show {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  /* Цель нажатия не меньше 24 px и при одной строке; отступ одинаков у одной и двух строк. */
+  padding: 2px 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.show:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+/* Номер — моноширинными цифрами: номера в описи стоят столбцом. */
+.number {
+  flex: none;
+  min-width: 20px;
+  color: var(--p-text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Начало вопроса — до двух строк, дальше многоточие. */
+.preview {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.excluded .preview {
+  color: var(--p-text-muted);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding-left: 28px;
+}
+
+.marks {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.marksBelow {
+  flex-basis: 100%;
+}
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.error {
+  padding-left: 28px;
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.loading {
+  height: 160px;
+}
+
+.failed {
+  padding: 8px 16px;
+}

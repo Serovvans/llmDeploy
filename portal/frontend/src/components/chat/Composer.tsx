@@ -55,6 +55,8 @@ interface ComposerProps {
   chat?: ChatControls;
   /** Свой элемент строки управления слева, на месте режима ответа чата: действие SQL-помощника. */
   controls?: React.ReactNode;
+  /** Индикатор памяти диалога — справа в строке подсказки, под кнопкой «Отправить» (концепция §4.1, Д-28). */
+  meter?: React.ReactNode;
   onTextChange: (text: string) => void;
   onSend: () => void;
   onStop: () => void;
@@ -108,7 +110,7 @@ export function Composer(props: ComposerProps) {
   };
 
   return (
-    <div className={styles.composer}>
+    <div className={styles.composer} data-composer="">
       <div className={styles.box}>
         {draft.attachments.length > 0 && (
           <div className={styles.attachments}>
@@ -200,9 +202,12 @@ export function Composer(props: ComposerProps) {
           </span>
         </div>
       </div>
-      <p id={hintId} className={styles.hint}>
-        {t.hint}
-      </p>
+      <div className={styles.hintRow}>
+        <p id={hintId} className={styles.hint}>
+          {t.hint}
+        </p>
+        {props.meter}
+      </div>
       {props.note && <p className={styles.hint}>{props.note}</p>}
       {draft.notice && (
         <p id={noticeId} className={styles.notice} role="alert">

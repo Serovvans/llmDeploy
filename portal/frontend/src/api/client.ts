@@ -12,6 +12,8 @@ import type {
   DocumentText,
   KbDocument,
   KbScope,
+  Memory,
+  MemoryMode,
   Message,
   ErrorBody,
   FieldError,
@@ -340,6 +342,19 @@ export const api = {
       'GET',
       `/api/dialogs/${id}/messages${cursor ? `?${new URLSearchParams({ cursor }).toString()}` : ''}`,
     ),
+
+  /**
+   * Оценка памяти диалога (контракт §5.10.3). `query` — параметры следующего вопроса, от которых зависит
+   * место: в чате `mode` и `search`, в SQL `action`, `dialect`, `schema_id`, в CoGIS `action`.
+   */
+  getMemory: (id: string, query: Record<string, string>) => {
+    const params = new URLSearchParams(query).toString();
+    return request<Memory>('GET', `/api/dialogs/${id}/memory${params ? `?${params}` : ''}`);
+  },
+
+  /** Режим пары; `questionId` — вопрос этого диалога (контракт §5.10.4). */
+  setMemoryMode: (id: string, questionId: string, mode: MemoryMode) =>
+    request<Message>('PATCH', `/api/dialogs/${id}/messages/${questionId}`, { memory_mode: mode }),
 
   /** Вопрос в диалоге любого вида: `content` и параметры этого вида (контракт §5.3). */
   sendMessage: (id: string, body: { content: string } & Record<string, unknown>, signal: AbortSignal) =>

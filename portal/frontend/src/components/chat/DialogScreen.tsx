@@ -9,11 +9,13 @@ import { attachExtensions, attachHint } from '../../chat/files';
 import { EMPTY_DRAFT } from '../../chat/state';
 import { useFocusReturn } from '../../hooks/useFocusReturn';
 import { usePageTitle } from '../../hooks/usePageTitle';
+import { useMemoryUi } from '../../memory/useMemoryUi';
 import { useSession } from '../../session/SessionContext';
 import { errorText, texts } from '../../texts';
 import { ConfirmModal } from '../ConfirmModal';
 import { EmptyState } from '../EmptyState';
 import { useDocumentViewer } from '../kb/DocumentViewer';
+import { MemoryLayout } from '../memory/MemoryLayout';
 import { Notice } from '../Notice';
 import { PageHeader } from '../PageHeader';
 import { Composer } from './Composer';
@@ -129,6 +131,8 @@ interface DialogScreenProps {
   sendPending?: boolean;
   /** Своя повторная генерация (SQL: с заменой удалённой схемы); по умолчанию — обычная. */
   onRegenerate?: (id: string) => void;
+  /** Оценка памяти: схема из строки запроса удалена в другой вкладке (SQL-помощник, концепция §4.9). */
+  onMemorySchemaMissing?: () => void;
 }
 
 /**
@@ -216,7 +220,19 @@ export function DialogScreen(props: DialogScreenProps) {
     }
   }, [configNoticeStale, key, setNotice]);
 
-  const newChat = () => navigate(basePath);
+  const newChat = useCallback(() => navigate(basePath), [basePath, navigate]);
+  const usable = view?.status !== 'not_found' && view?.status !== 'failed';
+  const memory = useMemoryUi({
+    kind,
+    dialogId: id ?? null,
+    view,
+    available: usable,
+    params: props.params,
+    busy: Boolean(view?.generation) || formingElsewhere,
+    viewer: { isOpen: viewer.isOpen, close: closeViewer },
+    onNewDialog: labels.longDialogAction ? newChat : undefined,
+    onSchemaMissing: props.onMemorySchemaMissing,
+  });
   const onCreated = (createdId: string) => navigate(`${basePath}/${createdId}`, { replace: true });
 
   const startRename = (target: Dialog, opener: string) => {
@@ -284,13 +300,21 @@ export function DialogScreen(props: DialogScreenProps) {
         onLoadOlder={() => chat.loadOlder(id)}
         onOpenSource={openSource}
         openingFragment={viewer.opening?.fragmentId ?? null}
+        memory={memory.feed}
       />
     );
   }
 
   const renaming = dialog !== undefined && renamingId === dialog.id;
-  const usable = view?.status !== 'not_found' && view?.status !== 'failed';
   const lastAnswer = last?.role === 'assistant' ? last : undefined;
+  // При выключенной памяти диалога заметка — как до неё: по последнему ответу (концепция §5.5).
+  const longDialog = memory.active ? (
+    memory.longDialog
+  ) : lastAnswer && lastAnswer.dropped_messages > 0 ? (
+    <Notice kind="info" action={labels.longDialogAction ? { label: labels.newLabel, onClick: newChat } : undefined}>
+      {labels.longDialog}
+    </Notice>
+  ) : null;
 
   return (
     <div className={viewer.isOpen ? `${styles.screen} ${styles.withViewer}` : styles.screen}>
@@ -324,6 +348,7 @@ export function DialogScreen(props: DialogScreenProps) {
             ) : undefined
           }
         >
+          {memory.toggle}
           {dialog && !renaming && (
             <span data-opener="header">
               {/* Подсказка — слева: сверху ей нет места, а снизу она закрыла бы открытое меню. */}
@@ -337,61 +362,59 @@ export function DialogScreen(props: DialogScreenProps) {
             </span>
           )}
         </PageHeader>
-        {props.toolbar}
-        {props.banner && <div className={styles.banner}>{props.banner}</div>}
-        <div className={styles.body}>{body}</div>
-        {usable && (
-          <>
-            {lastAnswer && lastAnswer.dropped_messages > 0 && (
-              <div className={styles.longDialog}>
-                <Notice
-                  kind="info"
-                  action={labels.longDialogAction ? { label: labels.newLabel, onClick: newChat } : undefined}
-                >
-                  {labels.longDialog}
-                </Notice>
-              </div>
-            )}
-            <Composer
-              dialogId={id ?? null}
-              draft={chat.state.drafts[key] ?? EMPTY_DRAFT}
-              answer={view?.generation ? 'generating' : formingElsewhere ? 'waiting' : 'idle'}
-              placeholder={props.placeholder}
-              mono={props.mono}
-              note={props.note}
-              sendPending={props.sendPending}
-              controls={props.composerControls}
-              chat={
-                kind === 'chat'
-                  ? {
-                      mode: chat.mode,
-                      collections: chat.collections,
-                      tags: chat.tags,
-                      maxTags: config?.kb.tags.max_selected ?? null,
-                      attach: config ? { hint: attachHint(config), extensions: attachExtensions(config) } : null,
-                      onModeChange: chat.setMode,
-                      onCollectionsChange: chat.setCollections,
-                      onTagsChange: chat.setTags,
-                      onAddFiles: (files) => chat.addFiles(key, files, onCreated),
-                      onRetryFile: (fileKey) => chat.retryFile(key, fileKey),
-                      onRemoveFile: (fileKey) => chat.removeFile(key, fileKey),
+        <MemoryLayout
+          panel={memory.panel}
+          bottom={
+            usable && (
+              <>
+                {longDialog && <div className={styles.longDialog}>{longDialog}</div>}
+                <Composer
+                  dialogId={id ?? null}
+                  draft={chat.state.drafts[key] ?? EMPTY_DRAFT}
+                  answer={view?.generation ? 'generating' : formingElsewhere ? 'waiting' : 'idle'}
+                  placeholder={props.placeholder}
+                  mono={props.mono}
+                  note={props.note}
+                  sendPending={props.sendPending}
+                  controls={props.composerControls}
+                  meter={memory.meter}
+                  chat={
+                    kind === 'chat'
+                      ? {
+                          mode: chat.mode,
+                          collections: chat.collections,
+                          tags: chat.tags,
+                          maxTags: config?.kb.tags.max_selected ?? null,
+                          attach: config ? { hint: attachHint(config), extensions: attachExtensions(config) } : null,
+                          onModeChange: chat.setMode,
+                          onCollectionsChange: chat.setCollections,
+                          onTagsChange: chat.setTags,
+                          onAddFiles: (files) => chat.addFiles(key, files, onCreated),
+                          onRetryFile: (fileKey) => chat.retryFile(key, fileKey),
+                          onRemoveFile: (fileKey) => chat.removeFile(key, fileKey),
+                        }
+                      : undefined
+                  }
+                  onTextChange={(text) => chat.setText(key, text)}
+                  onSend={() => {
+                    const refusal = props.beforeSend?.() ?? null;
+                    if (refusal) {
+                      chat.setNotice(key, refusal);
+                    } else {
+                      chat.send(key, props.params, onCreated, props.onSendRefused);
                     }
-                  : undefined
-              }
-              onTextChange={(text) => chat.setText(key, text)}
-              onSend={() => {
-                const refusal = props.beforeSend?.() ?? null;
-                if (refusal) {
-                  chat.setNotice(key, refusal);
-                } else {
-                  chat.send(key, props.params, onCreated, props.onSendRefused);
-                }
-              }}
-              onStop={() => id && chat.stop(id)}
-              onNotice={(notice) => chat.setNotice(key, notice)}
-            />
-          </>
-        )}
+                  }}
+                  onStop={() => id && chat.stop(id)}
+                  onNotice={(notice) => chat.setNotice(key, notice)}
+                />
+              </>
+            )
+          }
+        >
+          {props.toolbar}
+          {props.banner && <div className={styles.banner}>{props.banner}</div>}
+          <div className={styles.body}>{body}</div>
+        </MemoryLayout>
       </div>
       {viewer.element}
       {removing && (

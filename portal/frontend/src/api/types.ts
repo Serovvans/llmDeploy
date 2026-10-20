@@ -1,4 +1,4 @@
-/** Типы контракта `docs/portal-api.md` версии 0.15. Имена полей — как в контракте. */
+/** Типы контракта `docs/portal-api.md` версии 0.17 (поля релиза 0.7). Имена полей — как в контракте. */
 
 export type LoginStep = 'second_factor' | 'password_change' | 'second_factor_setup' | 'ready';
 
@@ -106,6 +106,8 @@ export interface PortalConfig {
     /** Проверка на тестовых данных: при `enabled: false` переключателя нет; `dialect` — единственный проверяемый. */
     test_run: { enabled: boolean; dialect: string };
   };
+  /** Флаг «Память диалога» (контракт §4): при `false` нет индикатора и панели памяти. */
+  memory: { enabled: boolean };
 }
 
 export interface FieldError {
@@ -256,7 +258,39 @@ export interface Message {
   /** Только у вопроса в диалоге `sql`: опасные операции во вставленном запросе. */
   sql_dangers: SqlDanger[] | null;
   dropped_messages: number;
+  /** Режим пары «вопрос + ответ» (контракт §5.10.1): у вопроса — сохранённый, у ответа — режим его вопроса. */
+  memory_mode: MemoryMode;
   created_at: string;
+}
+
+/** «Учитывать», «Без вложений», «Не учитывать» (контракт §5.10.1). */
+export type MemoryMode = 'full' | 'text_only' | 'excluded';
+
+/** Уровень заполненности памяти диалога: считает сервер, интерфейс сам не вычисляет (контракт §5.10.3). */
+export type MemoryLevel = 'free' | 'filling' | 'almost_full' | 'overflow';
+
+/** Пара «вопрос + ответ» в оценке памяти; номер пары — её место в списке с 1. */
+export interface MemoryPair {
+  question_id: string;
+  answer_id: string;
+  /** Первые 200 символов вопроса; пустая строка — вопрос из одних вложений. */
+  question_preview: string;
+  answer_preview: string;
+  attachments: number;
+  memory_mode: MemoryMode;
+  tokens: number;
+  /** Пара не поместится в следующий запрос при текущем выборе. */
+  dropped: boolean;
+}
+
+/** Оценка заполненности памяти диалога — `GET /api/dialogs/{id}/memory` (контракт §5.10.3). */
+export interface Memory {
+  level: MemoryLevel;
+  /** Только для подсказки; может быть больше 100. */
+  percent: number;
+  used_tokens: number;
+  limit_tokens: number;
+  pairs: MemoryPair[];
 }
 
 export type AnswerMode = 'fast' | 'thorough';

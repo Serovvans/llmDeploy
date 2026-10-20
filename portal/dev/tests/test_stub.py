@@ -270,6 +270,56 @@ async def test_length_and_break_marks(client: httpx.AsyncClient) -> None:
     assert all(chunk["finish_reason"] is None for chunk in chunks)
 
 
+async def test_usage_chunk_follows_finish_reason_when_asked(client: httpx.AsyncClient) -> None:
+    body = {
+        "model": "default",
+        "messages": [
+            {"role": "system", "content": "Правила."},
+            {"role": "user", "content": [{"type": "text", "text": "Сколько?"}, _image()]},
+        ],
+        "stream_options": {"include_usage": True},
+    }
+    events = await _events(client, body)
+    assert events[-1] == "[DONE]"
+    *_, finish, usage = [json.loads(event) for event in events[:-1]]
+    assert finish["choices"][0]["finish_reason"] == "stop"
+    answer = "Заглушка. Вопрос: «Сколько?». Изображений: 1."
+    prompt = math.ceil(len("Правила.Сколько?") / 3) + 1500
+    completion = math.ceil(len(answer) / 3)
+    assert usage == {
+        "id": "chatcmpl-stub",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "default",
+        "choices": [],
+        "usage": {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        },
+    }
+
+
+async def test_usage_is_absent_unless_asked_and_on_marks(client: httpx.AsyncClient) -> None:
+    def has_usage(events: list[str]) -> bool:
+        return any('"usage"' in event for event in events)
+
+    assert not has_usage(await _events(client, _chat("вопрос")))
+    off = _chat("вопрос", stream_options={"include_usage": False})
+    assert not has_usage(await _events(client, off))
+    for mark in ("[[stub:no-usage]]", "один два три четыре [[stub:break]]"):
+        events = await _events(client, _chat(mark, stream_options={"include_usage": True}))
+        assert not has_usage(events), mark
+    refused = [
+        _chat("x", stream_options={"include_usage": True}),  # без stream
+        {**_chat("x", stream_options={"include_usage": "yes"}), "stream": True},
+        {**_chat("x", stream_options={"include_usage": True, "x": 1}), "stream": True},
+        {**_chat("x", stream_options=[]), "stream": True},
+    ]
+    for body in refused:
+        assert (await client.post(CHAT, json=body)).status_code == 400, body
+
+
 @pytest.fixture
 def pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Паузы потока записываются, а не выдерживаются: тест не зависит от времени."""

@@ -7,8 +7,7 @@ from uuid import uuid4
 from portal.dialogs.context import (
     ImageRef,
     Turn,
-    fit_history,
-    fits_alone,
+    fit_memory,
     history_turns,
     question_turn,
 )
@@ -109,33 +108,33 @@ def test_fit_drops_whole_messages_from_the_start() -> None:
     ]
     question = _turn("user", 20)
     # Системное сообщение — 10 токенов, вопрос — 10, каждое сообщение истории — 50.
-    assert fit_history("я" * 20, history, question, 220, ESTIMATOR) == 0
-    assert fit_history("я" * 20, history, question, 219, ESTIMATOR) == 2
-    assert fit_history("я" * 20, history, question, 120, ESTIMATOR) == 2
-    assert fit_history("я" * 20, history, question, 119, ESTIMATOR) == 4
-    assert fit_history("я" * 20, [], question, 5, ESTIMATOR) == 0
+    assert fit_memory("я" * 20, history, question, 220, ESTIMATOR).dropped == 0
+    assert fit_memory("я" * 20, history, question, 219, ESTIMATOR).dropped == 2
+    assert fit_memory("я" * 20, history, question, 120, ESTIMATOR).dropped == 2
+    assert fit_memory("я" * 20, history, question, 119, ESTIMATOR).dropped == 4
+    assert fit_memory("я" * 20, [], question, 5, ESTIMATOR).dropped == 0
 
 
 def test_remaining_history_starts_with_a_question() -> None:
     history = [_turn("user", 100), _turn("user", 100), _turn("assistant", 100), _turn("user", 10)]
     # По бюджету помещаются два последних сообщения, но начинаться с ответа история не может.
-    assert fit_history("", history, _turn("user", 0), 60, ESTIMATOR) == 3
-    assert fit_history("", history, _turn("user", 0), 1000, ESTIMATOR, min_dropped=1) == 1
-    assert fit_history("", history, _turn("user", 0), 1000, ESTIMATOR, min_dropped=2) == 3
-    assert fit_history("", history, _turn("user", 0), 1000, ESTIMATOR, min_dropped=9) == 4
+    assert fit_memory("", history, _turn("user", 0), 60, ESTIMATOR).dropped == 3
+    assert fit_memory("", history, _turn("user", 0), 1000, ESTIMATOR, min_dropped=1).dropped == 1
+    assert fit_memory("", history, _turn("user", 0), 1000, ESTIMATOR, min_dropped=2).dropped == 3
+    assert fit_memory("", history, _turn("user", 0), 1000, ESTIMATOR, min_dropped=9).dropped == 4
 
 
 def test_fit_keeps_at_most_eight_images() -> None:
     history = [_turn("user", 0, images=3), _turn("assistant", 2), _turn("user", 0, images=4)]
-    assert fit_history("", history, _turn("user", 0, images=1), 10_000, ESTIMATOR) == 0
-    assert fit_history("", history, _turn("user", 0, images=2), 10_000, ESTIMATOR) == 2
-    assert fit_history("", history, _turn("user", 0, images=5), 10_000, ESTIMATOR) == 3
+    assert fit_memory("", history, _turn("user", 0, images=1), 10_000, ESTIMATOR).dropped == 0
+    assert fit_memory("", history, _turn("user", 0, images=2), 10_000, ESTIMATOR).dropped == 2
+    assert fit_memory("", history, _turn("user", 0, images=5), 10_000, ESTIMATOR).dropped == 3
 
 
-def test_fits_alone_counts_text_and_images() -> None:
+def test_limit_is_budget_minus_system_and_question_text_and_images() -> None:
     question = _turn("user", 100, images=2)
-    assert fits_alone("я" * 20, question, 260, ESTIMATOR)
-    assert not fits_alone("я" * 20, question, 259, ESTIMATOR)
+    assert fit_memory("я" * 20, [], question, 260, ESTIMATOR).limit == 0
+    assert fit_memory("я" * 20, [], question, 259, ESTIMATOR).limit == -1
 
 
 def test_title_is_first_non_empty_line_without_quotes() -> None:

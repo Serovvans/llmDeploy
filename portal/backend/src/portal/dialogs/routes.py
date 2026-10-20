@@ -17,10 +17,12 @@ from portal.core.sse import event_stream_response
 from portal.core.uploads import receive_recording
 from portal.core.validation import validation_failure
 from portal.dialogs.domain import DialogKind
-from portal.dialogs.generation import UNSET, QuestionInput, _Unset
+from portal.dialogs.generation import UNSET, MemoryQuery, QuestionInput, _Unset
 from portal.dialogs.schemas import (
     AttachmentOut,
+    ChatMemoryQuery,
     ChatMessageRequest,
+    CogisMemoryQuery,
     CogisMessageRequest,
     CreateDialogRequest,
     DialogDetailsOut,
@@ -28,9 +30,12 @@ from portal.dialogs.schemas import (
     DialogOut,
     DocparseMessageRequest,
     DocparseOut,
+    MemoryModeRequest,
+    MemoryOut,
     MessageListOut,
     MessageOut,
     RenameDialogRequest,
+    SqlMemoryQuery,
     SqlMessageRequest,
     SqlRegenerateRequest,
 )
@@ -64,8 +69,14 @@ def attachment_id(attachment_id: str, _: Employee) -> UUID:
     return _uuid(attachment_id)
 
 
+def message_id(message_id: str, _: Employee) -> UUID:
+    """Идентификатор сообщения из пути."""
+    return _uuid(message_id)
+
+
 DialogId = Annotated[UUID, Depends(dialog_id)]
 AttachmentId = Annotated[UUID, Depends(attachment_id)]
+MessageId = Annotated[UUID, Depends(message_id)]
 Limit = Annotated[int | None, Query(ge=1, le=100)]
 
 
@@ -206,6 +217,63 @@ async def regenerate(
         user, session.session_id, target, dialog.kind, schema_id
     )
     return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
+
+
+def _memory_query(kind: DialogKind, query: dict[str, str]) -> MemoryQuery:
+    """Разобрать строку запроса оценки по виду диалога (§5.10.3); чужие параметры не читаются."""
+    try:
+        if kind == "chat":
+            chat = ChatMemoryQuery.model_validate(query)
+            params: dict[str, Any] = {"mode": chat.mode, "collections": [], "tags": []}
+            return MemoryQuery(params, search=chat.search == "true")
+        if kind == "sql":
+            sql = SqlMemoryQuery.model_validate(query)
+            schema_id = None if sql.schema_id is None else str(sql.schema_id)
+            return MemoryQuery(
+                {
+                    "action": sql.action,
+                    "dialect": sql.dialect,
+                    "schema_id": schema_id,
+                    "test_run": False,
+                }
+            )
+        if kind == "cogis":
+            return MemoryQuery({"action": CogisMemoryQuery.model_validate(query).action})
+        return MemoryQuery({})
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+
+
+@router.get("/{id}/memory")
+async def get_memory(
+    request: Request, target: DialogId, user: Employee, container: ContainerDep
+) -> MemoryOut:
+    """Оценка памяти диалога для следующего вопроса: индикатор и панель (§5.10.3)."""
+    if not container.settings.memory.enabled:
+        raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
+    dialog = await container.dialogs.get(user.id, target)
+    query = _memory_query(dialog.kind, dict(request.query_params))
+    return MemoryOut.of(await container.generation.memory(user.id, target, dialog.kind, query))
+
+
+@router.patch("/{id}/messages/{message_id}")
+async def set_memory_mode(
+    body: dict[str, Any],
+    target: DialogId,
+    message: MessageId,
+    user: Employee,
+    container: ContainerDep,
+) -> MessageOut:
+    """Сменить режим пары «вопрос + ответ»; `message_id` — вопрос (§5.10.4)."""
+    if not container.settings.memory.enabled:
+        raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
+    await container.dialogs.get(user.id, target)
+    try:
+        mode = MemoryModeRequest.model_validate(body).memory_mode
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+    view = await container.generation.set_memory_mode(user.id, target, message, mode)
+    return MessageOut.of(view)
 
 
 @router.get("/{id}/export")
