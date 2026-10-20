@@ -91,6 +91,12 @@ export function useMemoryUi({
   const [hovered, setHovered] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const [reveal, setReveal] = useState<FeedMemory['reveal']>(null);
+  // Переход к паре относится к своему диалогу: при возврате в диалог лента снова следует за ответом.
+  const [revealFor, setRevealFor] = useState(dialogId);
+  if (revealFor !== dialogId) {
+    setRevealFor(dialogId);
+    setReveal(null);
+  }
   const [revealing, setRevealing] = useState(false);
   const requests = useRef(0);
   const viewerOpen = viewer?.isOpen ?? false;
@@ -229,7 +235,7 @@ export function useMemoryUi({
     longText = t.longDialog[group].almost_full;
   } else if (level === 'overflow') {
     longText = dropped ? t.longDialog[group].dropped : t.longDialog[group].overflow;
-  } else if (level === null && dropped) {
+  } else if (level === null && dropped && memory.status !== 'loading') {
     // Оценки нет (сбой): последний ответ уже отбросил ранние сообщения — это известно и без неё.
     longText = t.longDialog[group].dropped;
   }

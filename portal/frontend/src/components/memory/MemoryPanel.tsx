@@ -186,13 +186,16 @@ export function MemoryPanel({ id, kind, memory, busy, onClose, onHover, onReveal
           <Hint text={hint} maxWidth={320}>
             <ProgressBar percent={levelPercent(memory)} warning={isWarningLevel(memory)} className={styles.bar} />
           </Hint>
-          <p className={styles.explain}>{t.explain[group][level]}</p>
-          <p className={styles.muted}>{t.estimateNote}</p>
-          {kind === 'chat' && <p className={styles.muted}>{t.chatNote}</p>}
-          {kind === 'docparse' && <p className={styles.muted}>{t.docparseNote}</p>}
         </div>
         <div className={styles.scroll}>
           <ScrollContainer>
+            {/* Закреплены только уровень и полоса; пояснения прокручиваются, чтобы опись сохраняла высоту (§4.9). */}
+            <div className={styles.notes}>
+              <p className={styles.explain}>{t.explain[group][level]}</p>
+              <p className={styles.muted}>{t.estimateNote}</p>
+              {kind === 'chat' && <p className={styles.muted}>{t.chatNote}</p>}
+              {kind === 'docparse' && <p className={styles.muted}>{t.docparseNote}</p>}
+            </div>
             <section className={styles.pairs}>
               <h3 className={styles.pairsTitle}>{t.pairsTitle}</h3>
               {pairs.length === 0 ? (

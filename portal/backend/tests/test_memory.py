@@ -13,7 +13,13 @@ from llm_stub.app import create_app as create_stub
 from portal.core.logging import JsonFormatter
 from portal.core.settings import Settings
 from portal.kb.ports import Retrieval
-from portal.llm.ports import ChatRequest, ContentDelta, Finished, TextPart
+from portal.llm.ports import (
+    ChatRequest,
+    ContentDelta,
+    Finished,
+    ModelUnavailableError,
+    TextPart,
+)
 from tests import samples
 from tests.conftest import close_portal, make_portal
 from tests.support import Portal, ask, live_server, new_dialog, parse_events, post_events, upload
@@ -423,3 +429,18 @@ async def test_usage_is_logged_as_numbers_only_and_its_absence_is_harmless(
             assert not [r for r in caplog.records if r.getMessage() == "prompt usage"]
         finally:
             await close_portal(portal)
+
+
+async def test_title_request_skips_excluded_first_question(portal: Portal) -> None:
+    """Исключённая пара не уходит модели и в отдельном запросе названия (критерий 30)."""
+    client = await portal.employee()
+    dialog_id = await new_dialog(client)
+    portal.model.title = ModelUnavailableError()
+    first, _ = await _pair(portal, client, dialog_id, "Секретный первый вопрос", "Ответ")
+    assert (await client.get(f"/api/dialogs/{dialog_id}")).json()["title"] is None
+    assert (await _set_mode(client, dialog_id, first, "excluded")).status_code == 200
+
+    portal.model.title = "Название"
+    await _pair(portal, client, dialog_id, "Второй вопрос", "Ответ")
+    sent = _text(portal.model.title_requests[-1])
+    assert "Второй вопрос" in sent and "Секретный" not in sent

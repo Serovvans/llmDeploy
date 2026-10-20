@@ -43,6 +43,7 @@ export function MemoryMeter({ memory, panelId, panelOpen, onOpen }: MemoryMeterP
   const loading = memory.level === null && memory.status === 'loading';
   const spinner = useDelayed(loading);
   const hint = levelHint(memory);
+  const [hintOpened, setHintOpened] = useState(false);
 
   let content: React.ReactNode;
   if (loading) {
@@ -87,8 +88,17 @@ export function MemoryMeter({ memory, panelId, panelOpen, onOpen }: MemoryMeterP
   return (
     <span className={styles.root}>
       {hint ? (
-        <Hint text={hint} pos="top right" maxWidth={320}>
-          {button}
+        // Managed like `TitleHint`: the concept (§4.9) requires the hint on hover and on keyboard focus.
+        <Hint text={hint} pos="top right" maxWidth={320} manual opened={hintOpened}>
+          <span
+            className={styles.root}
+            onMouseEnter={() => setHintOpened(true)}
+            onMouseLeave={() => setHintOpened(false)}
+            onFocus={(event) => event.target.matches(':focus-visible') && setHintOpened(true)}
+            onBlur={() => setHintOpened(false)}
+          >
+            {button}
+          </span>
         </Hint>
       ) : (
         button

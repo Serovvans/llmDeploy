@@ -67,6 +67,14 @@
   border-radius: 3px;
 }
 
+/* Пояснение и серые строки — в прокручиваемой части, над описью (концепция §4.9). */
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 16px 0;
+}
+
 .explain,
 .muted {
   font-size: 14px;

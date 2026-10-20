@@ -95,6 +95,14 @@ export function useDialogMemory({ kind, dialogId, ready, enabled, params, busy, 
   /** Событие `context_truncated`: в каком диалоге и после какого запроса оценки. */
   const [truncation, setTruncation] = useState<{ dialogId: string; after: number } | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  // Ошибки у строк описи относятся к моменту: они уходят при смене диалога и по окончании ответа.
+  const [errorsFor, setErrorsFor] = useState({ dialogId, busy });
+  if (errorsFor.dialogId !== dialogId || errorsFor.busy !== busy) {
+    setErrorsFor({ dialogId, busy });
+    if (errorsFor.dialogId !== dialogId || !busy) {
+      setRowErrors({});
+    }
+  }
   const [announced, setAnnounced] = useState('');
   const sequence = useRef(0);
   const current = useRef({ dialogId, query: memoryQuery(params), onSchemaMissing });
@@ -151,6 +159,7 @@ export function useDialogMemory({ kind, dialogId, ready, enabled, params, busy, 
             setAnnounced(text);
           }
           setEstimate({ dialogId: id, memory, failed: false });
+          setRowErrors({});
           setTruncation((value) => (value && value.after < seq ? null : value));
         },
         (error: unknown) => {

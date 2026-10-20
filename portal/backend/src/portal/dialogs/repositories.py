@@ -217,7 +217,7 @@ class SqlDialogRepository:
         )
 
     async def first_question(self, owner_id: UUID, dialog_id: UUID) -> str | None:
-        """Текст первого непустого вопроса диалога."""
+        """Текст первого непустого вопроса диалога, не исключённого из памяти (§5.10)."""
         query = (
             sa.select(messages.c.content)
             .where(
@@ -225,6 +225,7 @@ class SqlDialogRepository:
                 messages.c.dialog_id.in_(_owned(owner_id)),
                 messages.c.role == "user",
                 messages.c.content != "",
+                messages.c.memory_mode != "excluded",
             )
             .order_by(messages.c.position)
             .limit(1)
