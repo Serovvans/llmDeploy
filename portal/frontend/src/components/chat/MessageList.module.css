@@ -78,6 +78,11 @@
   line-height: 20px;
 }
 
+/* Цвет кнопки-пометки — токен темы, а не серый библиотеки (контраст ≥ 4.5:1 в обеих темах); два класса перебивают её один. */
+.memoryMark .memoryMarkLink {
+  color: var(--p-text-muted);
+}
+
 .memoryMarkIcon {
   display: inline-flex;
 }

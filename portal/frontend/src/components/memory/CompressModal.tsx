@@ -182,7 +182,7 @@ export function CompressModal(props: CompressModalProps) {
             label={t.summary.title}
             maxChars={maxChars}
             notice={notice}
-            fieldError={fieldError}
+            fieldError={fieldError === t.draft.wait && state.phase !== 'streaming' ? null : fieldError}
             disclaimer={t.compress.disclaimer}
             textareaRef={field}
             onEdit={(text) => {

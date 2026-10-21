@@ -98,7 +98,7 @@ export function TransferModal(props: TransferModalProps) {
     if (!continuing) {
       loadPairs();
     }
-    container.current?.querySelector<HTMLElement>('input[type="radio"]')?.focus();
+    container.current?.querySelector<HTMLElement>('input[type="radio"]:checked')?.focus();
   }, [continuing, loadPairs]);
 
   useEffect(() => {
@@ -222,9 +222,11 @@ export function TransferModal(props: TransferModalProps) {
   const verbatimOffered = !continuing && answers.length > 0;
   const showField = what === 'verbatim' || state.phase !== 'idle';
   const title = source.title ?? texts.dialogs[source.kind].newLabel;
-  const intro = [continuing ? tt.continueIntro : null, source.kind === 'docparse' ? tt.docparseIntro : null]
+  const intro = [continuing ? tt.continueIntro : null, source.kind === 'docparse' && what === 'summary' ? tt.docparseIntro : null]
     .filter(Boolean)
     .join('. ');
+  // «Дождитесь…» снимается, когда пересказ закончился: подсказка про то, чего уже нет, вводит в заблуждение.
+  const fieldError = failure?.field === t.draft.wait && state.phase !== 'streaming' ? null : (failure?.field ?? null);
   const notice =
     failure?.notice ??
     (state.failure
@@ -306,7 +308,7 @@ export function TransferModal(props: TransferModalProps) {
               label={what === 'verbatim' ? tt.verbatim : tt.summary}
               maxChars={maxChars}
               notice={notice}
-              fieldError={failure?.field ?? null}
+              fieldError={fieldError}
               disclaimer={what === 'summary' ? tt.disclaimer : null}
               loading={answer === 'loading' ? (loadingShown ? tt.loadingAnswer : '') : null}
               extra={answerNotice}

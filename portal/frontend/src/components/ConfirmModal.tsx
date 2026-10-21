@@ -26,7 +26,7 @@ interface ConfirmModalProps {
 export function ConfirmModal(props: ConfirmModalProps) {
   const { title, who, body, action, pending = false, onConfirm, onCancel } = props;
   return (
-    <MiniModal onClose={onCancel}>
+    <MiniModal disableClose={pending} onClose={onCancel}>
       <MiniModal.Header>{title}</MiniModal.Header>
       <MiniModal.Body>
         {who && <p className={styles.who}>{who}</p>}

@@ -1,8 +1,11 @@
 """Сборка запроса к модели и укладка истории (docs/portal-api.md §5.4, §5.10); чистые функции."""
 
 import re
+import sys
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -33,14 +36,34 @@ class Turn:
     images: tuple[ImageRef, ...] = ()
 
 
+@cache
+def _gap() -> str:
+    """Допуск между частями закрывающей пометки: пробелы и невидимые знаки формата (Cf).
+
+    Модель Cf не видит, а пробельный класс их не ловит. Набор берётся из `unicodedata`
+    текущей версии Python (список в коде устарел бы с её обновлением); считается один раз.
+    """
+    format_chars = "".join(
+        re.escape(char)
+        for char in map(chr, range(sys.maxunicode + 1))
+        if unicodedata.category(char) == "Cf"
+    )
+    return rf"[\s{format_chars}]*"
+
+
+@cache
+def _closing(tag: str) -> re.Pattern[str]:
+    return re.compile(rf"<{_gap()}/{_gap()}{re.escape(tag)}", re.IGNORECASE)
+
+
 def data_block(tag: str, body: str, name: str | None = None) -> str:
     """Размеченный блок недоверенных данных для запроса к модели.
 
     Разметка блока — только наша: закрывающая пометка в содержимом и в имени
-    обезвреживается в любом написании (с пробелами, в любом регистре), так что
-    содержимое не может закрыть свой блок и выдать продолжение за указания.
+    обезвреживается в любом написании (с пробелами и невидимыми знаками формата, в любом
+    регистре), так что содержимое не может закрыть свой блок и выдать продолжение за указания.
     """
-    closing = re.compile(rf"<\s*/\s*{re.escape(tag)}", re.IGNORECASE)
+    closing = _closing(tag)
 
     def inert(text: str) -> str:
         return closing.sub(rf"<\\/{tag}", text)

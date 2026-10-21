@@ -264,7 +264,7 @@ function MemoryMark({ text, label, icon, onOpen }: MemoryMarkProps) {
   return (
     <p className={styles.memoryMark}>
       {onOpen ? (
-        <Link component="button" use="grayed" icon={icon} aria-label={label} onClick={onOpen}>
+        <Link className={styles.memoryMarkLink} component="button" use="grayed" icon={icon} aria-label={label} onClick={onOpen}>
           {text}
         </Link>
       ) : (

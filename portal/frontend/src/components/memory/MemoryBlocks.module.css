@@ -58,6 +58,17 @@
   cursor: default;
 }
 
+/* The library hides the ring of a disabled-looking button; drawn outside its 50% opacity. */
+.unavailableFocus {
+  display: inline-flex;
+  border-radius: 8px;
+}
+
+.unavailableFocus:has(:focus-visible) {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
 /* Пересказанные вопросы в начале описи: строка-кнопка и, раскрытые, строки без выбора. */
 .summarized {
   padding: 0 8px;

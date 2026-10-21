@@ -1,6 +1,6 @@
 import { IconArrowCDownRegular16 } from '@skbkontur/icons/IconArrowCDownRegular16';
 import { IconArrowCRightRegular16 } from '@skbkontur/icons/IconArrowCRightRegular16';
-import { Button, Hint, Link } from '@skbkontur/react-ui';
+import { Button, Link } from '@skbkontur/react-ui';
 import { useId, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
@@ -8,6 +8,7 @@ import type { DialogCarried, DialogKind, DialogSummary, MemoryPair } from '../..
 import { texts } from '../../texts';
 import { MarkdownView } from '../chat/MarkdownView';
 import { Notice } from '../Notice';
+import { TitleHint } from '../TitleHint';
 import styles from './MemoryBlocks.module.css';
 
 const t = texts.memory;
@@ -130,15 +131,21 @@ interface CompressButtonProps {
 /** «Сжать раннюю часть» с пояснением; сжимать нечего — кнопка в обходе по Tab, причина — в подсказке (§9). */
 function CompressButton({ compressPairs, repeat, keepRecent, busy, onCompress }: CompressButtonProps) {
   const noteId = useId();
+  const reasonId = useId();
   if (!compressPairs) {
+    const reason = t.summary.nothing(keepRecent);
     return (
       <div className={styles.compress}>
-        <Hint text={t.summary.nothing(keepRecent)} maxWidth={320}>
-          <Button aria-disabled="true" aria-describedby={noteId} className={styles.unavailable}>
+        {/* Like the unavailable «Ответить заново»: the reason opens on hover and keyboard focus. */}
+        <TitleHint text={reason} maxWidth={320} always className={styles.unavailableFocus}>
+          <Button aria-disabled="true" aria-describedby={reasonId} className={styles.unavailable}>
             {t.summary.compress}
           </Button>
-        </Hint>
-        <p id={noteId} className={styles.muted}>
+        </TitleHint>
+        <span id={reasonId} className="p-visually-hidden">
+          {reason}
+        </span>
+        <p className={styles.muted}>
           {t.summary.compressNote(keepRecent)}
         </p>
       </div>
