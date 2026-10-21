@@ -521,6 +521,21 @@ nvidia-smi
 sudo docker compose -f deploy/docker-compose.yml logs --no-color --since 72h portal-api 2>&1 | grep '"prompt usage"' | tail -n 50
 ```
 
+Параметры памяти диалога (0.8, `memory.*` в `portal/backend/config/app.yaml`, меняются
+накладкой — 3.6): `keep_recent_pairs` (2) — сколько последних вопросов с ответами сжатие
+не трогает; `max_chars` (8000) — предел пересказа и перенесённого текста в символах (при
+старте проверяется `max_chars / llm.chars_per_token ≤ docparse.dialog_reserve_tokens / 2`:
+после калибровки с меньшим `chars_per_token` `portal-api` может не стартовать — уменьшите
+`max_chars`); `summary_max_tokens` (4096) — предел ответа модели при пересказе;
+`summary_system_prompt`, `head_rules_prompt` — тексты запроса пересказа и правила для
+пересказа в запросе, без нужды не менять. Новых переменных `.env` нет.
+
+Запись `portal-api` «summary draft failed» (`error_type`, `trace`; 0.8) — сбой черновика
+пересказа; текст сообщений в журнал не пишется. Сотрудник видит ошибку в окне. Единичные —
+повторить; подряд — `make logs SERVICE=portal-api`, состояние модели. Ответы 429
+`draft_in_progress` (у сотрудника уже готовится пересказ) и `model_overloaded` — не сбой
+портала, а ограничение нагрузки.
+
 ```bash
 sudo docker compose -f deploy/docker-compose.yml logs --no-color --since 2h portal-worker 2>&1 | grep -E 'job yielded|image dropped|image description truncated' | tail -n 50
 ```
@@ -731,7 +746,7 @@ files:
 | `kb.context.enabled` | `true` | Пояснения к фрагментам не дописываются; новые документы индексируются без них |
 | `kb.rewrite.enabled` | `true` | Поиск идёт по тексту последнего сообщения |
 | `kb.images.enabled` | `true` | Картинки из документов не извлекаются; уже извлечённые показываются и находятся |
-| `memory.enabled` | `true` | Нет кнопки «Память диалога», индикатора и панели; маршруты памяти отвечают 403 `feature_disabled`; запрос к модели собирается как в 0.6, `stream_options` не шлётся; уже сохранённые выборы пар действуют |
+| `memory.enabled` | `true` | Нет кнопки «Память диалога», индикатора, панели, сжатия и переноса; маршруты памяти отвечают 403 `feature_disabled`; запрос к модели собирается как в 0.6, `stream_options` не шлётся; уже сохранённые выборы пар, применённый пересказ и перенесённые сведения действуют (это содержимое диалога) |
 | `media.enabled` | `true` | Аудио и видео не принимаются ни в базу знаний, ни в чат; уже расшифрованные доступны |
 
 ```yaml
@@ -1111,7 +1126,8 @@ sudo docker compose start bifrost
 
 Следующие релизы идут тем же порядком (те же цели `release-*`); релиз 0.6 (пределы базы
 знаний) — `release-0.6.md`; релиз 0.7 («Память диалога», миграция `0008`, флаг
-`memory.enabled`, калибровка оценки) — `release-0.7.md`.
+`memory.enabled`, калибровка оценки) — `release-0.7.md`; релиз 0.8 (сжатие, перенос,
+«Продолжить отсюда», миграция `0009`; только после калибровки) — `release-0.8.md`.
 
 Обозначения в командах:
 - `/opt/llm` — **рабочий клон**: из него запущен сервис (`systemctl cat llm-stack`,
