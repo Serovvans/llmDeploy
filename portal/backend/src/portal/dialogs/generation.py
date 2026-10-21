@@ -28,20 +28,31 @@ from portal.dialogs import errors
 from portal.dialogs.context import (
     ImageRef,
     Turn,
-    fit_history,
-    fits_alone,
+    considered_history,
+    fit_memory,
+    head_turn,
     history_turns,
     question_turn,
+    with_head_rules,
 )
-from portal.dialogs.domain import AnswerMode, Attachment, DialogKind, Message, MessageStatus
+from portal.dialogs.domain import (
+    AnswerMode,
+    Attachment,
+    DialogKind,
+    MemoryMode,
+    Message,
+    MessageStatus,
+)
 from portal.dialogs.files import AttachmentFiles
 from portal.dialogs.footnotes import cited_numbers
+from portal.dialogs.memory import MemoryEstimate, estimate_memory
 from portal.dialogs.ports import (
     AnswerPlan,
     DialogTool,
     DialogUnitOfWork,
     DialogUnitOfWorkFactory,
 )
+from portal.dialogs.service import MessageView, SummaryView
 from portal.dialogs.watch import (
     INTERRUPTION_MESSAGES,
     Interruption,
@@ -62,6 +73,7 @@ from portal.llm.ports import (
     MAX_IMAGES_PER_REQUEST,
     ChatModel,
     ChatRequest,
+    ContentDelta,
     ContextOverflowError,
     Finished,
     ImagePart,
@@ -72,6 +84,7 @@ from portal.llm.ports import (
     ReasoningEffort,
     TextPart,
     TokenEstimator,
+    Usage,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,8 +95,9 @@ _TITLE_QUOTES = "\"'«»“”„"
 _RETRY_PAUSE_SECONDS = 0.1
 _SAVE_ATTEMPTS = 4
 _SAVE_RETRY_SECONDS = 0.5
+_ALL_POSITIONS = 2**31 - 1
 _EFFORT: dict[AnswerMode, ReasoningEffort] = {"fast": "low", "thorough": "xhigh"}
-_ERROR_MESSAGES = {
+ERROR_MESSAGES = {
     "model_unavailable": "Модель сейчас недоступна. Повторите попытку позже.",
     "model_overloaded": "Модель перегружена. Повторите попытку позже.",
     "message_too_long": "Сообщение слишком длинное. Сократите текст или вложения.",
@@ -110,6 +124,18 @@ class QuestionInput:
     content: str
     params: dict[str, Any]
     attachment_ids: Sequence[UUID] = ()
+
+
+@dataclass(frozen=True)
+class MemoryQuery:
+    """Что войдёт в план следующего вопроса — строка запроса оценки памяти (§5.10.3).
+
+    `params` — параметры вопроса своего вида, как у `QuestionInput`; `search` — только в
+    чате: в выборе базы знаний есть коллекция, и под найденное нужен резерв.
+    """
+
+    params: dict[str, Any]
+    search: bool = False
 
 
 @dataclass
@@ -149,13 +175,20 @@ class _Job:
 type _Save = Callable[[DialogUnitOfWork, Message | None], Awaitable[_Job]]
 
 
-def search_history(messages: Sequence[Message]) -> list[DialogTurn]:
-    """История для поиска: только текст вопросов и ответов по порядку (§5.4).
+def search_history(
+    messages: Sequence[Message], summarized_until: int | None = None
+) -> list[DialogTurn]:
+    """История для поиска: только текст учитываемых вопросов и ответов по порядку (§5.4).
 
-    Размышлений, блоков вложений и найденных мест в ней нет; сообщение с пустым текстом —
-    вопрос из одних вложений или оборванный ответ — пропускается.
+    Пересказанных сообщений, пар «Не учитывать», размышлений, блоков вложений и найденных
+    мест в ней нет (§5.10.1); сообщение с пустым текстом — вопрос из одних вложений или
+    оборванный ответ — пропускается.
     """
-    return [DialogTurn(message.role, message.content) for message in messages if message.content]
+    return [
+        DialogTurn(message.role, message.content)
+        for message, _ in considered_history(messages, summarized_until)
+        if message.content
+    ]
 
 
 def clean_title(raw: str) -> str:
@@ -210,6 +243,7 @@ class GenerationService:
         self._tags = settings.kb.tags
         self._dialogs = settings.dialogs
         self._llm = settings.llm
+        self._memory = settings.memory
         self._recheck_seconds = settings.auth.session.stream_recheck_seconds
         self._max_model_len = max_model_len
         self._tasks: set[asyncio.Task[None]] = set()
@@ -405,16 +439,20 @@ class GenerationService:
         """Сколько токенов остаётся запросу: контекст минус ответ и запас (§5.4)."""
         return self._max_model_len - plan.max_tokens - self._llm.safety_margin_tokens
 
-    def _check_fits(self, plan: AnswerPlan) -> None:
-        """Вопрос обязан помещаться сам; под найденное в базе знаний оставлен резерв.
+    def _reserved_budget(self, plan: AnswerPlan, search: bool) -> int:
+        """Бюджет за вычетом резерва `kb.context_max_tokens`, если поиск будет (§5.10.2)."""
+        return self._budget(plan) - (self._knowledge_reserve if search else 0)
 
-        Резерв `kb.context_max_tokens` вычитается, когда поиск будет выполняться: тогда
-        правила и найденные места заведомо не вытеснят сам вопрос (§5.4).
+    def _check_fits(self, plan: AnswerPlan, head: Turn | None = None) -> None:
+        """Вопрос с головным сообщением обязан помещаться сам; под найденное — резерв.
+
+        Резерв вычитается, когда поиск будет выполняться, при любом значении флага памяти:
+        тогда правила и найденные места заведомо не вытеснят сам вопрос (§5.4, §5.10.2).
         """
-        budget = self._budget(plan)
-        if plan.selection is not None:
-            budget -= self._knowledge_reserve
-        if not fits_alone(plan.system, plan.question, budget, self._estimator):
+        budget = self._reserved_budget(plan, plan.selection is not None)
+        system = with_head_rules(plan.system, head, self._memory.head_rules_prompt)
+        fit = fit_memory(system, [], plan.question, budget, self._estimator, head=head)
+        if fit.used > fit.limit:
             raise errors.message_too_long()
 
     def _message(
@@ -453,17 +491,43 @@ class GenerationService:
         повторяется до `dialogs.stop_grace_seconds`: клиент мог только что закрыть прежний
         поток, и сервер ещё сохраняет остановку (§5.5, «Параллельность»).
         """
-        deadline = time.monotonic() + self._dialogs.stop_grace_seconds
-        while (job := await self._try_accept(owner_id, dialog_id, kind, save)) is None:
-            if time.monotonic() >= deadline:
-                raise errors.generation_in_progress()
-            await asyncio.sleep(_RETRY_PAUSE_SECONDS)
+        job = await self._when_idle(lambda: self._try_accept(owner_id, dialog_id, kind, save))
         # Вопрос зафиксирован в базе: только теперь уйдёт статус 200 и начнётся ответ.
         # От фиксации до старта задачи нет ни одного ожидания.
         task = asyncio.create_task(self._run(job))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return job.channel
+
+    async def _when_idle[T](self, attempt: Callable[[], Awaitable[T | None]]) -> T:
+        """Повторять попытку, пока она отвечает `None` — в диалоге формируется ответ.
+
+        Пауза короткая, срок — `dialogs.stop_grace_seconds`, затем
+        `409 generation_in_progress` (§5.5, «Параллельность»).
+        """
+        deadline = time.monotonic() + self._dialogs.stop_grace_seconds
+        while (result := await attempt()) is None:
+            if time.monotonic() >= deadline:
+                raise errors.generation_in_progress()
+            await asyncio.sleep(_RETRY_PAUSE_SECONDS)
+        return result
+
+    async def _is_idle(
+        self, uow: DialogUnitOfWork, owner_id: UUID, dialog_id: UUID, kind: DialogKind
+    ) -> tuple[bool, Message | None]:
+        """Под блокировкой строки диалога: свободен ли он; заодно — последнее сообщение."""
+        if kind == "docparse" and await self._summary_blocks(uow, owner_id, dialog_id):
+            return False, None
+        last = await uow.dialogs.last_message(owner_id, dialog_id)
+        if last is not None and last.id in self._active:
+            # Ответ ещё формируется либо уже сохранён, но идёт проверка SQL (§5.5).
+            return False, last
+        if last is not None and last.status == "streaming":
+            # Процесс один: «формируется» без живой задачи — это ответ, который
+            # не удалось сохранить. Он прерван, диалог не должен оставаться запертым.
+            await uow.dialogs.interrupt_answer(owner_id, last.id)
+            last.status = "error"
+        return True, last
 
     async def _try_accept(
         self, owner_id: UUID, dialog_id: UUID, kind: DialogKind, save: _Save
@@ -475,18 +539,13 @@ class GenerationService:
                 dialog = await uow.dialogs.get_dialog(owner_id, dialog_id, lock=True)
                 if dialog is None or dialog.kind != kind:
                     raise not_found()
-                if kind == "docparse" and await self._summary_blocks(uow, owner_id, dialog_id):
+                idle, last = await self._is_idle(uow, owner_id, dialog_id, kind)
+                if not idle:
                     return None
-                last = await uow.dialogs.last_message(owner_id, dialog_id)
-                if last is not None and last.id in self._active:
-                    # Ответ ещё формируется либо уже сохранён, но идёт проверка SQL (§5.5).
-                    return None
-                if last is not None and last.status == "streaming":
-                    # Процесс один: «формируется» без живой задачи — это ответ, который
-                    # не удалось сохранить. Он прерван, диалог не должен оставаться запертым.
-                    await uow.dialogs.interrupt_answer(owner_id, last.id)
-                    last.status = "error"
                 job = await save(uow, last)
+                # Пересказ и перенесённое входят в каждый запрос: с ними вопрос тоже
+                # обязан поместиться (§5.10.2).
+                self._check_fits(job.plan, head_turn(dialog))
                 # У разбора название — имя файла, модель его не предлагает (§5.7).
                 job.needs_title = dialog.title is None and kind != "docparse"
                 answer = self._message(
@@ -516,6 +575,143 @@ class GenerationService:
         # Поток разбора уже не идёт: краткое содержание осталось неполным.
         await uow.dialogs.finish_summary(owner_id, dialog_id, docparse.summary, "error")
         return False
+
+    # --- память диалога (§5.10) ---
+
+    async def memory(
+        self, owner_id: UUID, dialog_id: UUID, kind: DialogKind, query: MemoryQuery
+    ) -> MemoryEstimate:
+        """Оценка памяти диалога для следующего вопроса без текста и вложений (§5.10.3).
+
+        План строится так же, как для вопроса; история укладывается той же функцией и с
+        тем же бюджетом, что в запросе к модели при включённом флаге.
+        """
+        if kind == "chat":
+            plan = self._chat_plan("", query.params, [])
+            search = query.search
+        else:
+            plan = await self._tools[kind].plan(owner_id, dialog_id, "", query.params)
+            search = plan.selection is not None
+        async with self._uow_factory() as uow:
+            dialog = await uow.dialogs.get_dialog(owner_id, dialog_id)
+            if dialog is None:
+                raise not_found()
+            messages = await uow.dialogs.history(owner_id, dialog_id, _ALL_POSITIONS)
+            files = await uow.dialogs.message_attachments(
+                owner_id, [message.id for message in messages if message.role == "user"]
+            )
+        head = head_turn(dialog)
+        return estimate_memory(
+            messages,
+            files,
+            with_head_rules(plan.system, head, self._memory.head_rules_prompt),
+            head,
+            dialog.summary_until_position,
+            plan.question,
+            self._reserved_budget(plan, search),
+            self._estimator,
+            self._memory.keep_recent_pairs,
+        )
+
+    async def set_memory_mode(
+        self, owner_id: UUID, dialog_id: UUID, message_id: UUID, mode: MemoryMode
+    ) -> MessageView:
+        """Сменить режим пары у её вопроса (§5.10.4).
+
+        Пока в диалоге формируется ответ, режим не меняется: та же проверка под блокировкой
+        строки диалога, что при отправке, с тем же ожиданием, затем `409`.
+        """
+
+        async def attempt() -> MessageView | None:
+            async with self._uow_factory() as uow:
+                dialog = await uow.dialogs.get_dialog(owner_id, dialog_id, lock=True)
+                question = (
+                    None
+                    if dialog is None
+                    else await uow.dialogs.get_message(owner_id, dialog_id, message_id)
+                )
+                if dialog is None or question is None or question.role != "user":
+                    raise not_found()
+                idle, _ = await self._is_idle(uow, owner_id, dialog_id, dialog.kind)
+                if not idle:
+                    return None
+                found = await uow.dialogs.message_attachments(owner_id, [question.id])
+                files = found.get(question.id, [])
+                if mode == "text_only" and not files:
+                    raise validation_error([field_error("memory_mode", "invalid_format")])
+                await uow.dialogs.set_memory_mode(owner_id, question.id, mode)
+                question.memory_mode = mode
+                return MessageView(question, files)
+
+        return await self._when_idle(attempt)
+
+    async def _locked_idle(self, uow: DialogUnitOfWork, owner_id: UUID, dialog_id: UUID) -> bool:
+        """Под блокировкой строки диалога: свободен ли он; чужой или удалённый — `404`."""
+        dialog = await uow.dialogs.get_dialog(owner_id, dialog_id, lock=True)
+        if dialog is None:
+            raise not_found()
+        idle, _ = await self._is_idle(uow, owner_id, dialog_id, dialog.kind)
+        return idle
+
+    async def wait_idle(self, owner_id: UUID, dialog_id: UUID) -> None:
+        """Дождаться, что в диалоге не формируется ответ, иначе `409` (§5.10.5, §5.10.8)."""
+
+        async def attempt() -> bool | None:
+            async with self._uow_factory() as uow:
+                return True if await self._locked_idle(uow, owner_id, dialog_id) else None
+
+        await self._when_idle(attempt)
+
+    async def set_summary(
+        self, owner_id: UUID, dialog_id: UUID, text: str, until_message_id: UUID
+    ) -> SummaryView:
+        """Применить или изменить пересказ: записать текст и границу вместо прежних (§5.10.6).
+
+        Граница — ответ этого диалога, после которого не меньше `memory.keep_recent_pairs`
+        вопросов. Пока в диалоге формируется ответ, пересказ не меняется — `409`.
+        """
+        text = text.strip()
+        if not text:
+            raise validation_error([field_error("text", "required")])
+        if len(text) > self._memory.max_chars:
+            raise validation_error([field_error("text", "too_long")])
+
+        async def attempt() -> SummaryView | None:
+            async with self._uow_factory() as uow:
+                if not await self._locked_idle(uow, owner_id, dialog_id):
+                    return None
+                messages = await uow.dialogs.history(owner_id, dialog_id, _ALL_POSITIONS)
+                until = next((item for item in messages if item.id == until_message_id), None)
+                later = (
+                    0
+                    if until is None
+                    else sum(
+                        item.role == "user" and item.position > until.position for item in messages
+                    )
+                )
+                if (
+                    until is None
+                    or until.role != "assistant"
+                    or later < self._memory.keep_recent_pairs
+                ):
+                    raise validation_error([field_error("until_message_id", "unknown_value")])
+                await uow.dialogs.set_summary(owner_id, dialog_id, text, until.position)
+                covered = sum(item.position <= until.position for item in messages)
+                return SummaryView(text, until.id, covered)
+
+        return await self._when_idle(attempt)
+
+    async def clear_summary(self, owner_id: UUID, dialog_id: UUID) -> None:
+        """Отменить сжатие: пересказ и граница — `NULL`, сообщения не трогаются (§5.10.6)."""
+
+        async def attempt() -> bool | None:
+            async with self._uow_factory() as uow:
+                if not await self._locked_idle(uow, owner_id, dialog_id):
+                    return None
+                await uow.dialogs.set_summary(owner_id, dialog_id, None, None)
+                return True
+
+        await self._when_idle(attempt)
 
     # --- формирование ответа: после статуса 200 ошибка возможна только событием ---
 
@@ -572,14 +768,12 @@ class GenerationService:
             # Проверка оборвана; ответ уже сохранён со своим состоянием и остаётся им. Поток,
             # закрытый клиентом, завершающего события не получает (§6.2).
             if interrupted != "stopped":
-                channel.emit(
-                    "error", {"code": interrupted, "message": _ERROR_MESSAGES[interrupted]}
-                )
+                channel.emit("error", {"code": interrupted, "message": ERROR_MESSAGES[interrupted]})
         elif finished:
             channel.emit("done", {"status": outcome.status})
         elif outcome.status == "error" and outcome.error_code is not None:
             code = outcome.error_code
-            channel.emit("error", {"code": code, "message": _ERROR_MESSAGES[code]})
+            channel.emit("error", {"code": code, "message": ERROR_MESSAGES[code]})
 
     async def _test_run(self, job: _Job, tool: DialogTool) -> Interruption | None:
         """Проверить запросы сохранённого ответа на тестовых данных (§5.5, шаг 6; §7.4).
@@ -703,12 +897,26 @@ class GenerationService:
         system = plan.system
         question = plan.question
         async with self._uow_factory() as uow:
+            dialog = await uow.dialogs.get_dialog(job.owner_id, job.dialog_id)
             earlier = await uow.dialogs.history(job.owner_id, job.dialog_id, job.question.position)
             files = await uow.dialogs.message_attachments(
                 job.owner_id, [message.id for message in earlier if message.role == "user"]
             )
+        if dialog is None:
+            self._interrupted(job, "dialog_deleted")
+            return
+        # Сохранённые режимы пар, пересказ и перенесённое учитываются при любом значении
+        # флага: это содержимое диалога (§5.10.9). Пересказанные сообщения в запрос не идут.
+        summarized_until = dialog.summary_until_position
+        head = head_turn(dialog)
+        # Правило о головном сообщении — сразу после системного, правила базы знаний — за
+        # ним (§5.10.2). Сами пересказ и перенесённое в системное сообщение не попадают.
+        system = with_head_rules(system, head, self._memory.head_rules_prompt)
+        planned_system = system
         if plan.selection is not None:
-            retrieval = await self._search(job, plan.selection, search_history(earlier), watch)
+            retrieval = await self._search(
+                job, plan.selection, search_history(earlier, summarized_until), watch
+            )
             if retrieval is None:
                 return
             # Правила — в конец системного сообщения; найденное — первым блоком вопроса,
@@ -717,18 +925,29 @@ class GenerationService:
             if retrieval.context:
                 question = Turn("user", f"{retrieval.context}\n\n{question.text}", question.images)
 
-        history = history_turns(earlier, files)
-        budget = self._budget(plan)
-        dropped = fit_history(system, history, question, budget, self._estimator)
+        history = history_turns(earlier, files, summarized_until)
+        # С памятью диалога история укладывается с резервом под найденное, а не по его
+        # фактическому объёму, — как в оценке памяти; без неё — как в 0.6 (§5.10.2).
+        if self._memory.enabled:
+            fit_system, fit_question = planned_system, plan.question
+            budget = self._reserved_budget(plan, plan.selection is not None)
+        else:
+            fit_system, fit_question, budget = system, question, self._budget(plan)
+        dropped = fit_memory(
+            fit_system, history, fit_question, budget, self._estimator, head=head
+        ).dropped
         if dropped:
             job.channel.emit("context_truncated", {"dropped_messages": dropped})
+        # Головное сообщение не отбрасывается никогда, в том числе при повторе.
+        lead = [] if head is None else [head]
 
         for attempt in range(2):
             outcome.dropped_messages = dropped
             request = ChatRequest(
-                await self._model_messages(system, [*history[dropped:], question]),
+                await self._model_messages(system, [*lead, *history[dropped:], question]),
                 plan.effort,
                 plan.max_tokens,
+                include_usage=self._memory.enabled,
             )
             try:
                 await self._consume(job, request, watch)
@@ -739,7 +958,9 @@ class GenerationService:
                 if attempt or not remaining:
                     break
                 more = max(dropped * 2, dropped + (remaining + 1) // 2)
-                dropped = fit_history(system, history, question, budget, self._estimator, more)
+                dropped = fit_memory(
+                    fit_system, history, fit_question, budget, self._estimator, more, head=head
+                ).dropped
         outcome.status, outcome.error_code = "error", "message_too_long"
 
     async def _search(
@@ -807,7 +1028,9 @@ class GenerationService:
                     elif isinstance(event, ReasoningDelta):
                         outcome.reasoning += event.text
                         channel.emit("reasoning_delta", {"text": event.text})
-                    else:
+                    elif isinstance(event, Usage):
+                        self._log_usage(job.answer_id, request, event.prompt_tokens)
+                    elif isinstance(event, ContentDelta):
                         if outcome.reasoning and outcome.reasoning_seconds is None:
                             outcome.reasoning_seconds = round(time.monotonic() - watch.started)
                         outcome.content += event.text
@@ -816,6 +1039,29 @@ class GenerationService:
             outcome.status, outcome.error_code = "error", "model_overloaded"
         except ModelUnavailableError:
             outcome.status, outcome.error_code = "error", "model_unavailable"
+
+    def _log_usage(self, answer_id: UUID, request: ChatRequest, prompt_tokens: int) -> None:
+        """Строка калибровки «оценка — факт» (§5.10.10): только числа и идентификатор."""
+        texts = [
+            part.text
+            for message in request.messages
+            for part in message.parts
+            if isinstance(part, TextPart)
+        ]
+        images = sum(
+            isinstance(part, ImagePart) for message in request.messages for part in message.parts
+        )
+        estimated = sum(self._estimator.text(text) for text in texts)
+        logger.info(
+            "prompt usage",
+            extra={
+                "answer_id": str(answer_id),
+                "estimated_tokens": estimated + self._estimator.image() * images,
+                "prompt_tokens": prompt_tokens,
+                "text_chars": sum(len(text) for text in texts),
+                "images": images,
+            },
+        )
 
     async def _answer_exists(self, job: _Job) -> bool:
         async with self._uow_factory() as uow:

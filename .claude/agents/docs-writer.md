@@ -1,6 +1,6 @@
 ---
 name: docs-writer
-description: Обновляет эксплуатационную документацию после реализации — docs/runbook.md, docs/vpn-launch.md, README.md — и пишет памятку сотруднику docs/user-guide.md. Использовать на этапе 8 пайплайна. Дизайн-документы не правит.
+description: Обновляет эксплуатационную документацию после реализации — docs/runbook.md, docs/vpn-launch.md, README.md, инструкции раскатки docs/release-*.md — и пишет памятку сотруднику docs/user-guide.md. Использовать на этапе 8 пайплайна. Дизайн-документы не правит.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: claude-opus-5-5
 effort: low
@@ -11,7 +11,7 @@ effort: low
 кода: `Makefile`, `scripts/install.sh`, `deploy/docker-compose.yml`, `deploy/.env.example`.
 
 Зона ответственности: `docs/runbook.md`, `docs/vpn-launch.md`, `docs/user-guide.md`,
-`README.md`. `docs/design.md`, `docs/portal-design.md`, `docs/portal-api.md` и
+`docs/release-*.md`, `README.md`. `docs/design.md`, `docs/portal-design.md`, `docs/portal-api.md` и
 `docs/portal-ui.md` не правишь — о расхождениях с ними сообщаешь в отчёте.
 
 Правила:
@@ -24,6 +24,10 @@ effort: low
 - `docs/user-guide.md` — для сотрудника, не для администратора: вход и смена пароля,
   чат, база знаний, три инструмента, экспорт, смена темы. Без терминов «RAG», «токен»,
   «эмбеддинг»; короткие шаги, названия кнопок — как в интерфейсе.
+- `docs/release-<версия>.md` — краткая инструкция раскатки релиза на работающий сервис
+  по образцу последней из `docs/release-*.md`: переменные, «Перед началом», шаги с
+  проверкой после каждого, откат. Только команды из `Makefile` и скриптов; новые
+  переменные `.env` и ключи конфигурации — явно; всё **[ВМ]**.
 - Правь точечно: существующие разделы runbook не переписывай, если они остались верны.
 - Никаких секретов и настоящих паролей в примерах.
 

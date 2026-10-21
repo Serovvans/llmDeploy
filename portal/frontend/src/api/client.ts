@@ -2,16 +2,19 @@
  * Клиент API портала — единственное место, где вызывается `fetch`.
  * Здесь добавляется заголовок защиты от CSRF и разбирается общий формат ошибки (контракт §1.3, §2.2).
  */
-import { readEvents, type StreamEvent } from './stream';
+import { type DraftEvent, readEvents, type StreamEvent } from './stream';
 import type {
   AdminUser,
   Attachment,
   CursorPage,
   Dialog,
   DialogKind,
+  DialogSummary,
   DocumentText,
   KbDocument,
   KbScope,
+  Memory,
+  MemoryMode,
   Message,
   ErrorBody,
   FieldError,
@@ -210,11 +213,11 @@ export function isAbort(error: unknown): boolean {
  * Обрыв соединения после статуса 200 — `StreamBrokenError`; закрытие через `signal` — ошибка отмены (`isAbort`).
  * Событие `error` с кодом `session_ended` дополнительно сообщает о потере сессии, как отказ `unauthenticated`.
  */
-async function* stream(
+async function* stream<E extends { type: string } = StreamEvent>(
   path: string,
   body: { json?: unknown; form?: FormData },
   signal: AbortSignal,
-): AsyncGenerator<StreamEvent> {
+): AsyncGenerator<E> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal.addEventListener('abort', abort);
@@ -226,8 +229,8 @@ async function* stream(
     }
     let finished = false;
     try {
-      for await (const event of readEvents(response.body)) {
-        if (event.type === 'error' && event.code === 'session_ended') {
+      for await (const event of readEvents<E>(response.body)) {
+        if (event.type === 'error' && (event as { code?: unknown }).code === 'session_ended') {
           sessionSignalListener?.('unauthenticated');
         }
         finished = event.type === 'done' || event.type === 'error';
@@ -326,7 +329,9 @@ export const api = {
     return request<CursorPage<Dialog>>('GET', `/api/dialogs?${params.toString()}`);
   },
 
-  createDialog: (kind: DialogKind) => request<Dialog>('POST', '/api/dialogs', { kind }),
+  /** `carried` — перенос (контракт §5.10.7): текст и исходный диалог; только для `chat`, `sql`, `cogis`. */
+  createDialog: (kind: DialogKind, carried?: { text: string; source_dialog_id: string }) =>
+    request<Dialog>('POST', '/api/dialogs', carried ? { kind, carried } : { kind }),
 
   getDialog: (id: string) => request<Dialog>('GET', `/api/dialogs/${id}`),
 
@@ -340,6 +345,36 @@ export const api = {
       'GET',
       `/api/dialogs/${id}/messages${cursor ? `?${new URLSearchParams({ cursor }).toString()}` : ''}`,
     ),
+
+  /**
+   * Оценка памяти диалога (контракт §5.10.3). `query` — параметры следующего вопроса, от которых зависит
+   * место: в чате `mode` и `search`, в SQL `action`, `dialect`, `schema_id`, в CoGIS `action`.
+   */
+  getMemory: (id: string, query: Record<string, string>) => {
+    const params = new URLSearchParams(query).toString();
+    return request<Memory>('GET', `/api/dialogs/${id}/memory${params ? `?${params}` : ''}`);
+  },
+
+  /** Режим пары; `questionId` — вопрос этого диалога (контракт §5.10.4). */
+  setMemoryMode: (id: string, questionId: string, mode: MemoryMode) =>
+    request<Message>('PATCH', `/api/dialogs/${id}/messages/${questionId}`, { memory_mode: mode }),
+
+  /**
+   * Черновик пересказа потоком (контракт §5.10.5, §6.5): сжатие или перенос (с `until_message_id` —
+   * «Продолжить отсюда»). Сервер ничего не сохраняет; закрытие потока через `signal` — отмена.
+   */
+  draftSummary: (
+    id: string,
+    body: { purpose: 'compress' } | { purpose: 'transfer'; until_message_id?: string | null },
+    signal: AbortSignal,
+  ) => stream<DraftEvent>(`/api/dialogs/${id}/memory/draft`, { json: body }, signal),
+
+  /** «Применить» черновик сжатия и «Изменить» пересказ (контракт §5.10.6). */
+  saveSummary: (id: string, body: { text: string; until_message_id: string }) =>
+    request<DialogSummary>('PUT', `/api/dialogs/${id}/memory/summary`, body),
+
+  /** «Отменить сжатие» (контракт §5.10.6). */
+  deleteSummary: (id: string) => request<undefined>('DELETE', `/api/dialogs/${id}/memory/summary`),
 
   /** Вопрос в диалоге любого вида: `content` и параметры этого вида (контракт §5.3). */
   sendMessage: (id: string, body: { content: string } & Record<string, unknown>, signal: AbortSignal) =>

@@ -1,0 +1,39 @@
+.root {
+  flex: none;
+  display: inline-flex;
+}
+
+/* Область нажатия — не меньше 32 px в высоту (концепция §9). */
+.meter {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+}
+
+.content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.caption {
+  color: var(--p-text-muted);
+}
+
+.level {
+  color: var(--p-text);
+  font-weight: 500;
+}
+
+.warning {
+  display: inline-flex;
+  color: var(--p-warning-icon);
+}
+
+/* Компактная полоса 48×4 px справа от слова. */
+.bar {
+  width: 48px;
+}

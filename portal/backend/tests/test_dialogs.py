@@ -21,7 +21,9 @@ async def test_create_and_read_dialog(portal: Portal) -> None:
         "created_at": "2026-10-05T09:00:00Z",
         "updated_at": "2026-10-05T09:00:00Z",
     }
-    assert (await client.get(f"/api/dialogs/{dialog['id']}")).json() == dialog
+    # С 0.8 только `GET /api/dialogs/{id}` отдаёт пересказ и перенесённое (§5.1).
+    read = (await client.get(f"/api/dialogs/{dialog['id']}")).json()
+    assert read == {**dialog, "summary": None, "carried": None}
 
 
 async def test_dialog_kinds_that_can_be_created(portal: Portal) -> None:
@@ -122,7 +124,7 @@ async def test_messages_are_paged_from_newest(portal: Portal) -> None:
     assert set(question) == {
         "id", "role", "content", "status", "error_code", "reasoning", "reasoning_seconds",
         "attachments", "sources", "sources_found", "sql_check", "sql_run", "sql_dangers",
-        "dropped_messages", "created_at",
+        "dropped_messages", "memory_mode", "created_at",
     }  # fmt: skip
     assert question["status"] == "complete" and question["attachments"] == []
     assert question["sources"] is None and question["sources_found"] is None

@@ -17,23 +17,31 @@ from portal.core.sse import event_stream_response
 from portal.core.uploads import receive_recording
 from portal.core.validation import validation_failure
 from portal.dialogs.domain import DialogKind
-from portal.dialogs.generation import UNSET, QuestionInput, _Unset
+from portal.dialogs.generation import UNSET, MemoryQuery, QuestionInput, _Unset
 from portal.dialogs.schemas import (
     AttachmentOut,
+    ChatMemoryQuery,
     ChatMessageRequest,
+    CogisMemoryQuery,
     CogisMessageRequest,
     CreateDialogRequest,
-    DialogDetailsOut,
     DialogListOut,
+    DialogMemoryOut,
     DialogOut,
     DocparseMessageRequest,
-    DocparseOut,
+    DraftRequest,
+    MemoryModeRequest,
+    MemoryOut,
     MessageListOut,
     MessageOut,
     RenameDialogRequest,
+    SqlMemoryQuery,
     SqlMessageRequest,
     SqlRegenerateRequest,
+    SummaryOut,
+    SummaryRequest,
 )
+from portal.dialogs.service import CarriedInput
 from portal.files.ports import DOCX
 
 router = APIRouter(prefix="/api/dialogs")
@@ -64,8 +72,14 @@ def attachment_id(attachment_id: str, _: Employee) -> UUID:
     return _uuid(attachment_id)
 
 
+def message_id(message_id: str, _: Employee) -> UUID:
+    """Идентификатор сообщения из пути."""
+    return _uuid(message_id)
+
+
 DialogId = Annotated[UUID, Depends(dialog_id)]
 AttachmentId = Annotated[UUID, Depends(attachment_id)]
+MessageId = Annotated[UUID, Depends(message_id)]
 Limit = Annotated[int | None, Query(ge=1, le=100)]
 
 
@@ -88,19 +102,19 @@ async def list_dialogs(
 async def create_dialog(
     body: CreateDialogRequest, user: Employee, container: ContainerDep
 ) -> DialogOut:
-    """Создать диалог."""
-    return DialogOut.of(await container.dialogs.create(user.id, body.kind))
+    """Создать диалог; с `carried` — перенос из своего диалога (§5.10.7)."""
+    carried = None
+    if body.carried is not None:
+        if not container.settings.memory.enabled:
+            raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
+        carried = CarriedInput(body.carried.text, body.carried.source_dialog_id)
+    return DialogOut.of(await container.dialogs.create(user.id, body.kind, carried))
 
 
 @router.get("/{id}", response_model=None)
-async def get_dialog(
-    target: DialogId, user: Employee, container: ContainerDep
-) -> DialogOut | DialogDetailsOut:
-    """Диалог владельца; у разбора документа — вместе с его результатом."""
-    dialog, docparse = await container.dialogs.get_with_docparse(user.id, target)
-    if docparse is None:
-        return DialogOut.of(dialog)
-    return DialogDetailsOut(**DialogOut.of(dialog).model_dump(), docparse=DocparseOut.of(docparse))
+async def get_dialog(target: DialogId, user: Employee, container: ContainerDep) -> DialogMemoryOut:
+    """Диалог владельца с пересказом и перенесённым; у разбора — и с его результатом."""
+    return DialogMemoryOut.of_details(await container.dialogs.details(user.id, target))
 
 
 @router.patch("/{id}")
@@ -206,6 +220,116 @@ async def regenerate(
         user, session.session_id, target, dialog.kind, schema_id
     )
     return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
+
+
+def _memory_query(kind: DialogKind, query: dict[str, str]) -> MemoryQuery:
+    """Разобрать строку запроса оценки по виду диалога (§5.10.3); чужие параметры не читаются."""
+    try:
+        if kind == "chat":
+            chat = ChatMemoryQuery.model_validate(query)
+            params: dict[str, Any] = {"mode": chat.mode, "collections": [], "tags": []}
+            return MemoryQuery(params, search=chat.search == "true")
+        if kind == "sql":
+            sql = SqlMemoryQuery.model_validate(query)
+            schema_id = None if sql.schema_id is None else str(sql.schema_id)
+            return MemoryQuery(
+                {
+                    "action": sql.action,
+                    "dialect": sql.dialect,
+                    "schema_id": schema_id,
+                    "test_run": False,
+                }
+            )
+        if kind == "cogis":
+            return MemoryQuery({"action": CogisMemoryQuery.model_validate(query).action})
+        return MemoryQuery({})
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+
+
+@router.get("/{id}/memory")
+async def get_memory(
+    request: Request, target: DialogId, user: Employee, container: ContainerDep
+) -> MemoryOut:
+    """Оценка памяти диалога для следующего вопроса: индикатор и панель (§5.10.3)."""
+    if not container.settings.memory.enabled:
+        raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
+    dialog = await container.dialogs.get(user.id, target)
+    query = _memory_query(dialog.kind, dict(request.query_params))
+    return MemoryOut.of(await container.generation.memory(user.id, target, dialog.kind, query))
+
+
+@router.patch("/{id}/messages/{message_id}")
+async def set_memory_mode(
+    body: dict[str, Any],
+    target: DialogId,
+    message: MessageId,
+    user: Employee,
+    container: ContainerDep,
+) -> MessageOut:
+    """Сменить режим пары «вопрос + ответ»; `message_id` — вопрос (§5.10.4)."""
+    if not container.settings.memory.enabled:
+        raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
+    await container.dialogs.get(user.id, target)
+    try:
+        mode = MemoryModeRequest.model_validate(body).memory_mode
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+    view = await container.generation.set_memory_mode(user.id, target, message, mode)
+    return MessageOut.of(view)
+
+
+@router.post("/{id}/memory/draft")
+async def memory_draft(
+    body: dict[str, Any],
+    target: DialogId,
+    user: Employee,
+    session: ReadySession,
+    container: ContainerDep,
+) -> StreamingResponse:
+    """Черновик пересказа для сжатия или переноса; ответ — поток событий (§5.10.5, §6.5)."""
+    if not container.settings.memory.enabled:
+        raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
+    await container.dialogs.get(user.id, target)
+    try:
+        draft = DraftRequest.model_validate(body)
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+    if draft.purpose == "compress" and "until_message_id" in body:
+        # Граница сжатия — не выбор сотрудника: её считает сервер (§5.10.5).
+        raise validation_error([field_error("until_message_id", "invalid_format")])
+    channel = await container.drafts.start(
+        user.id, session.session_id, target, draft.purpose, draft.until_message_id
+    )
+    return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
+
+
+@router.put("/{id}/memory/summary")
+async def put_summary(
+    body: dict[str, Any], target: DialogId, user: Employee, container: ContainerDep
+) -> SummaryOut:
+    """Применить черновик или изменить применённый пересказ (§5.10.6)."""
+    if not container.settings.memory.enabled:
+        raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
+    await container.dialogs.get(user.id, target)
+    try:
+        summary = SummaryRequest.model_validate(body)
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+    view = await container.generation.set_summary(
+        user.id, target, summary.text, summary.until_message_id
+    )
+    return SummaryOut.of(view)
+
+
+@router.delete("/{id}/memory/summary", status_code=204)
+async def delete_summary(target: DialogId, user: Employee, container: ContainerDep) -> Response:
+    """Отменить сжатие: пары снова идут модели в своих режимах (§5.10.6)."""
+    if not container.settings.memory.enabled:
+        raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
+    await container.dialogs.get(user.id, target)
+    await container.generation.clear_summary(user.id, target)
+    return Response(status_code=204)
 
 
 @router.get("/{id}/export")

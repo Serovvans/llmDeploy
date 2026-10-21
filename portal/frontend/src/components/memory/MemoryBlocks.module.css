@@ -1,0 +1,206 @@
+/* Блоки «Сведения из „…“» и «Пересказ ранней части» в панели памяти (концепция §4.9, §7.3). */
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 16px 16px 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--p-line);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+}
+
+/* Раскрытый текст — на `--p-surface-2`, не выше 320 px с прокруткой. */
+.expanded {
+  max-height: 320px;
+  margin-top: 4px;
+  overflow: auto;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--p-surface-2);
+  font-size: 14px;
+}
+
+.compress {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.block > .compress:first-child {
+  margin-top: 0;
+}
+
+/* Недоступная кнопка остаётся в обходе по Tab и выглядит недоступной (как переключатель проверки SQL). */
+.unavailable {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The library hides the ring of a disabled-looking button; drawn outside its 50% opacity. */
+.unavailableFocus {
+  display: inline-flex;
+  border-radius: 8px;
+}
+
+.unavailableFocus:has(:focus-visible) {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+/* Пересказанные вопросы в начале описи: строка-кнопка и, раскрытые, строки без выбора. */
+.summarized {
+  padding: 0 8px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  margin-left: -4px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.toggle:hover {
+  background: var(--p-surface-2);
+}
+
+.toggle:focus-visible,
+.show:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.summarizedList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.summarizedRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.show {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.number {
+  flex: none;
+  min-width: 20px;
+  color: var(--p-text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.preview {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.mark {
+  padding-left: 28px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* Заметка «Сведения из „…“» над лентой нового диалога. */
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.notice .expanded {
+  margin-top: 0;
+}
+
+/* Граница пересказа в ленте: линии `--p-line` по краям, текст `--p-text-muted` в середине (§4.9, §7.3). */
+.boundary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.boundaryLine {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.boundaryLine::before,
+.boundaryLine::after {
+  content: '';
+  flex: 1;
+  min-width: 24px;
+  border-top: 1px solid var(--p-line);
+}
+
+.boundaryText {
+  flex: 0 1 auto;
+  text-align: center;
+}
+
+.boundarySummary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: var(--p-surface-2);
+}

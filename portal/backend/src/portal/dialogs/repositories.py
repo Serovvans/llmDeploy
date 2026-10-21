@@ -14,6 +14,7 @@ from portal.dialogs.domain import (
     Dialog,
     DialogKind,
     Docparse,
+    MemoryMode,
     Message,
     MessageStatus,
     SummaryStatus,
@@ -24,7 +25,27 @@ from portal.dialogs.tables import attachments, dialogs, docparses, messages
 type _Row = sa.Row[*tuple[Any, ...]]
 
 _MESSAGE_FIELDS = tuple(Message.__dataclass_fields__)
-_MESSAGE_COLUMNS = [messages.c[name] for name in _MESSAGE_FIELDS]
+_QUESTION = messages.alias("question")
+# Режим пары хранится у вопроса; ответ (позиция вопроса + 1) читается с режимом вопроса
+# (docs/portal-api.md §9.7). Поиск вопроса идёт по уникальному индексу (dialog_id, position).
+_PAIR_MODE = sa.case(
+    (
+        messages.c.role == "assistant",
+        sa.func.coalesce(
+            sa.select(_QUESTION.c.memory_mode)
+            .where(
+                _QUESTION.c.dialog_id == messages.c.dialog_id,
+                _QUESTION.c.position == messages.c.position - 1,
+            )
+            .scalar_subquery(),
+            messages.c.memory_mode,
+        ),
+    ),
+    else_=messages.c.memory_mode,
+).label("memory_mode")
+_MESSAGE_COLUMNS = [
+    _PAIR_MODE if name == "memory_mode" else messages.c[name] for name in _MESSAGE_FIELDS
+]
 
 
 def _dialog(row: _Row) -> Dialog:
@@ -90,7 +111,8 @@ class SqlDialogRepository:
         query = sa.select(dialogs).where(
             dialogs.c.owner_id == owner_id,
             dialogs.c.kind == kind,
-            sa.or_(_HAS_MESSAGES, _READY_DOCPARSE),
+            # С 0.8 — и диалог с перенесённым, пока в нём нет сообщений (§5.2).
+            sa.or_(_HAS_MESSAGES, _READY_DOCPARSE, dialogs.c.carried_text.is_not(None)),
         )
         if before is not None:
             query = query.where(sa.tuple_(dialogs.c.updated_at, dialogs.c.id) < sa.tuple_(*before))
@@ -105,6 +127,7 @@ class SqlDialogRepository:
         query = sa.select(dialogs.c.owner_id, dialogs.c.id).where(
             dialogs.c.created_at < created_before,
             dialogs.c.kind != "docparse",
+            dialogs.c.carried_text.is_(None),
             sa.not_(_HAS_MESSAGES),
         )
         if owner_id is not None:
@@ -175,8 +198,36 @@ class SqlDialogRepository:
         )
         return [_message(row) for row in await self._connection.execute(query)]
 
+    async def get_message(
+        self, owner_id: UUID, dialog_id: UUID, message_id: UUID
+    ) -> Message | None:
+        """Сообщение диалога владельца."""
+        query = self._messages_of(owner_id, dialog_id).where(messages.c.id == message_id)
+        row = (await self._connection.execute(query)).first()
+        return _message(row) if row else None
+
+    async def set_memory_mode(self, owner_id: UUID, message_id: UUID, mode: MemoryMode) -> None:
+        """Записать режим пары у её вопроса."""
+        await self._connection.execute(
+            sa.update(messages)
+            .where(
+                messages.c.id == message_id,
+                messages.c.dialog_id.in_(_owned(owner_id)),
+                messages.c.role == "user",
+            )
+            .values(memory_mode=mode)
+        )
+
     async def first_question(self, owner_id: UUID, dialog_id: UUID) -> str | None:
-        """Текст первого непустого вопроса диалога."""
+        """Текст первого непустого вопроса, который уходит модели (§5.10).
+
+        Вопросы пар «Не учитывать» и пересказанные вопросы пропускаются.
+        """
+        boundary = (
+            sa.select(sa.func.coalesce(dialogs.c.summary_until_position, -1))
+            .where(dialogs.c.id == dialog_id, dialogs.c.owner_id == owner_id)
+            .scalar_subquery()
+        )
         query = (
             sa.select(messages.c.content)
             .where(
@@ -184,12 +235,41 @@ class SqlDialogRepository:
                 messages.c.dialog_id.in_(_owned(owner_id)),
                 messages.c.role == "user",
                 messages.c.content != "",
+                messages.c.memory_mode != "excluded",
+                messages.c.position > boundary,
             )
             .order_by(messages.c.position)
             .limit(1)
         )
         content: str | None = await self._connection.scalar(query)
         return content
+
+    async def set_summary(
+        self, owner_id: UUID, dialog_id: UUID, summary: str | None, until_position: int | None
+    ) -> None:
+        """Записать пересказ и его границу; оба `None` — отменить сжатие."""
+        await self._connection.execute(
+            sa.update(dialogs)
+            .where(dialogs.c.id == dialog_id, dialogs.c.owner_id == owner_id)
+            .values(summary=summary, summary_until_position=until_position)
+        )
+
+    async def summary_boundary(
+        self, owner_id: UUID, dialog_id: UUID, position: int
+    ) -> tuple[UUID, int] | None:
+        """Сообщение на позиции границы и число сообщений до неё включительно."""
+        mine = sa.and_(
+            messages.c.dialog_id == dialog_id,
+            messages.c.dialog_id.in_(_owned(owner_id)),
+            messages.c.position <= position,
+        )
+        found = await self._connection.scalar(
+            sa.select(messages.c.id).where(mine, messages.c.position == position)
+        )
+        if found is None:
+            return None
+        count = await self._connection.scalar(sa.select(sa.func.count()).where(mine))
+        return found, int(count or 0)
 
     async def message_exists(self, owner_id: UUID, message_id: UUID) -> bool:
         """Существует ли ещё сообщение."""

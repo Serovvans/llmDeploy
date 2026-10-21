@@ -24,7 +24,14 @@ IMAGE_PROMPT = "Опиши изображение из документа."
 CONTEXT_PROMPT = "Поясни место фрагмента в документе."
 SQL_DATA_PROMPT = "Подготовь тестовые данные."
 SQL_FIX_PROMPT = "Исправь запрос."
+# Протокол «Пересказ» 0.8 (§12.1): черновик сжатия и переноса памяти диалога.
+SUMMARY_PROMPT = "Перескажи диалог."
+_SUMMARY_MESSAGE = re.compile(r"<(?:пользователь|помощник)>")
 RERANK_ERROR_MARK = "[[stub:rerank-error]]"
+NO_USAGE_MARK = "[[stub:no-usage]]"
+# Расход в фрагменте `usage` (§12.2): намеренно не совпадает с оценкой портала.
+_USAGE_CHARS_PER_TOKEN = 3
+_USAGE_TOKENS_PER_IMAGE = 1500
 _SQL_DATA_MARK = re.compile(r"\[\[stub:sql-data\]\](.*?)\[\[/stub:sql-data\]\]", re.DOTALL)
 _SQL_FIX_MARK = re.compile(r"\[\[stub:sql-fix\]\](.*?)\[\[/stub:sql-fix\]\]", re.DOTALL)
 _NO_SQL_DATA = '{"statements": []}'
@@ -71,6 +78,30 @@ def last_user_turn(messages: Sequence[Mapping[str, Any]]) -> UserTurn | None:
         text = "".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
         return UserTurn(text, message_images(message))
     return None
+
+
+def _text_chars(message: Mapping[str, Any]) -> int:
+    content = message.get("content")
+    if isinstance(content, str):
+        return len(content)
+    parts = content if isinstance(content, list) else []
+    return sum(len(str(part.get("text", ""))) for part in parts if part.get("type") == "text")
+
+
+def usage(messages: Sequence[Mapping[str, Any]], images: int, answer: str) -> dict[str, int]:
+    """Объект `usage` фрагмента потока (§12.2).
+
+    `prompt_tokens` — символы всех текстовых частей всех сообщений, делённые на 3 с
+    округлением вверх, плюс 1500 на изображение; `completion_tokens` — символы ответа на 3.
+    """
+    chars = sum(_text_chars(message) for message in messages)
+    prompt = math.ceil(chars / _USAGE_CHARS_PER_TOKEN) + _USAGE_TOKENS_PER_IMAGE * images
+    completion = math.ceil(len(answer) / _USAGE_CHARS_PER_TOKEN)
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
 
 
 def schema_instance(schema: Mapping[str, Any], name: str = "") -> Any:
@@ -137,7 +168,7 @@ def image_description(image: bytes, max_tokens: int | None) -> tuple[str, str]:
 
 
 def protocol_reply(turn: UserTurn, max_tokens: int | None = None) -> str | None:
-    """Ответ на запрос одного из протоколов 0.15; `None` — это не такой запрос.
+    """Ответ на запрос одного из протоколов 0.15 или пересказа 0.8; `None` — не такой запрос.
 
     Проверяется раньше остальных правил: пометка `[[stub:reply]]` из вопроса теста,
     попавшего в блок запроса, его ответ не подменяет.
@@ -153,6 +184,9 @@ def protocol_reply(turn: UserTurn, max_tokens: int | None = None) -> str | None:
     if first_line == SQL_DATA_PROMPT:
         marked = _SQL_DATA_MARK.search(turn.text)
         return marked.group(1) if marked else _NO_SQL_DATA
+    if first_line == SUMMARY_PROMPT:
+        messages = len(_SUMMARY_MESSAGE.findall(turn.text))
+        return f"Пересказ-заглушка {_digest(turn.text.encode())}: сообщений {messages}."
     if first_line == SQL_FIX_PROMPT:
         marked = _SQL_FIX_MARK.search(turn.text)
         return marked.group(1) if marked else f"```sql\n{_block(turn.text, 'запрос')}\n```"

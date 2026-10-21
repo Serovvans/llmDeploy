@@ -118,3 +118,26 @@ export function stubCompletions(since: string): number {
     .split('\n')
     .filter((line) => line.includes('POST /v1/chat/completions')).length;
 }
+
+/** Строка журнала `prompt usage` portal-api (docs/portal-api.md §5.10.10). */
+export interface PromptUsage {
+  answer_id: string;
+  estimated_tokens: number;
+  /** Расход по заглушке: символы всех текстовых частей запроса, который она получила, на 3, и 1500 на картинку. */
+  prompt_tokens: number;
+  text_chars: number;
+  images: number;
+}
+
+/** Строка `prompt usage` ответа `answerId` в журнале portal-api с момента `since` (ISO 8601); нет — `null`. */
+export function promptUsage(answerId: string, since: string): PromptUsage | null {
+  const lines = standCompose('logs', '--no-color', '--no-log-prefix', '--since', since, 'portal-api')
+    .toString('utf8')
+    .split('\n');
+  for (const line of lines) {
+    if (line.includes('"prompt usage"') && line.includes(answerId)) {
+      return JSON.parse(line) as PromptUsage;
+    }
+  }
+  return null;
+}

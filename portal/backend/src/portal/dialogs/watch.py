@@ -20,6 +20,7 @@ from portal.llm.ports import (
     Finished,
     ModelUnavailableError,
     ReasoningDelta,
+    Usage,
 )
 
 Interruption = Literal["stopped", "generation_timeout", "session_ended", "dialog_deleted"]
@@ -94,7 +95,7 @@ class StreamWatch:
 
 async def watched_stream(
     model: ChatModel, request: ChatRequest, watch: StreamWatch
-) -> AsyncGenerator[ReasoningDelta | ContentDelta | Finished | Interruption]:
+) -> AsyncGenerator[ReasoningDelta | ContentDelta | Usage | Finished | Interruption]:
     """Поток модели под наблюдением.
 
     Отдаёт события модели; если работу нужно прервать — причину (строкой) последним

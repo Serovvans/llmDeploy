@@ -11,3 +11,7 @@
   height: 100%;
   background: var(--p-accent);
 }
+
+.warning {
+  background: var(--p-warning-icon);
+}

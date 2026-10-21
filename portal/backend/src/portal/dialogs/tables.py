@@ -14,6 +14,11 @@ dialogs = sa.Table(
     sa.Column("title", sa.Text),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("summary", sa.Text),
+    sa.Column("summary_until_position", sa.Integer),
+    sa.Column("carried_text", sa.Text),
+    sa.Column("carried_source_id", sa.Uuid, sa.ForeignKey("dialogs.id", ondelete="SET NULL")),
+    sa.Column("carried_source_title", sa.Text),
 )
 
 messages = sa.Table(
@@ -38,6 +43,7 @@ messages = sa.Table(
     sa.Column("sql_dangers", postgresql.ARRAY(sa.Text)),
     sa.Column("dropped_messages", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("memory_mode", sa.Text, nullable=False, server_default="full"),
 )
 
 attachments = sa.Table(

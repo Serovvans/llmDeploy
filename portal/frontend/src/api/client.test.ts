@@ -258,4 +258,24 @@ describe('клиент API', () => {
     const second = new URL(String(fetchMock.mock.calls[1]?.[0]), 'http://localhost').searchParams;
     expect(second.has('q')).toBe(false);
   });
+
+  it('память диалога: оценка — GET со строкой запроса, режим пары — PATCH вопроса с заголовком CSRF', async () => {
+    const server = mockApi({
+      'GET /api/dialogs/d-1/memory': () => ok({ level: 'free', percent: 0, used_tokens: 0, limit_tokens: 100, pairs: [] }),
+      'GET /api/dialogs/d-2/memory': () => ok({ level: 'free', percent: 0, used_tokens: 0, limit_tokens: 100, pairs: [] }),
+      'PATCH /api/dialogs/d-1/messages/u-1': () => ok({}),
+    });
+
+    await api.getMemory('d-1', { mode: 'thorough', search: 'true' });
+    await api.getMemory('d-2', {});
+    await api.setMemoryMode('d-1', 'u-1', 'excluded');
+
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls[0]).toBe('/api/dialogs/d-1/memory?mode=thorough&search=true');
+    expect(urls[1]).toBe('/api/dialogs/d-2/memory');
+    const [, , patch] = server.calls;
+    expect(patch?.method).toBe('PATCH');
+    expect(patch?.headers['X-Portal-Csrf']).toBe('1');
+    expect(patch?.body).toEqual({ memory_mode: 'excluded' });
+  });
 });

@@ -32,6 +32,7 @@ function message(patch: Partial<Message>): Message {
     sql_run: null,
     sql_dangers: null,
     dropped_messages: 0,
+    memory_mode: 'full',
     created_at: '2026-10-05T09:01:00Z',
     ...patch,
   };

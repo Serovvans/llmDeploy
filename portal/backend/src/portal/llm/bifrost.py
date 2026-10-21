@@ -23,6 +23,7 @@ from portal.llm.ports import (
     ModelOverloadedError,
     ModelUnavailableError,
     ReasoningDelta,
+    Usage,
 )
 
 _CONNECT_TIMEOUT_SECONDS = 10.0
@@ -92,10 +93,17 @@ class BifrostChatModel:
 
     async def stream(
         self, request: ChatRequest
-    ) -> AsyncIterator[ReasoningDelta | ContentDelta | Finished]:
-        """Потоковый ответ; поток без фрагмента с `finish_reason` — обрыв."""
+    ) -> AsyncIterator[ReasoningDelta | ContentDelta | Usage | Finished]:
+        """Потоковый ответ; поток без фрагмента с `finish_reason` — обрыв.
+
+        При `include_usage` после фрагмента с `finish_reason` поток дочитывается до
+        `[DONE]` или конца тела ради `usage`; обрыв или тайм-аут в этом хвосте ответ не
+        портят: `Finished` уходит, `Usage` — нет (§12.1).
+        """
         payload = await self._payload(request, stream=True)
         received = False
+        finished: Finished | None = None
+        usage: int | None = None
         try:
             async with self._client.stream(
                 "POST", self._url, json=payload, headers=self._headers, timeout=self._timeout
@@ -109,19 +117,35 @@ class BifrostChatModel:
                     data = line[len(_DATA_PREFIX) :].strip()
                     if data == _DONE:
                         break
+                    chunk = _parse(data)
+                    if request.include_usage and (found := _usage(chunk)) is not None:
+                        usage = found
+                    if finished is not None:
+                        continue
                     received = True
-                    for event in _events(data):
-                        yield event
+                    for event in _events(chunk):
                         if isinstance(event, Finished):
-                            return
+                            finished = event
+                        else:
+                            yield event
+                    if finished is not None and not request.include_usage:
+                        break
         except httpx.TimeoutException as error:
             # Модель не начала отвечать вовремя — перегрузка; замолчала посреди ответа — сбой.
-            if received:
-                raise ModelUnavailableError from error
-            raise ModelOverloadedError from error
+            if finished is None:
+                if received:
+                    raise ModelUnavailableError from error
+                raise ModelOverloadedError from error
+            usage = None
         except httpx.HTTPError as error:
-            raise ModelUnavailableError from error
-        raise ModelUnavailableError
+            if finished is None:
+                raise ModelUnavailableError from error
+            usage = None
+        if finished is None:
+            raise ModelUnavailableError
+        if usage is not None:
+            yield Usage(usage)
+        yield finished
 
     async def complete(self, request: ChatRequest) -> str:
         """Ответ целиком: `choices[0].message.content`."""
@@ -171,6 +195,8 @@ class BifrostChatModel:
         # которого шаблон не знает (ответ 400), поэтому поле в этом случае не передаётся.
         if request.reasoning_effort != "xhigh":
             payload["reasoning_effort"] = request.reasoning_effort
+        if stream and request.include_usage:
+            payload["stream_options"] = {"include_usage": True}
         if request.json_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",
@@ -188,12 +214,31 @@ class BifrostChatModel:
         return ModelUnavailableError()
 
 
-def _events(data: str) -> list[ReasoningDelta | ContentDelta | Finished]:
-    """События одного фрагмента потока; размышления принимаются под обоими именами."""
+def _parse(data: str) -> dict[str, Any] | None:
+    """Фрагмент потока как объект; не JSON или не объект — `None`."""
     try:
-        choice = json.loads(data)["choices"][0]
-    except (ValueError, LookupError, TypeError):
+        chunk = json.loads(data)
+    except ValueError:
+        return None
+    return chunk if isinstance(chunk, dict) else None
+
+
+def _usage(chunk: dict[str, Any] | None) -> int | None:
+    """`usage.prompt_tokens` фрагмента, если он есть и это целое число (§12.1)."""
+    usage = chunk.get("usage") if chunk is not None else None
+    tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    return tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
+
+
+def _events(chunk: dict[str, Any] | None) -> list[ReasoningDelta | ContentDelta | Finished]:
+    """События одного фрагмента потока; размышления принимаются под обоими именами.
+
+    Фрагмент без `choices` (так шлюз присылает `usage`) событий не даёт.
+    """
+    choices = chunk.get("choices") if chunk is not None else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         return []
+    choice = choices[0]
     delta = choice.get("delta") or {}
     events: list[ReasoningDelta | ContentDelta | Finished] = []
     reasoning = delta.get("reasoning_content") or delta.get("reasoning")

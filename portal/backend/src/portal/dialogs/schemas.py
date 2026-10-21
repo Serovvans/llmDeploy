@@ -3,7 +3,7 @@
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool
 
 from portal.core.schemas import ApiTime, RequestModel
 from portal.dialogs.domain import (
@@ -12,20 +12,44 @@ from portal.dialogs.domain import (
     Dialog,
     DialogKind,
     Docparse,
+    MemoryMode,
     MessageRole,
     MessageStatus,
     SummaryStatus,
     TranscriptionStatus,
 )
-from portal.dialogs.service import MessageView
+from portal.dialogs.memory import MemoryEstimate, MemoryLevel
+from portal.dialogs.service import CarriedView, DialogDetails, MessageView, SummaryView
 from portal.files.ports import MediaType, RecordingType
 from portal.kb.ports import Collection
+
+
+class CarriedRequest(RequestModel):
+    """Перенесённое при создании диалога (§5.10.7); длину текста проверяет сценарий."""
+
+    text: str
+    source_dialog_id: UUID
 
 
 class CreateDialogRequest(RequestModel):
     """`POST /api/dialogs`; диалог `docparse` создаётся только запуском разбора."""
 
     kind: Literal["chat", "sql", "cogis"]
+    carried: CarriedRequest | None = None
+
+
+class DraftRequest(RequestModel):
+    """`POST /api/dialogs/{id}/memory/draft` (§5.10.5); `until_message_id` — только у переноса."""
+
+    purpose: Literal["compress", "transfer"]
+    until_message_id: UUID | None = None
+
+
+class SummaryRequest(RequestModel):
+    """`PUT /api/dialogs/{id}/memory/summary` (§5.10.6); длину текста проверяет сценарий."""
+
+    text: str
+    until_message_id: UUID
 
 
 class RenameDialogRequest(RequestModel):
@@ -65,6 +89,33 @@ class DocparseMessageRequest(RequestModel):
     """Вопрос по разобранному документу."""
 
     content: str
+
+
+class MemoryModeRequest(RequestModel):
+    """`PATCH /api/dialogs/{id}/messages/{message_id}`: режим пары (§5.10.4)."""
+
+    memory_mode: MemoryMode
+
+
+class ChatMemoryQuery(BaseModel):
+    """Строка запроса оценки памяти в чате; параметры другого вида не читаются."""
+
+    mode: AnswerMode
+    search: Literal["true", "false"]
+
+
+class SqlMemoryQuery(BaseModel):
+    """Строка запроса оценки памяти в SQL-помощнике; нет `schema_id` — без схемы."""
+
+    action: Literal["write", "explain", "debug", "optimize"]
+    dialect: str
+    schema_id: UUID | None = None
+
+
+class CogisMemoryQuery(BaseModel):
+    """Строка запроса оценки памяти в помощнике CoGIS."""
+
+    action: Literal["write", "explain", "debug"]
 
 
 class SqlRegenerateRequest(RequestModel):
@@ -128,8 +179,65 @@ class DialogOut(BaseModel):
         )
 
 
-class DialogDetailsOut(DialogOut):
-    """`GET /api/dialogs/{id}` для вида `docparse`: диалог с результатом разбора."""
+class SummaryOut(BaseModel):
+    """Применённый пересказ — поле `summary` диалога (§5.1)."""
+
+    text: str
+    until_message_id: UUID
+    messages: int
+
+    @classmethod
+    def of(cls, summary: SummaryView) -> "SummaryOut":
+        """Собрать из пересказа."""
+        return cls(
+            text=summary.text,
+            until_message_id=summary.until_message_id,
+            messages=summary.messages,
+        )
+
+
+class CarriedOut(BaseModel):
+    """Перенесённое — поле `carried` диалога (§5.1)."""
+
+    text: str
+    source_dialog_id: UUID | None
+    source_kind: DialogKind | None
+    source_title: str | None
+
+
+class DialogMemoryOut(DialogOut):
+    """`GET /api/dialogs/{id}`: диалог с пересказом и перенесённым (§5.1)."""
+
+    summary: SummaryOut | None
+    carried: CarriedOut | None
+
+    @classmethod
+    def of_details(cls, details: DialogDetails) -> "DialogMemoryOut":
+        """Собрать из подробностей диалога; у разбора — вместе с его результатом."""
+        base = DialogOut.of(details.dialog).model_dump()
+        summary = None if details.summary is None else SummaryOut.of(details.summary)
+        carried = None if details.carried is None else _carried(details.carried)
+        if details.docparse is not None:
+            return DialogDetailsOut(
+                **base,
+                summary=summary,
+                carried=carried,
+                docparse=DocparseOut.of(details.docparse),
+            )
+        return cls(**base, summary=summary, carried=carried)
+
+
+def _carried(carried: CarriedView) -> CarriedOut:
+    return CarriedOut(
+        text=carried.text,
+        source_dialog_id=carried.source_dialog_id,
+        source_kind=carried.source_kind,
+        source_title=carried.source_title,
+    )
+
+
+class DialogDetailsOut(DialogMemoryOut):
+    """`GET /api/dialogs/{id}` для вида `docparse`: ещё и результат разбора."""
 
     docparse: DocparseOut
 
@@ -214,6 +322,7 @@ class MessageOut(BaseModel):
     sql_run: dict[str, Any] | None
     sql_dangers: list[str] | None
     dropped_messages: int
+    memory_mode: MemoryMode
     created_at: ApiTime
 
     @classmethod
@@ -237,6 +346,7 @@ class MessageOut(BaseModel):
             sql_run=message.sql_run,
             sql_dangers=message.sql_dangers,
             dropped_messages=message.dropped_messages,
+            memory_mode=message.memory_mode,
             created_at=message.created_at,
         )
 
@@ -246,3 +356,51 @@ class MessageListOut(BaseModel):
 
     items: list[MessageOut]
     next_cursor: str | None
+
+
+class MemoryPairOut(BaseModel):
+    """Пара «вопрос + ответ» в объекте `Memory` (§5.10.3)."""
+
+    question_id: UUID
+    answer_id: UUID
+    question_preview: str
+    answer_preview: str
+    attachments: int
+    memory_mode: MemoryMode
+    tokens: int
+    dropped: bool
+    summarized: bool
+
+
+class PairRangeOut(BaseModel):
+    """`Memory.compress_pairs`: номера пар следующего сжатия, включительно."""
+
+    from_: int = Field(serialization_alias="from")
+    to: int
+
+
+class MemoryOut(BaseModel):
+    """Объект `Memory`: заполненность памяти диалога и его пары (§5.10.3)."""
+
+    level: MemoryLevel
+    percent: int
+    used_tokens: int
+    limit_tokens: int
+    compress_pairs: PairRangeOut | None
+    pairs: list[MemoryPairOut]
+
+    @classmethod
+    def of(cls, estimate: MemoryEstimate) -> "MemoryOut":
+        """Собрать из оценки."""
+        return cls(
+            level=estimate.level,
+            percent=estimate.percent,
+            used_tokens=estimate.used_tokens,
+            limit_tokens=estimate.limit_tokens,
+            compress_pairs=None
+            if estimate.compress_pairs is None
+            else PairRangeOut(from_=estimate.compress_pairs.first, to=estimate.compress_pairs.last),
+            pairs=[
+                MemoryPairOut.model_validate(pair, from_attributes=True) for pair in estimate.pairs
+            ],
+        )

@@ -5,6 +5,7 @@ interface TitleHintProps {
   /** Полный текст названия. */
   text: string;
   pos?: React.ComponentProps<typeof Hint>['pos'];
+  maxWidth?: React.ComponentProps<typeof Hint>['maxWidth'];
   /** Показывать и у необрезанного текста: подсказка-название у поля без подписи, причина недоступности действия. */
   always?: boolean;
   /** Класс обёртки — когда она участвует в раскладке строки. */
@@ -23,10 +24,10 @@ function isCut(container: HTMLElement): boolean {
  * Показывается, только когда название действительно обрезано: иначе подсказка без нужды закрывала бы
  * соседние строки. По фокусу — только при переходе с клавиатуры.
  */
-export function TitleHint({ text, pos, always = false, className, children }: TitleHintProps) {
+export function TitleHint({ text, pos, maxWidth, always = false, className, children }: TitleHintProps) {
   const [opened, setOpened] = useState(false);
   return (
-    <Hint text={text} pos={pos} manual opened={opened}>
+    <Hint text={text} pos={pos} maxWidth={maxWidth} manual opened={opened}>
       <span
         className={className}
         onMouseEnter={(event) => setOpened(always || isCut(event.currentTarget))}

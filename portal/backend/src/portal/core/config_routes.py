@@ -72,4 +72,9 @@ async def get_config(_: AnySession, container: ContainerDep) -> dict[str, Any]:
                 "dialect": settings.sql.sandbox.dialect,
             },
         },
+        "memory": {
+            "enabled": settings.memory.enabled,
+            "keep_recent_pairs": settings.memory.keep_recent_pairs,
+            "max_chars": settings.memory.max_chars,
+        },
     }

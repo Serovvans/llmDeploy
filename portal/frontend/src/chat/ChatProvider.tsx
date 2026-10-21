@@ -3,7 +3,18 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useReducer,
 
 import { api, isAbort, isApiError, NetworkError, StreamBrokenError } from '../api/client';
 import type { StreamEvent } from '../api/stream';
-import type { AnswerMode, Attachment, Dialog, DialogKind, KbScope, Message, PortalConfig, QuestionParams } from '../api/types';
+import type {
+  AnswerMode,
+  Attachment,
+  Dialog,
+  DialogKind,
+  DialogSummary,
+  KbScope,
+  MemoryMode,
+  Message,
+  PortalConfig,
+  QuestionParams,
+} from '../api/types';
 import { errorText, texts } from '../texts';
 import {
   checkFile,
@@ -90,6 +101,12 @@ interface ChatApi {
   openDialog: (kind: DialogKind, id: string) => void;
   refreshDialog: (id: string) => void;
   loadOlder: (id: string) => void;
+  /** Подгружает более ранние сообщения, пока в ленте не появится `messageId`; `false` — не нашлось или сбой. */
+  loadOlderUntil: (id: string, messageId: string) => Promise<boolean>;
+  /** Режим пары в ленте — сразу, до ответа сервера; при отказе экран возвращает прежний (концепция §4.9). */
+  showMemoryMode: (id: string, questionId: string, mode: MemoryMode) => void;
+  /** Пересказ применён, изменён или сжатие отменено (`null`): граница в ленте и блок в панели (контракт §5.10.6). */
+  showSummary: (id: string, summary: DialogSummary | null) => void;
   setText: (key: string, text: string) => void;
   setNotice: (key: string, notice: string | null) => void;
   addFiles: (key: string, files: File[], onCreated: OnCreated) => void;
@@ -238,12 +255,12 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       }
       const known = kindOf(id);
       dispatch({ type: 'messagesLoading', id });
-      // Диалога может не быть в загруженной части истории: вид и название для заголовка берутся отдельно.
-      // Не удалось узнать (кроме «не найден») — лента показывается без названия.
-      const dialog =
-        known === null
-          ? api.getDialog(id).catch((error: unknown) => (isApiError(error, 'not_found') ? Promise.reject(error) : null))
-          : null;
+      // Диалог читается всегда: пересказ и перенесённое есть только в нём (контракт §5.1). Его может не быть
+      // и в загруженной части истории — тогда отсюда же вид и название для заголовка.
+      // Не удалось узнать (кроме «не найден») — лента показывается без названия, пересказа и перенесённого.
+      const dialog = api
+        .getDialog(id)
+        .catch((error: unknown) => (isApiError(error, 'not_found') ? Promise.reject(error) : null));
       Promise.all([dialog, api.listMessages(id, null)]).then(
         ([found, page]) => {
           // Диалог другого раздела по адресу этого — «не найден», а не чужая лента с панелью раздела.
@@ -251,9 +268,16 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
             dispatch({ type: 'messagesFailed', id, notFound: true });
             return;
           }
-          dispatch({ type: 'messagesLoaded', id, items: page.items, nextCursor: page.next_cursor, older: false });
-          // Диалог без сообщений в истории не показывается.
-          if (found && page.items.length > 0) {
+          dispatch({
+            type: 'messagesLoaded',
+            id,
+            items: page.items,
+            nextCursor: page.next_cursor,
+            older: false,
+            dialog: found,
+          });
+          // Диалог без сообщений в истории не показывается, кроме созданного переносом (контракт §5.2).
+          if (known === null && found && (page.items.length > 0 || found.carried)) {
             dispatch({ type: 'dialogUpserted', dialog: found, toTop: false });
           }
         },
@@ -273,6 +297,38 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       (error: unknown) => SingleToast.push(errorText(error), { use: 'error' }),
     );
   }, []);
+
+  const loadOlderUntil = useCallback(async (id: string, messageId: string): Promise<boolean> => {
+    const view = stateRef.current.dialogs[id];
+    if (view?.messages.some((message) => message.id === messageId)) {
+      return true;
+    }
+    let cursor = view?.olderCursor ?? null;
+    while (cursor) {
+      try {
+        const page = await api.listMessages(id, cursor);
+        dispatch({ type: 'messagesLoaded', id, items: page.items, nextCursor: page.next_cursor, older: true });
+        if (page.items.some((message) => message.id === messageId)) {
+          return true;
+        }
+        cursor = page.next_cursor;
+      } catch (error) {
+        SingleToast.push(errorText(error), { use: 'error' });
+        return false;
+      }
+    }
+    return false;
+  }, []);
+
+  const showMemoryMode = useCallback(
+    (id: string, questionId: string, mode: MemoryMode) => dispatch({ type: 'memoryModeChanged', id, questionId, mode }),
+    [],
+  );
+
+  const showSummary = useCallback(
+    (id: string, summary: DialogSummary | null) => dispatch({ type: 'summaryChanged', id, summary }),
+    [],
+  );
 
   /** Чат создаётся на сервере при первой отправке или первом вложении (контракт §5.2). */
   const ensureDialog = useCallback(async (key: string, onCreated: OnCreated): Promise<string> => {
@@ -736,6 +792,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       openDialog,
       refreshDialog,
       loadOlder,
+      loadOlderUntil,
+      showMemoryMode,
+      showSummary,
       setText,
       setNotice,
       addFiles,
@@ -761,6 +820,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       openDialog,
       refreshDialog,
       loadOlder,
+      loadOlderUntil,
+      showMemoryMode,
+      showSummary,
       setText,
       setNotice,
       addFiles,

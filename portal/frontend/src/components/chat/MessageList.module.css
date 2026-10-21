@@ -46,6 +46,65 @@
   background: var(--p-surface-2);
 }
 
+/* Пара «Не учитывать» (концепция §4.9): вопрос без подложки, в рамке пунктиром, текст приглушён цветом. */
+.questionExcluded {
+  border: 1px dashed var(--p-line);
+  background: none;
+  color: var(--p-text-muted);
+}
+
+/*
+ * Ответ такой пары приглушён цветом, а не прозрачностью (контраст §9); код, таблицы, карточки
+ * и картинки остаются как есть.
+ */
+.answer.excludedAnswer {
+  color: var(--p-text-muted);
+}
+
+.answer.excludedAnswer :is(h3, h4, h5, h6) {
+  color: var(--p-text-muted);
+}
+
+.answer.excludedAnswer :is(table, pre, code) {
+  color: var(--p-text);
+}
+
+.memoryMark {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* Цвет кнопки-пометки — токен темы, а не серый библиотеки (контраст ≥ 4.5:1 в обеих темах); два класса перебивают её один. */
+.memoryMark .memoryMarkLink {
+  color: var(--p-text-muted);
+}
+
+.memoryMarkIcon {
+  display: inline-flex;
+}
+
+/* Пара, отмеченная из описи памяти, — полоса 3 px на полях «Вы / Ответ», как текущий раздел в рейке. */
+.marked .who {
+  box-shadow: inset 3px 0 0 var(--p-accent);
+}
+
+.revealing {
+  position: absolute;
+  inset: 0;
+}
+
+.revealingBox {
+  height: 100%;
+}
+
+.revealing > * {
+  height: 100%;
+}
+
 .questionText {
   overflow-wrap: anywhere;
   white-space: pre-wrap;

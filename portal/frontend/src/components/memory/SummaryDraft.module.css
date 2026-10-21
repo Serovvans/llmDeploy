@@ -1,0 +1,49 @@
+.draft {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Под полем: слева ход черновика, справа счётчик символов (концепция §4.9). */
+.status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 24px;
+}
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.counter {
+  flex: none;
+  margin-left: auto;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.over {
+  color: var(--p-error-text);
+}
+
+.muted,
+.error {
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+}
+
+.error {
+  color: var(--p-error-text);
+}

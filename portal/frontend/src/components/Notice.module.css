@@ -44,3 +44,8 @@
   flex: 1;
   min-width: 0;
 }
+
+.actions {
+  flex: none;
+  white-space: nowrap;
+}

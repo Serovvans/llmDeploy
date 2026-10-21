@@ -33,6 +33,21 @@
   margin-left: auto;
 }
 
+.hintRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0 16px;
+  margin-top: 6px;
+  /* Правый край индикатора — под правым краем кнопки «Отправить»: рамка и поле панели. */
+  padding-right: 9px;
+}
+
+.hintRow .hint {
+  margin-top: 0;
+}
+
 .hint {
   margin-top: 6px;
   color: var(--p-text-muted);

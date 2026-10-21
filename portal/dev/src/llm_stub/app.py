@@ -20,7 +20,15 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from llm_stub import replies
 
 _CHAT_FIELDS = frozenset(
-    {"model", "messages", "stream", "reasoning_effort", "max_tokens", "response_format"}
+    {
+        "model",
+        "messages",
+        "stream",
+        "stream_options",
+        "reasoning_effort",
+        "max_tokens",
+        "response_format",
+    }
 )
 _REASONING_EFFORTS = frozenset({"low", "medium"})
 # Заглушка стоит на месте Bifrost, а он переписывает `xhigh` в `high`: шаблон модели
@@ -79,19 +87,29 @@ async def _body(request: Request) -> dict[str, Any] | None:
     return body if isinstance(body, dict) else None
 
 
-def _chunk(delta: dict[str, Any], finish_reason: str | None = None) -> str:
-    payload = {
-        "id": "chatcmpl-stub",
-        "object": "chat.completion.chunk",
-        "created": 0,
-        "model": "default",
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
-    }
+def _data(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _chunk(delta: dict[str, Any], finish_reason: str | None = None) -> str:
+    return _data(
+        {
+            "id": "chatcmpl-stub",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "default",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+    )
+
+
 async def _stream(
-    parts: list[str], finish_reason: str, delay: float, *, broken: bool
+    parts: list[str],
+    finish_reason: str,
+    delay: float,
+    *,
+    broken: bool,
+    usage: dict[str, int] | None,
 ) -> AsyncIterator[str]:
     yield _chunk({"role": "assistant", "reasoning": replies.REASONING})
     for part in parts:
@@ -100,6 +118,18 @@ async def _stream(
         if broken:
             return
     yield _chunk({}, finish_reason)
+    if usage is not None:
+        # Как vLLM при `stream_options.include_usage`: отдельный фрагмент без `choices`.
+        yield _data(
+            {
+                "id": "chatcmpl-stub",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "default",
+                "choices": [],
+                "usage": usage,
+            }
+        )
     yield "data: [DONE]\n\n"
 
 
@@ -117,6 +147,15 @@ def _chat_refusal(body: dict[str, Any]) -> Response | None:
     messages = body.get("messages")
     if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
         return _error(400, "messages must be a list of objects")
+    if "stream_options" in body:
+        options = body["stream_options"]
+        valid = (
+            isinstance(options, dict)
+            and set(options) == {"include_usage"}
+            and isinstance(options["include_usage"], bool)
+        )
+        if not valid or body.get("stream") is not True:
+            return _error(400, "stream_options must be {include_usage: bool} with stream: true")
     return None
 
 
@@ -155,8 +194,12 @@ def create_app(chunk_delay_ms: int) -> Starlette:
         if body.get("stream"):
             delay = _SLOW_DELAY_SECONDS if slow else chunk_delay_ms / 1000
             broken = "[[stub:break]]" in turn.text
+            usage = None
+            wants_usage = body.get("stream_options", {}).get("include_usage") is True
+            if wants_usage and replies.NO_USAGE_MARK not in turn.text:
+                usage = replies.usage(messages, images, "".join(parts))
             return StreamingResponse(
-                _stream(parts, finish_reason, delay, broken=broken),
+                _stream(parts, finish_reason, delay, broken=broken, usage=usage),
                 media_type="text/event-stream",
             )
         return JSONResponse(

@@ -71,6 +71,8 @@ export const CONFIG = {
     chat_max_minutes: 20,
     extensions: ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.mp4', '.mkv', '.webm', '.mov'],
   },
+  // Выключена: остальные тесты проверяют портал как до «Памяти диалога» (ПД §7); тесты памяти включают её сами.
+  memory: { enabled: false, keep_recent_pairs: 2, max_chars: 8000 },
 } satisfies PortalConfig;
 
 export const EMPLOYEE: SessionUser = {
