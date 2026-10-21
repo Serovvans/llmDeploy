@@ -5,13 +5,13 @@
 """
 
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from typing import Any
 from uuid import UUID
 
 from portal.core.errors import feature_disabled, field_error, not_found, validation_error
 from portal.core.settings import CogisSettings, DocparseSettings, SqlSettings
-from portal.dialogs.context import Turn, data_block
+from portal.dialogs.context import Turn, data_block, fields_block
 from portal.dialogs.ports import AnswerPlan, DialogUnitOfWorkFactory
 from portal.kb.ports import KnowledgeBase, KnowledgeSelection, KnowledgeUnavailableError
 from portal.tools import errors
@@ -29,12 +29,6 @@ from portal.tools.sql_schemas import SqlSchema, SqlSchemaService
 def document_block(file_name: str, text: str) -> str:
     """Блок с текстом документа разбора."""
     return data_block("документ", text or "(в документе нет текста)", file_name)
-
-
-def fields_block(fields: Sequence[Mapping[str, Any]]) -> str:
-    """Блок с таблицей извлечённых реквизитов."""
-    lines = [f"{field['title']}: {field['value'] or '—'}" for field in fields]
-    return data_block("реквизиты", "\n".join(lines) or "(реквизиты не извлечены)")
 
 
 class SqlTool:

@@ -19,7 +19,13 @@ TITLE_MAX_LENGTH = 200
 
 @dataclass
 class Dialog:
-    """Диалог пользователя."""
+    """Диалог пользователя.
+
+    `summary` — применённый пересказ, `summary_until_position` — позиция ответа, которым
+    кончается пересказанная часть; оба есть или оба `None` (§5.10.6). `carried_text` —
+    перенесённое при создании; `carried_source_id` — исходный диалог того же владельца
+    (`None` — удалён), `carried_source_title` — его название на момент переноса (§5.10.7).
+    """
 
     id: UUID
     owner_id: UUID
@@ -27,6 +33,11 @@ class Dialog:
     title: str | None
     created_at: datetime
     updated_at: datetime
+    summary: str | None = None
+    summary_until_position: int | None = None
+    carried_text: str | None = None
+    carried_source_id: UUID | None = None
+    carried_source_title: str | None = None
 
 
 @dataclass

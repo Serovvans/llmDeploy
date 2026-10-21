@@ -2,7 +2,7 @@ import { SingleToast } from '@skbkontur/react-ui';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api, isApiError, NetworkError } from '../api/client';
-import type { DialogKind, Memory, MemoryLevel, MemoryMode, MemoryPair, QuestionParams } from '../api/types';
+import type { DialogKind, Memory, MemoryLevel, MemoryMode, MemoryPair, PortalConfig, QuestionParams } from '../api/types';
 import { useChat } from '../chat/ChatProvider';
 import { useSession } from '../session/SessionContext';
 import { texts } from '../texts';
@@ -28,14 +28,34 @@ export function memoryQuery(params: QuestionParams): Record<string, string> {
   return {};
 }
 
-/** Почему запрошена оценка: от этого зависит, объявляется ли новый уровень (концепция §9). */
-type Reason = 'open' | 'settings' | 'answer' | 'choice';
+/**
+ * Строка запроса оценки для диалога, открытого не на экране (перенос из строки истории, концепция §4.9):
+ * чат — быстрый ответ без поиска, SQL — первое действие и диалект по умолчанию без схемы, CoGIS — первое действие.
+ */
+export function defaultMemoryQuery(kind: DialogKind, config: PortalConfig): Record<string, string> {
+  switch (kind) {
+    case 'chat':
+      return { mode: 'fast', search: 'false' };
+    case 'sql':
+      return { action: 'write', dialect: config.sql.default_dialect };
+    case 'cogis':
+      return { action: 'write' };
+    case 'docparse':
+      return {};
+  }
+}
+
+/**
+ * Почему запрошена оценка: от этого зависит, объявляется ли новый уровень (концепция §9). `summary` —
+ * сотрудник сжал раннюю часть или отменил сжатие; `stale` — оценка устарела (сжимать уже нечего).
+ */
+type Reason = 'open' | 'settings' | 'answer' | 'choice' | 'summary' | 'stale';
 
 const HIGH: ReadonlySet<MemoryLevel> = new Set(['almost_full', 'overflow']);
 
 /** Объявление уровня: после выбора в описи — всегда, после ответа — только при переходе в высокий уровень. */
 function announcement(reason: Reason, previous: MemoryLevel | null, next: MemoryLevel): string | null {
-  if (reason === 'choice' || (reason === 'answer' && HIGH.has(next) && previous !== next)) {
+  if (reason === 'choice' || reason === 'summary' || (reason === 'answer' && HIGH.has(next) && previous !== next)) {
     return t.announce(t.levels[next]);
   }
   return null;
@@ -59,6 +79,10 @@ export interface DialogMemory {
   retry: () => void;
   setMode: (pair: MemoryPair, mode: MemoryMode) => void;
   markTruncated: () => void;
+  /** Новая оценка после сжатия, правки или отмены (0.8) — уровень объявляется; `stale` — без объявления. */
+  refresh: (reason: 'summary' | 'stale') => void;
+  /** Функцию выключили, пока экран открыт (`403 feature_disabled` у окна сжатия или переноса). */
+  disable: () => void;
 }
 
 interface Options {
@@ -270,6 +294,8 @@ export function useDialogMemory({ kind, dialogId, ready, enabled, params, busy, 
     load('open');
   }, [load]);
 
+  const refresh = useCallback((reason: 'summary' | 'stale') => load(reason), [load]);
+
   const own = estimate?.dialogId === dialogId ? estimate : null;
   let status: MemoryStatus = 'loading';
   if (!dialogId) {
@@ -298,5 +324,7 @@ export function useDialogMemory({ kind, dialogId, ready, enabled, params, busy, 
     retry,
     setMode,
     markTruncated,
+    refresh,
+    disable,
   };
 }

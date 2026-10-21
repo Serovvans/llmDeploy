@@ -58,3 +58,15 @@ def attachment_already_sent() -> AppError:
     return AppError(
         409, "attachment_already_sent", "Вложение уже отправлено: удалить его можно с чатом."
     )
+
+
+def draft_in_progress() -> AppError:
+    """У сотрудника уже идёт черновик пересказа (§5.10.8)."""
+    return AppError(
+        429, "draft_in_progress", "Пересказ уже готовится. Дождитесь его или закройте и повторите."
+    )
+
+
+def nothing_to_summarize() -> AppError:
+    """В диапазоне пересказа нечего пересказывать (§5.10.5)."""
+    return AppError(409, "nothing_to_summarize", "Пересказывать пока нечего.")

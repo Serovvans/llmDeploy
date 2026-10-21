@@ -4,12 +4,13 @@ import { IconXRegular16 } from '@skbkontur/icons/IconXRegular16';
 import { Button, Hint, Loader, ScrollContainer, Select } from '@skbkontur/react-ui';
 import { useRef, useState } from 'react';
 
-import type { DialogKind, MemoryMode, MemoryPair } from '../../api/types';
+import type { DialogCarried, DialogKind, DialogSummary, MemoryMode, MemoryPair } from '../../api/types';
 import type { DialogMemory } from '../../memory/useDialogMemory';
 import { texts } from '../../texts';
 import { Notice } from '../Notice';
 import { ProgressBar } from '../ProgressBar';
 import { isWarningLevel, levelHint, levelPercent } from './levelHint';
+import { CarriedBlock, SummarizedPairs, SummaryBlock, summarizedRange } from './MemoryBlocks';
 import styles from './MemoryPanel.module.css';
 
 const t = texts.memory;
@@ -141,16 +142,29 @@ interface MemoryPanelProps {
   onClose: () => void;
   onHover: (questionId: string | null) => void;
   onReveal: (questionId: string) => void;
+  /** Пересказ и перенесённое диалога (0.8): блоки над описью. */
+  summary: DialogSummary | null;
+  carried: DialogCarried | null;
+  /** `memory.keep_recent_pairs` — число в пояснениях к сжатию. */
+  keepRecent: number;
+  onCompress: () => void;
+  onEditSummary: () => void;
+  onCancelSummary: () => void;
+  /** «Перенести в новый диалог…» в подвале; `null` — диалог ещё не создан на сервере, подвала нет. */
+  onTransfer: (() => void) | null;
 }
 
 /**
  * Панель памяти диалога (свой: `MemoryPanel`, концепция §4.9): уровень, опись вопросов с ответами и
  * выбор, как модель учитывает каждый. Колонка справа или слой поверх ленты — решают стили по ширине окна.
  */
-export function MemoryPanel({ id, kind, memory, busy, onClose, onHover, onReveal }: MemoryPanelProps) {
+export function MemoryPanel(props: MemoryPanelProps) {
+  const { id, kind, memory, busy, onClose, onHover, onReveal } = props;
   const selectOpen = useRef(false);
   const { status, level } = memory;
   const pairs = memory.memory?.pairs ?? [];
+  const range = summarizedRange(pairs);
+  const summarized = range ? pairs.slice(range.from - 1, range.to) : [];
 
   const group = kind === 'docparse' ? 'docparse' : 'dialog';
   const allExcluded = pairs.length > 0 && pairs.every((pair) => pair.memory_mode === 'excluded');
@@ -196,6 +210,22 @@ export function MemoryPanel({ id, kind, memory, busy, onClose, onHover, onReveal
               {kind === 'chat' && <p className={styles.muted}>{t.chatNote}</p>}
               {kind === 'docparse' && <p className={styles.muted}>{t.docparseNote}</p>}
             </div>
+            {/* Блоки 0.8 отделены линиями от пояснения и от описи, как на схеме панели (§4.9). */}
+            <div className={styles.blocks}>
+              {props.carried && <CarriedBlock carried={props.carried} />}
+              {memory.memory && (
+                <SummaryBlock
+                  summary={props.summary}
+                  range={range}
+                  compressPairs={memory.memory.compress_pairs}
+                  keepRecent={props.keepRecent}
+                  busy={busy}
+                  onCompress={props.onCompress}
+                  onEdit={props.onEditSummary}
+                  onCancel={props.onCancelSummary}
+                />
+              )}
+            </div>
             <section className={styles.pairs}>
               <h3 className={styles.pairsTitle}>{t.pairsTitle}</h3>
               {pairs.length === 0 ? (
@@ -206,7 +236,8 @@ export function MemoryPanel({ id, kind, memory, busy, onClose, onHover, onReveal
                   {busy && <Notice kind="info">{t.busy}</Notice>}
                   {allExcluded && <p className={styles.muted}>{t.allExcluded}</p>}
                   <ol className={styles.list}>
-                    {pairs.map((pair, index) => (
+                    {range && <SummarizedPairs pairs={summarized} range={range} onReveal={onReveal} onHover={onHover} />}
+                    {pairs.map((pair, index) => pair.summarized ? null : (
                       <PairRow
                         key={pair.question_id}
                         pair={pair}
@@ -254,6 +285,13 @@ export function MemoryPanel({ id, kind, memory, busy, onClose, onHover, onReveal
         </Hint>
       </div>
       {content}
+      {props.onTransfer && (
+        <div className={styles.footer}>
+          <Button width="100%" onClick={props.onTransfer}>
+            {t.transfer.menu}
+          </Button>
+        </div>
+      )}
       <p className="p-visually-hidden" role="status">
         {memory.announcement}
       </p>

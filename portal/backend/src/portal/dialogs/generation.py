@@ -30,8 +30,10 @@ from portal.dialogs.context import (
     Turn,
     considered_history,
     fit_memory,
+    head_turn,
     history_turns,
     question_turn,
+    with_head_rules,
 )
 from portal.dialogs.domain import (
     AnswerMode,
@@ -50,7 +52,7 @@ from portal.dialogs.ports import (
     DialogUnitOfWork,
     DialogUnitOfWorkFactory,
 )
-from portal.dialogs.service import MessageView
+from portal.dialogs.service import MessageView, SummaryView
 from portal.dialogs.watch import (
     INTERRUPTION_MESSAGES,
     Interruption,
@@ -95,7 +97,7 @@ _SAVE_ATTEMPTS = 4
 _SAVE_RETRY_SECONDS = 0.5
 _ALL_POSITIONS = 2**31 - 1
 _EFFORT: dict[AnswerMode, ReasoningEffort] = {"fast": "low", "thorough": "xhigh"}
-_ERROR_MESSAGES = {
+ERROR_MESSAGES = {
     "model_unavailable": "Модель сейчас недоступна. Повторите попытку позже.",
     "model_overloaded": "Модель перегружена. Повторите попытку позже.",
     "message_too_long": "Сообщение слишком длинное. Сократите текст или вложения.",
@@ -173,16 +175,18 @@ class _Job:
 type _Save = Callable[[DialogUnitOfWork, Message | None], Awaitable[_Job]]
 
 
-def search_history(messages: Sequence[Message]) -> list[DialogTurn]:
+def search_history(
+    messages: Sequence[Message], summarized_until: int | None = None
+) -> list[DialogTurn]:
     """История для поиска: только текст учитываемых вопросов и ответов по порядку (§5.4).
 
-    Пар «Не учитывать», размышлений, блоков вложений и найденных мест в ней нет (§5.10.1);
-    сообщение с пустым текстом — вопрос из одних вложений или оборванный ответ —
-    пропускается.
+    Пересказанных сообщений, пар «Не учитывать», размышлений, блоков вложений и найденных
+    мест в ней нет (§5.10.1); сообщение с пустым текстом — вопрос из одних вложений или
+    оборванный ответ — пропускается.
     """
     return [
         DialogTurn(message.role, message.content)
-        for message, _ in considered_history(messages)
+        for message, _ in considered_history(messages, summarized_until)
         if message.content
     ]
 
@@ -439,14 +443,16 @@ class GenerationService:
         """Бюджет за вычетом резерва `kb.context_max_tokens`, если поиск будет (§5.10.2)."""
         return self._budget(plan) - (self._knowledge_reserve if search else 0)
 
-    def _check_fits(self, plan: AnswerPlan) -> None:
-        """Вопрос обязан помещаться сам; под найденное в базе знаний оставлен резерв.
+    def _check_fits(self, plan: AnswerPlan, head: Turn | None = None) -> None:
+        """Вопрос с головным сообщением обязан помещаться сам; под найденное — резерв.
 
         Резерв вычитается, когда поиск будет выполняться, при любом значении флага памяти:
         тогда правила и найденные места заведомо не вытеснят сам вопрос (§5.4, §5.10.2).
         """
         budget = self._reserved_budget(plan, plan.selection is not None)
-        if fit_memory(plan.system, [], plan.question, budget, self._estimator).limit < 0:
+        system = with_head_rules(plan.system, head, self._memory.head_rules_prompt)
+        fit = fit_memory(system, [], plan.question, budget, self._estimator, head=head)
+        if fit.used > fit.limit:
             raise errors.message_too_long()
 
     def _message(
@@ -537,6 +543,9 @@ class GenerationService:
                 if not idle:
                     return None
                 job = await save(uow, last)
+                # Пересказ и перенесённое входят в каждый запрос: с ними вопрос тоже
+                # обязан поместиться (§5.10.2).
+                self._check_fits(job.plan, head_turn(dialog))
                 # У разбора название — имя файла, модель его не предлагает (§5.7).
                 job.needs_title = dialog.title is None and kind != "docparse"
                 answer = self._message(
@@ -584,12 +593,25 @@ class GenerationService:
             plan = await self._tools[kind].plan(owner_id, dialog_id, "", query.params)
             search = plan.selection is not None
         async with self._uow_factory() as uow:
+            dialog = await uow.dialogs.get_dialog(owner_id, dialog_id)
+            if dialog is None:
+                raise not_found()
             messages = await uow.dialogs.history(owner_id, dialog_id, _ALL_POSITIONS)
             files = await uow.dialogs.message_attachments(
                 owner_id, [message.id for message in messages if message.role == "user"]
             )
-        budget = self._reserved_budget(plan, search)
-        return estimate_memory(messages, files, plan.system, plan.question, budget, self._estimator)
+        head = head_turn(dialog)
+        return estimate_memory(
+            messages,
+            files,
+            with_head_rules(plan.system, head, self._memory.head_rules_prompt),
+            head,
+            dialog.summary_until_position,
+            plan.question,
+            self._reserved_budget(plan, search),
+            self._estimator,
+            self._memory.keep_recent_pairs,
+        )
 
     async def set_memory_mode(
         self, owner_id: UUID, dialog_id: UUID, message_id: UUID, mode: MemoryMode
@@ -622,6 +644,74 @@ class GenerationService:
                 return MessageView(question, files)
 
         return await self._when_idle(attempt)
+
+    async def _locked_idle(self, uow: DialogUnitOfWork, owner_id: UUID, dialog_id: UUID) -> bool:
+        """Под блокировкой строки диалога: свободен ли он; чужой или удалённый — `404`."""
+        dialog = await uow.dialogs.get_dialog(owner_id, dialog_id, lock=True)
+        if dialog is None:
+            raise not_found()
+        idle, _ = await self._is_idle(uow, owner_id, dialog_id, dialog.kind)
+        return idle
+
+    async def wait_idle(self, owner_id: UUID, dialog_id: UUID) -> None:
+        """Дождаться, что в диалоге не формируется ответ, иначе `409` (§5.10.5, §5.10.8)."""
+
+        async def attempt() -> bool | None:
+            async with self._uow_factory() as uow:
+                return True if await self._locked_idle(uow, owner_id, dialog_id) else None
+
+        await self._when_idle(attempt)
+
+    async def set_summary(
+        self, owner_id: UUID, dialog_id: UUID, text: str, until_message_id: UUID
+    ) -> SummaryView:
+        """Применить или изменить пересказ: записать текст и границу вместо прежних (§5.10.6).
+
+        Граница — ответ этого диалога, после которого не меньше `memory.keep_recent_pairs`
+        вопросов. Пока в диалоге формируется ответ, пересказ не меняется — `409`.
+        """
+        text = text.strip()
+        if not text:
+            raise validation_error([field_error("text", "required")])
+        if len(text) > self._memory.max_chars:
+            raise validation_error([field_error("text", "too_long")])
+
+        async def attempt() -> SummaryView | None:
+            async with self._uow_factory() as uow:
+                if not await self._locked_idle(uow, owner_id, dialog_id):
+                    return None
+                messages = await uow.dialogs.history(owner_id, dialog_id, _ALL_POSITIONS)
+                until = next((item for item in messages if item.id == until_message_id), None)
+                later = (
+                    0
+                    if until is None
+                    else sum(
+                        item.role == "user" and item.position > until.position for item in messages
+                    )
+                )
+                if (
+                    until is None
+                    or until.role != "assistant"
+                    or later < self._memory.keep_recent_pairs
+                ):
+                    raise validation_error([field_error("until_message_id", "unknown_value")])
+                await uow.dialogs.set_summary(owner_id, dialog_id, text, until.position)
+                covered = sum(item.position <= until.position for item in messages)
+                return SummaryView(text, until.id, covered)
+
+        return await self._when_idle(attempt)
+
+    async def clear_summary(self, owner_id: UUID, dialog_id: UUID) -> None:
+        """Отменить сжатие: пересказ и граница — `NULL`, сообщения не трогаются (§5.10.6)."""
+
+        async def attempt() -> bool | None:
+            async with self._uow_factory() as uow:
+                if not await self._locked_idle(uow, owner_id, dialog_id):
+                    return None
+                await uow.dialogs.set_summary(owner_id, dialog_id, None, None)
+                return True
+
+        await self._when_idle(attempt)
 
     # --- формирование ответа: после статуса 200 ошибка возможна только событием ---
 
@@ -678,14 +768,12 @@ class GenerationService:
             # Проверка оборвана; ответ уже сохранён со своим состоянием и остаётся им. Поток,
             # закрытый клиентом, завершающего события не получает (§6.2).
             if interrupted != "stopped":
-                channel.emit(
-                    "error", {"code": interrupted, "message": _ERROR_MESSAGES[interrupted]}
-                )
+                channel.emit("error", {"code": interrupted, "message": ERROR_MESSAGES[interrupted]})
         elif finished:
             channel.emit("done", {"status": outcome.status})
         elif outcome.status == "error" and outcome.error_code is not None:
             code = outcome.error_code
-            channel.emit("error", {"code": code, "message": _ERROR_MESSAGES[code]})
+            channel.emit("error", {"code": code, "message": ERROR_MESSAGES[code]})
 
     async def _test_run(self, job: _Job, tool: DialogTool) -> Interruption | None:
         """Проверить запросы сохранённого ответа на тестовых данных (§5.5, шаг 6; §7.4).
@@ -809,12 +897,26 @@ class GenerationService:
         system = plan.system
         question = plan.question
         async with self._uow_factory() as uow:
+            dialog = await uow.dialogs.get_dialog(job.owner_id, job.dialog_id)
             earlier = await uow.dialogs.history(job.owner_id, job.dialog_id, job.question.position)
             files = await uow.dialogs.message_attachments(
                 job.owner_id, [message.id for message in earlier if message.role == "user"]
             )
+        if dialog is None:
+            self._interrupted(job, "dialog_deleted")
+            return
+        # Сохранённые режимы пар, пересказ и перенесённое учитываются при любом значении
+        # флага: это содержимое диалога (§5.10.9). Пересказанные сообщения в запрос не идут.
+        summarized_until = dialog.summary_until_position
+        head = head_turn(dialog)
+        # Правило о головном сообщении — сразу после системного, правила базы знаний — за
+        # ним (§5.10.2). Сами пересказ и перенесённое в системное сообщение не попадают.
+        system = with_head_rules(system, head, self._memory.head_rules_prompt)
+        planned_system = system
         if plan.selection is not None:
-            retrieval = await self._search(job, plan.selection, search_history(earlier), watch)
+            retrieval = await self._search(
+                job, plan.selection, search_history(earlier, summarized_until), watch
+            )
             if retrieval is None:
                 return
             # Правила — в конец системного сообщения; найденное — первым блоком вопроса,
@@ -823,23 +925,26 @@ class GenerationService:
             if retrieval.context:
                 question = Turn("user", f"{retrieval.context}\n\n{question.text}", question.images)
 
-        # Сохранённые режимы пар учитываются при любом значении флага: это содержимое диалога.
-        history = history_turns(earlier, files)
+        history = history_turns(earlier, files, summarized_until)
         # С памятью диалога история укладывается с резервом под найденное, а не по его
         # фактическому объёму, — как в оценке памяти; без неё — как в 0.6 (§5.10.2).
         if self._memory.enabled:
-            fit_system, fit_question = plan.system, plan.question
+            fit_system, fit_question = planned_system, plan.question
             budget = self._reserved_budget(plan, plan.selection is not None)
         else:
             fit_system, fit_question, budget = system, question, self._budget(plan)
-        dropped = fit_memory(fit_system, history, fit_question, budget, self._estimator).dropped
+        dropped = fit_memory(
+            fit_system, history, fit_question, budget, self._estimator, head=head
+        ).dropped
         if dropped:
             job.channel.emit("context_truncated", {"dropped_messages": dropped})
+        # Головное сообщение не отбрасывается никогда, в том числе при повторе.
+        lead = [] if head is None else [head]
 
         for attempt in range(2):
             outcome.dropped_messages = dropped
             request = ChatRequest(
-                await self._model_messages(system, [*history[dropped:], question]),
+                await self._model_messages(system, [*lead, *history[dropped:], question]),
                 plan.effort,
                 plan.max_tokens,
                 include_usage=self._memory.enabled,
@@ -854,7 +959,7 @@ class GenerationService:
                     break
                 more = max(dropped * 2, dropped + (remaining + 1) // 2)
                 dropped = fit_memory(
-                    fit_system, history, fit_question, budget, self._estimator, more
+                    fit_system, history, fit_question, budget, self._estimator, more, head=head
                 ).dropped
         outcome.status, outcome.error_code = "error", "message_too_long"
 

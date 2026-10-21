@@ -15,6 +15,7 @@ import { errorText, texts } from '../../texts';
 import { ConfirmModal } from '../ConfirmModal';
 import { EmptyState } from '../EmptyState';
 import { useDocumentViewer } from '../kb/DocumentViewer';
+import { CarriedNotice } from '../memory/MemoryBlocks';
 import { MemoryLayout } from '../memory/MemoryLayout';
 import { Notice } from '../Notice';
 import { PageHeader } from '../PageHeader';
@@ -225,6 +226,7 @@ export function DialogScreen(props: DialogScreenProps) {
   const memory = useMemoryUi({
     kind,
     dialogId: id ?? null,
+    title: dialog?.title ?? null,
     view,
     available: usable,
     params: props.params,
@@ -327,6 +329,11 @@ export function DialogScreen(props: DialogScreenProps) {
         onExport={(target) => void exportDocx(target.id)}
         onNewChat={newChat}
         onRename={(target) => startRename(target, `history-${target.id}`)}
+        onTransfer={
+          memory.transfer
+            ? (target) => memory.transfer?.(target, `[data-opener="history-${target.id}"] [tabindex="0"]`)
+            : undefined
+        }
         onRemove={(target) => startRemove(target, `history-${target.id}`)}
         onShowMore={() => chat.loadHistory(true)}
         onRetry={() => chat.loadHistory(false)}
@@ -356,6 +363,11 @@ export function DialogScreen(props: DialogScreenProps) {
                 <Kebab aria-label={`${texts.users.actions}: ${title}`}>
                   <MenuItem onClick={() => startRename(dialog, 'header')}>{t.menu.rename}</MenuItem>
                   <MenuItem onClick={() => void exportDocx(dialog.id)}>{t.menu.exportDocx}</MenuItem>
+                  {memory.transfer && (
+                    <MenuItem onClick={() => memory.transfer?.(dialog, '[data-opener="header"] [tabindex="0"]')}>
+                      {texts.memory.transfer.menu}
+                    </MenuItem>
+                  )}
                   <MenuItem onClick={() => startRemove(dialog, 'header')}>{t.menu.remove}</MenuItem>
                 </Kebab>
               </Hint>
@@ -413,10 +425,17 @@ export function DialogScreen(props: DialogScreenProps) {
         >
           {props.toolbar}
           {props.banner && <div className={styles.banner}>{props.banner}</div>}
+          {/* Сведения переноса видны и при выключенной памяти диалога: это содержимое диалога (Д-36). */}
+          {usable && view?.carried && (
+            <div className={styles.banner}>
+              <CarriedNotice carried={view.carried} />
+            </div>
+          )}
           <div className={styles.body}>{body}</div>
         </MemoryLayout>
       </div>
       {viewer.element}
+      {memory.dialogs}
       {removing && (
         <ConfirmModal
           title={labels.removeTitle(removing.title ?? labels.newLabel)}

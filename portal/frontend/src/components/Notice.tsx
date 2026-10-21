@@ -9,6 +9,10 @@ export type NoticeKind = 'info' | 'warning' | 'error';
 
 interface NoticeAction {
   label: string;
+  /** Действие раскрывает текст под заметкой («Показать» у сведений): `aria-expanded` и `aria-controls`. */
+  expanded?: boolean;
+  controls?: string;
+  disabled?: boolean;
   onClick: () => void;
 }
 
@@ -40,7 +44,13 @@ export function Notice({ kind, children, action }: NoticeProps) {
           {actions.map((item, index) => (
             <span key={item.label}>
               {index > 0 && <span aria-hidden="true">{' · '}</span>}
-              <Link component="button" onClick={item.onClick}>
+              <Link
+                component="button"
+                disabled={item.disabled}
+                aria-expanded={item.expanded}
+                aria-controls={item.expanded ? item.controls : undefined}
+                onClick={item.onClick}
+              >
                 {item.label}
               </Link>
             </span>

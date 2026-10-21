@@ -22,6 +22,8 @@ interface HistoryPanelProps {
   /** «Переименовать» есть не у всех разделов: название разбора — имя файла. */
   onRename?: (dialog: Dialog) => void;
   onExport: (dialog: Dialog) => void;
+  /** «Перенести в новый диалог…» (0.8); нет — функция памяти диалога выключена. */
+  onTransfer?: (dialog: Dialog) => void;
   onRemove: (dialog: Dialog) => void;
   onShowMore: () => void;
   onRetry: () => void;
@@ -33,7 +35,7 @@ function rowClass({ isActive }: { isActive: boolean }): string {
 
 /** Панель раздела — история чатов по дате последнего сообщения (концепция §5.5). */
 export function HistoryPanel(props: HistoryPanelProps) {
-  const { history, basePath, newLabel, onNewChat, onRename, onExport, onRemove, onShowMore, onRetry } = props;
+  const { history, basePath, newLabel, onNewChat, onRename, onExport, onTransfer, onRemove, onShowMore, onRetry } = props;
   const now = new Date();
   const groups = GROUPS.map((group) => ({
     group,
@@ -78,6 +80,9 @@ export function HistoryPanel(props: HistoryPanelProps) {
                               <Kebab aria-label={`${texts.users.actions}: ${title}`}>
                                 {onRename && <MenuItem onClick={() => onRename(dialog)}>{t.menu.rename}</MenuItem>}
                                 <MenuItem onClick={() => onExport(dialog)}>{t.menu.exportDocx}</MenuItem>
+                                {onTransfer && (
+                                  <MenuItem onClick={() => onTransfer(dialog)}>{texts.memory.transfer.menu}</MenuItem>
+                                )}
                                 <MenuItem onClick={() => onRemove(dialog)}>{t.menu.remove}</MenuItem>
                               </Kebab>
                             </Hint>

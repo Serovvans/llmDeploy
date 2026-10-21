@@ -21,7 +21,9 @@ async def test_create_and_read_dialog(portal: Portal) -> None:
         "created_at": "2026-10-05T09:00:00Z",
         "updated_at": "2026-10-05T09:00:00Z",
     }
-    assert (await client.get(f"/api/dialogs/{dialog['id']}")).json() == dialog
+    # С 0.8 только `GET /api/dialogs/{id}` отдаёт пересказ и перенесённое (§5.1).
+    read = (await client.get(f"/api/dialogs/{dialog['id']}")).json()
+    assert read == {**dialog, "summary": None, "carried": None}
 
 
 async def test_dialog_kinds_that_can_be_created(portal: Portal) -> None:

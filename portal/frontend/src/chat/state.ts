@@ -1,6 +1,16 @@
 /** Состояние чата: история, сообщения диалогов, идущие ответы и черновики панели запроса. Чистые функции. */
 import type { StreamEvent } from '../api/stream';
-import type { Attachment, Dialog, DialogKind, MemoryMode, Message, Source, SqlRun } from '../api/types';
+import type {
+  Attachment,
+  Dialog,
+  DialogCarried,
+  DialogKind,
+  DialogSummary,
+  MemoryMode,
+  Message,
+  Source,
+  SqlRun,
+} from '../api/types';
 import type { MediaFailure } from './files';
 import { footnoteNumbers } from './footnotes';
 
@@ -39,6 +49,12 @@ export interface DialogView {
   messages: ChatMessage[];
   olderCursor: string | null;
   generation: Generation | null;
+  /**
+   * Пересказ и перенесённое из `GET /api/dialogs/{id}` (контракт §5.1); `null` — их нет. Ленте и панели они
+   * нужны и при выключенной функции: это содержимое диалога (концепция §4.9, Д-36).
+   */
+  summary: DialogSummary | null;
+  carried: DialogCarried | null;
 }
 
 export interface DraftAttachment {
@@ -94,7 +110,14 @@ export const INITIAL_STATE: ChatState = {
   drafts: {},
 };
 
-const EMPTY_VIEW: DialogView = { status: 'ready', messages: [], olderCursor: null, generation: null };
+const EMPTY_VIEW: DialogView = {
+  status: 'ready',
+  messages: [],
+  olderCursor: null,
+  generation: null,
+  summary: null,
+  carried: null,
+};
 
 export type ChatAction =
   | { type: 'historyLoading'; kind: DialogKind }
@@ -105,7 +128,15 @@ export type ChatAction =
   | { type: 'dialogRemoved'; id: string }
   | { type: 'dialogUnlisted'; id: string }
   | { type: 'messagesLoading'; id: string }
-  | { type: 'messagesLoaded'; id: string; items: Message[]; nextCursor: string | null; older: boolean }
+  | {
+      type: 'messagesLoaded';
+      id: string;
+      items: Message[];
+      nextCursor: string | null;
+      older: boolean;
+      /** Диалог из `GET /api/dialogs/{id}` при открытии: из него — пересказ и перенесённое. */
+      dialog?: Dialog | null;
+    }
   | { type: 'messagesFailed'; id: string; notFound: boolean }
   | {
       type: 'generationStarted';
@@ -119,6 +150,8 @@ export type ChatAction =
   | { type: 'generationRejected'; id: string; messages: ChatMessage[] }
   /** Режим пары сменён (или возвращён после отказа): у вопроса `questionId` и его ответа (контракт §5.10.1). */
   | { type: 'memoryModeChanged'; id: string; questionId: string; mode: MemoryMode }
+  /** Пересказ применён, изменён (`summary`) или сжатие отменено (`null`), контракт §5.10.6. */
+  | { type: 'summaryChanged'; id: string; summary: DialogSummary | null }
   | { type: 'draftUpdated'; key: string; update: (draft: Draft) => Draft }
   | { type: 'draftMoved'; from: string; to: string };
 
@@ -351,7 +384,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'messagesLoading':
       return withView(state, action.id, (view) => ({ ...view, status: view.messages.length ? view.status : 'loading' }));
     case 'messagesLoaded':
-      return withView(state, action.id, (view) => {
+      return withView(state, action.id, (current) => {
+        const dialog = action.dialog;
+        const view = dialog ? { ...current, summary: dialog.summary ?? null, carried: dialog.carried ?? null } : current;
         const page = [...action.items].reverse();
         if (action.older) {
           return { ...view, status: 'ready', messages: [...page, ...view.messages], olderCursor: action.nextCursor };
@@ -445,6 +480,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         );
         return { ...view, messages };
       });
+    case 'summaryChanged':
+      return withView(state, action.id, (view) => ({ ...view, summary: action.summary }));
     case 'draftUpdated':
       return {
         ...state,

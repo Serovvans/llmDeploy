@@ -20,6 +20,13 @@ export type StreamEvent =
   | { type: 'done'; status: 'complete' | 'length_limit' }
   | { type: 'error'; code: string; message: string; details?: { page: number; pages_total: number } };
 
+/** События потока черновика пересказа (контракт §6.5): `start` → `delta`* → `done` | `error`. */
+export type DraftEvent =
+  | { type: 'start'; until_message_id: string | null; messages: number; dropped_messages: number }
+  | { type: 'delta'; text: string }
+  | { type: 'done'; truncated: boolean }
+  | { type: 'error'; code: string; message: string };
+
 const KNOWN_EVENTS = new Set<string>([
   'start',
   'sql_question_check',
@@ -38,12 +45,12 @@ const KNOWN_EVENTS = new Set<string>([
   'error',
 ]);
 
-function toEvent(name: string, data: string): StreamEvent | null {
+function toEvent<E>(name: string, data: string): E | null {
   if (!KNOWN_EVENTS.has(name)) {
     return null;
   }
   try {
-    return { ...(JSON.parse(data) as object), type: name } as StreamEvent;
+    return { ...(JSON.parse(data) as object), type: name } as E;
   } catch {
     // Событие с неразборчивыми данными пропускается так же, как неизвестное.
     return null;
@@ -54,7 +61,9 @@ function toEvent(name: string, data: string): StreamEvent | null {
  * Читает поток и отдаёт события по мере поступления. Строки-комментарии (`: keep-alive`)
  * ничего не дают. Событие, не закрытое пустой строкой до конца потока, не отдаётся.
  */
-export async function* readEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamEvent> {
+export async function* readEvents<E extends { type: string } = StreamEvent>(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<E> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -73,7 +82,7 @@ export async function* readEvents(body: ReadableStream<Uint8Array>): AsyncGenera
         const line = buffer.slice(0, lineEnd).replace(/\r$/, '');
         buffer = buffer.slice(lineEnd + 1);
         if (line === '') {
-          const event = name ? toEvent(name, data) : null;
+          const event = name ? toEvent<E>(name, data) : null;
           name = '';
           data = '';
           if (event) {

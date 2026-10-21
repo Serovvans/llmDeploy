@@ -90,6 +90,12 @@
   min-height: 0;
 }
 
+/* Нет ни сведений, ни пересказа (новый диалог) — нет и лишней линии над описью. */
+.blocks:not(:empty) {
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--p-line);
+}
+
 .pairs {
   display: flex;
   flex-direction: column;
@@ -208,4 +214,12 @@
 
 .failed {
   padding: 8px 16px;
+}
+
+/* Подвал (0.8) закреплён внизу: «Перенести в новый диалог…» на всю ширину. */
+.footer {
+  flex: none;
+  margin-top: auto;
+  padding: 12px 16px;
+  border-top: 1px solid var(--p-line);
 }

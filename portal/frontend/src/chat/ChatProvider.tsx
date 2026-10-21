@@ -8,6 +8,7 @@ import type {
   Attachment,
   Dialog,
   DialogKind,
+  DialogSummary,
   KbScope,
   MemoryMode,
   Message,
@@ -104,6 +105,8 @@ interface ChatApi {
   loadOlderUntil: (id: string, messageId: string) => Promise<boolean>;
   /** Режим пары в ленте — сразу, до ответа сервера; при отказе экран возвращает прежний (концепция §4.9). */
   showMemoryMode: (id: string, questionId: string, mode: MemoryMode) => void;
+  /** Пересказ применён, изменён или сжатие отменено (`null`): граница в ленте и блок в панели (контракт §5.10.6). */
+  showSummary: (id: string, summary: DialogSummary | null) => void;
   setText: (key: string, text: string) => void;
   setNotice: (key: string, notice: string | null) => void;
   addFiles: (key: string, files: File[], onCreated: OnCreated) => void;
@@ -252,12 +255,12 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       }
       const known = kindOf(id);
       dispatch({ type: 'messagesLoading', id });
-      // Диалога может не быть в загруженной части истории: вид и название для заголовка берутся отдельно.
-      // Не удалось узнать (кроме «не найден») — лента показывается без названия.
-      const dialog =
-        known === null
-          ? api.getDialog(id).catch((error: unknown) => (isApiError(error, 'not_found') ? Promise.reject(error) : null))
-          : null;
+      // Диалог читается всегда: пересказ и перенесённое есть только в нём (контракт §5.1). Его может не быть
+      // и в загруженной части истории — тогда отсюда же вид и название для заголовка.
+      // Не удалось узнать (кроме «не найден») — лента показывается без названия, пересказа и перенесённого.
+      const dialog = api
+        .getDialog(id)
+        .catch((error: unknown) => (isApiError(error, 'not_found') ? Promise.reject(error) : null));
       Promise.all([dialog, api.listMessages(id, null)]).then(
         ([found, page]) => {
           // Диалог другого раздела по адресу этого — «не найден», а не чужая лента с панелью раздела.
@@ -265,9 +268,16 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
             dispatch({ type: 'messagesFailed', id, notFound: true });
             return;
           }
-          dispatch({ type: 'messagesLoaded', id, items: page.items, nextCursor: page.next_cursor, older: false });
-          // Диалог без сообщений в истории не показывается.
-          if (found && page.items.length > 0) {
+          dispatch({
+            type: 'messagesLoaded',
+            id,
+            items: page.items,
+            nextCursor: page.next_cursor,
+            older: false,
+            dialog: found,
+          });
+          // Диалог без сообщений в истории не показывается, кроме созданного переносом (контракт §5.2).
+          if (known === null && found && (page.items.length > 0 || found.carried)) {
             dispatch({ type: 'dialogUpserted', dialog: found, toTop: false });
           }
         },
@@ -312,6 +322,11 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
 
   const showMemoryMode = useCallback(
     (id: string, questionId: string, mode: MemoryMode) => dispatch({ type: 'memoryModeChanged', id, questionId, mode }),
+    [],
+  );
+
+  const showSummary = useCallback(
+    (id: string, summary: DialogSummary | null) => dispatch({ type: 'summaryChanged', id, summary }),
     [],
   );
 
@@ -779,6 +794,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       loadOlder,
       loadOlderUntil,
       showMemoryMode,
+      showSummary,
       setText,
       setNotice,
       addFiles,
@@ -806,6 +822,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       loadOlder,
       loadOlderUntil,
       showMemoryMode,
+      showSummary,
       setText,
       setNotice,
       addFiles,

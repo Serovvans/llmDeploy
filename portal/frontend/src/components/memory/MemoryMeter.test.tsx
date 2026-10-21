@@ -17,6 +17,8 @@ const memory: DialogMemory = {
   retry: () => undefined,
   setMode: () => undefined,
   markTruncated: () => undefined,
+  refresh: () => undefined,
+  disable: () => undefined,
 };
 const hint = texts.memory.percentHint(0);
 

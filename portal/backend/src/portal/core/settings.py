@@ -555,9 +555,20 @@ class CogisSettings(_Section):
 
 
 class MemorySettings(_Section):
-    """«Память диалога» (docs/portal-api.md §5.10, §13.6)."""
+    """«Память диалога» (docs/portal-api.md §5.10, §13.6).
+
+    `keep_recent_pairs` — сколько последних пар не в режиме «Не учитывать» сжатие оставляет
+    как есть; `max_chars` — предел длины пересказа и перенесённого; `summary_max_tokens` —
+    предел ответа модели на запрос пересказа; `head_rules_prompt` дописывается в системное
+    сообщение, когда в запросе есть пересказ или перенесённое.
+    """
 
     enabled: bool
+    keep_recent_pairs: int = Field(ge=1)
+    max_chars: int = Field(ge=1)
+    summary_max_tokens: int = Field(ge=1)
+    summary_system_prompt: str = Field(min_length=1)
+    head_rules_prompt: str = Field(min_length=1)
 
 
 class MediaFfmpegSettings(_Section):
@@ -684,6 +695,19 @@ class Settings(_Section):
         if self.llm.image_max_side_px**2 > self.files.image_max_pixels:
             raise ValueError(
                 "llm.image_max_side_px в квадрате не должен превышать files.image_max_pixels"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_memory_fits_docparse(self) -> Self:
+        """Пересказ укладывается в половину резерва разбора под разговор (§13.6, А-84)."""
+        if (
+            self.memory.max_chars / self.llm.chars_per_token
+            > self.docparse.dialog_reserve_tokens / 2
+        ):
+            raise ValueError(
+                "memory.max_chars / llm.chars_per_token не должно превышать "
+                "docparse.dialog_reserve_tokens / 2"
             )
         return self
 

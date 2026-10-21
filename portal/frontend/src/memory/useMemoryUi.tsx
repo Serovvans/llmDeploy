@@ -1,18 +1,25 @@
 import { IconTextBulletChecklistRegular16 } from '@skbkontur/icons/IconTextBulletChecklistRegular16';
-import { Button, Hint } from '@skbkontur/react-ui';
+import { Button, Hint, SingleToast } from '@skbkontur/react-ui';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
-import type { DialogKind, QuestionParams } from '../api/types';
+import { api, isApiError, NetworkError } from '../api/client';
+import type { Dialog, DialogKind, DialogSummary, QuestionParams } from '../api/types';
 import { useChat } from '../chat/ChatProvider';
 import type { DialogView } from '../chat/state';
+import { ConfirmModal } from '../components/ConfirmModal';
+import { CompressModal } from '../components/memory/CompressModal';
+import { dialogPath } from '../components/memory/MemoryBlocks';
 import { MemoryMeter } from '../components/memory/MemoryMeter';
 import { MemoryPanel, type PanelFocus } from '../components/memory/MemoryPanel';
+import { TransferModal, type TransferSource } from '../components/memory/TransferModal';
 import { Notice } from '../components/Notice';
 import { useSession } from '../session/SessionContext';
-import { texts } from '../texts';
+import { errorText, texts } from '../texts';
+import type { DraftExit } from './draft';
 import styles from './MemoryToggle.module.css';
 import { readPanelOpen, storePanelOpen } from './panelPreference';
-import { useDialogMemory } from './useDialogMemory';
+import { defaultMemoryQuery, memoryQuery, useDialogMemory } from './useDialogMemory';
 
 const t = texts.memory;
 /** Сколько держится отметка пары в ленте после перехода к ней из описи (концепция §4.9). */
@@ -28,11 +35,15 @@ export interface FeedMemory {
   reveal: { questionId: string; n: number } | null;
   /** Лента подгружает ранние сообщения до нужной пары. */
   revealing: boolean;
+  /** «Продолжить отсюда» под ответом (0.8); `null` — функция выключена. */
+  onContinue: ((answerId: string) => void) | null;
 }
 
 interface Options {
   kind: DialogKind;
   dialogId: string | null;
+  /** Название открытого диалога для окна переноса; `null` — названия нет. */
+  title: string | null;
   view: DialogView | undefined;
   /** На экране есть лента с панелью запроса (у разбора — экран результата); иначе панели и кнопки нет. */
   available: boolean;
@@ -55,7 +66,20 @@ export interface MemoryUi {
   /** Заметка о длинном диалоге по уровню памяти; `null` — заметки нет. Только при включённой функции. */
   longDialog: React.ReactNode;
   feed: FeedMemory;
+  /** Окна сжатия, отмены сжатия и переноса (0.8). */
+  dialogs: React.ReactNode;
+  /**
+   * «Перенести в новый диалог…» из `Kebab` строки заголовка или истории; `opener` — куда вернуть фокус
+   * после закрытия окна (пункт меню к этому времени исчезнет). `null` — функция выключена.
+   */
+  transfer: ((dialog: Dialog, opener: string) => void) | null;
 }
+
+/** Открытое окно памяти: сжатие и правка пересказа, отмена сжатия, перенос. */
+type MemoryModal =
+  | { type: 'compress' | 'edit' }
+  | { type: 'cancel'; pending: boolean; error: string | null }
+  | { type: 'transfer'; source: TransferSource; until: string | null };
 
 /**
  * «Память диалога» на экране диалога (концепция §3.2, §4.9): кнопка в строке заголовка, индикатор у
@@ -64,6 +88,7 @@ export interface MemoryUi {
 export function useMemoryUi({
   kind,
   dialogId,
+  title,
   view,
   available,
   params,
@@ -73,7 +98,8 @@ export function useMemoryUi({
   onSchemaMissing,
 }: Options): MemoryUi {
   const { config } = useSession();
-  const { loadOlderUntil } = useChat();
+  const { loadOlderUntil, showSummary, addDialog, forgetDialog } = useChat();
+  const navigate = useNavigate();
   const panelId = useId();
   const ready = dialogId === null || view?.status === 'ready';
   const memory = useDialogMemory({
@@ -199,6 +225,140 @@ export function useMemoryUi({
     });
   };
 
+  // Окна сжатия и переноса (0.8): фокус после закрытия — туда, откуда окно открыли, иначе в поле ввода (§9).
+  const [modal, setModal] = useState<MemoryModal | null>(null);
+  const modalOpener = useRef<Element | string | null>(null);
+  const openModal = (next: MemoryModal, from: Element | string | null = document.activeElement) => {
+    modalOpener.current = from;
+    setModal(next);
+  };
+  const closeModal = (focusBack = true) => {
+    setModal(null);
+    const from = modalOpener.current;
+    modalOpener.current = null;
+    if (!focusBack) {
+      return;
+    }
+    // Окно уже закрыто, когда фокус переходит: до этого его удерживает само окно.
+    window.setTimeout(() => {
+      const element = typeof from === 'string' ? document.querySelector(from) : from;
+      const target = element instanceof HTMLElement && element.isConnected ? element : null;
+      (target ?? document.querySelector<HTMLElement>('[data-composer] textarea'))?.focus();
+    });
+  };
+  const keepRecent = config?.memory.keep_recent_pairs ?? 0;
+  const maxChars = config?.memory.max_chars ?? 0;
+  const { refresh, disable } = memory;
+
+  /** Окно ушло по отказу: диалог удалён (здесь — или в другой вкладке), функция выключена, сессия кончилась. */
+  const exitModal = (exit: DraftExit, source: { id: string; kind: DialogKind }) => {
+    closeModal(exit !== 'session');
+    if (exit === 'deleted') {
+      forgetDialog(source.id);
+      SingleToast.push(texts.dialogs[source.kind].removedElsewhere);
+    } else if (exit === 'disabled') {
+      disable();
+    }
+  };
+
+  const openTransfer = (source: TransferSource, until: string | null, from?: string) =>
+    openModal({ type: 'transfer', source, until }, from);
+
+  const summary = view?.summary ?? null;
+  const cancelSummary = () => {
+    if (!dialogId || modal?.type !== 'cancel') {
+      return;
+    }
+    setModal({ type: 'cancel', pending: true, error: null });
+    api.deleteSummary(dialogId).then(
+      () => {
+        showSummary(dialogId, null);
+        SingleToast.push(t.summary.cancelled);
+        closeModal();
+        refresh('summary');
+      },
+      (error: unknown) => {
+        if (isApiError(error, 'not_found')) {
+          exitModal('deleted', { id: dialogId, kind });
+        } else if (isApiError(error, 'feature_disabled')) {
+          exitModal('disabled', { id: dialogId, kind });
+        } else if (isApiError(error, 'unauthenticated')) {
+          exitModal('session', { id: dialogId, kind });
+        } else {
+          const text = isApiError(error, 'generation_in_progress')
+            ? t.changeBusy
+            : error instanceof NetworkError
+              ? texts.common.noConnection
+              : errorText(error);
+          setModal({ type: 'cancel', pending: false, error: text });
+        }
+      },
+    );
+  };
+
+  let dialogs: React.ReactNode = null;
+  if (active && modal && config) {
+    const here = dialogId ? { id: dialogId, kind } : null;
+    if ((modal.type === 'compress' || modal.type === 'edit') && here) {
+      dialogs = (
+        <CompressModal
+          dialogId={here.id}
+          kind={kind}
+          mode={modal.type}
+          summary={summary}
+          compressPairs={memory.memory?.compress_pairs ?? null}
+          keepRecent={keepRecent}
+          maxChars={maxChars}
+          onSaved={(saved: DialogSummary) => {
+            showSummary(here.id, saved);
+            SingleToast.push(modal.type === 'edit' ? t.summary.saved : t.summary.applied);
+            closeModal();
+            refresh('summary');
+          }}
+          onStale={() => refresh('stale')}
+          onExit={(exit) => exitModal(exit, here)}
+          onClose={() => closeModal()}
+        />
+      );
+    } else if (modal.type === 'cancel') {
+      dialogs = (
+        <ConfirmModal
+          title={t.summary.cancelTitle}
+          body={t.summary.cancelBody}
+          action={t.summary.cancel}
+          cancel={t.summary.keep}
+          pending={modal.pending}
+          error={modal.error}
+          onConfirm={cancelSummary}
+          onCancel={() => closeModal()}
+        />
+      );
+    } else if (modal.type === 'transfer') {
+      const { source } = modal;
+      dialogs = (
+        <TransferModal
+          source={source}
+          until={modal.until}
+          query={source.id === dialogId ? memoryQuery(params) : defaultMemoryQuery(source.kind, config)}
+          loaded={source.id === dialogId ? (view?.messages ?? []) : []}
+          keepRecent={keepRecent}
+          maxChars={maxChars}
+          onDone={(created) => {
+            // Новый диалог сразу в истории, под названием по виду, пока модель не предложит своё (Д-39).
+            addDialog(created);
+            closeModal(false);
+            navigate(dialogPath(created.kind, created.id));
+          }}
+          onExit={(exit) => exitModal(exit, source)}
+          onClose={() => closeModal()}
+        />
+      );
+    }
+  }
+  const transfer = active
+    ? (target: Dialog, from: string) => openTransfer({ id: target.id, kind: target.kind, title: target.title }, null, from)
+    : null;
+
   if (!active || !available) {
     return {
       active,
@@ -206,7 +366,9 @@ export function useMemoryUi({
       meter: null,
       panel: null,
       longDialog: null,
-      feed: { onOpenPair: null, marked: null, reveal: null, revealing: false },
+      feed: { onOpenPair: null, marked: null, reveal: null, revealing: false, onContinue: null },
+      dialogs,
+      transfer,
     };
   }
 
@@ -240,6 +402,10 @@ export function useMemoryUi({
     longText = t.longDialog[group].dropped;
   }
   const openAction = { label: t.openPanel, onClick: () => show('heading') };
+  // Есть что сжать (0.8) — заметка предлагает сжатие вместо панели (§4.9).
+  const compressAction = { label: t.summary.compress, disabled: busy, onClick: () => openModal({ type: 'compress' }) };
+  const firstAction = memory.memory?.compress_pairs ? compressAction : openAction;
+  const current: TransferSource | null = dialogId ? { id: dialogId, kind, title } : null;
 
   return {
     active,
@@ -254,10 +420,20 @@ export function useMemoryUi({
         onClose={hide}
         onHover={setHovered}
         onReveal={revealPair}
+        summary={summary}
+        carried={view?.carried ?? null}
+        keepRecent={keepRecent}
+        onCompress={() => openModal({ type: 'compress' })}
+        onEditSummary={() => openModal({ type: 'edit' })}
+        onCancelSummary={() => openModal({ type: 'cancel', pending: false, error: null })}
+        onTransfer={current ? () => openTransfer(current, null) : null}
       />
     ) : null,
     longDialog: longText ? (
-      <Notice kind="info" action={onNewDialog ? [openAction, { label: texts.dialogs[kind].newLabel, onClick: onNewDialog }] : openAction}>
+      <Notice
+        kind="info"
+        action={onNewDialog ? [firstAction, { label: texts.dialogs[kind].newLabel, onClick: onNewDialog }] : firstAction}
+      >
         {longText}
       </Notice>
     ) : null,
@@ -266,6 +442,9 @@ export function useMemoryUi({
       marked: hovered ?? flash,
       reveal,
       revealing,
+      onContinue: current ? (answerId) => openTransfer(current, answerId) : null,
     },
+    dialogs,
+    transfer,
   };
 }

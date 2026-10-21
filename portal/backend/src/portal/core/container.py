@@ -20,6 +20,7 @@ from portal.core.db import create_engine
 from portal.core.ports import Clock, SessionAuthenticator
 from portal.core.settings import Settings
 from portal.dialogs.domain import DialogKind
+from portal.dialogs.drafts import SummaryDrafts
 from portal.dialogs.export import DocxExporter
 from portal.dialogs.files import AttachmentFiles
 from portal.dialogs.generation import GenerationService
@@ -93,6 +94,7 @@ class Container(AdminContainer):
     http_client: httpx.AsyncClient
     dialogs: DialogService
     generation: GenerationService
+    drafts: SummaryDrafts
     sql_schemas: SqlSchemaService
     sql_checker: SqlSyntaxChecker
     docparse: DocparseService
@@ -294,6 +296,7 @@ def build_container(
             settings.chat,
             settings.dialogs.empty_ttl_hours,
             text_max_chars,
+            settings.memory.max_chars,
             generation.is_forming,
             docparse.is_forming,
             DocxExporter(),
@@ -302,6 +305,15 @@ def build_container(
         sql_checker=sql_checker,
         docparse=docparse,
         generation=generation,
+        drafts=SummaryDrafts(
+            dialog_uow,
+            model,
+            estimator,
+            auth,
+            generation.wait_idle,
+            settings,
+            max_model_len,
+        ),
         qdrant=qdrant,
         kb=KbService(
             kb_uow,

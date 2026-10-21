@@ -125,6 +125,7 @@ async def make_portal(
 
 async def close_portal(portal: Portal) -> None:
     await portal.container.generation.shutdown()
+    await portal.container.drafts.shutdown()
     await portal.container.docparse.shutdown()
     portal.container.sql_checker.close()
     portal.container.hash_executor.shutdown()

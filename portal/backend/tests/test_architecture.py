@@ -29,6 +29,8 @@ INNER_MODULES = [
     "dialogs/footnotes.py",
     "dialogs/markdown.py",
     "dialogs/watch.py",
+    "dialogs/memory.py",
+    "dialogs/drafts.py",
     "tools/errors.py",
     "tools/sql_check.py",
     "tools/ports.py",

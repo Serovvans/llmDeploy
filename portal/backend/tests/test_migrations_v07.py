@@ -1,6 +1,6 @@
 """Миграция `0008` на базе с данными версии 0.6 (docs/portal-api.md §9.22).
 
-Так обновляется работающий сервис: `portal migrate` проводит базу 0.6 до головы. Прежние
+Так обновляется работающий сервис: `portal migrate` проводит базу 0.6 до `0008`. Прежние
 диалоги всех видов остаются как были, все пары получают режим «Учитывать».
 """
 
@@ -53,7 +53,7 @@ def test_previous_release_data_survives_and_every_pair_is_considered(settings: S
 
     command.upgrade(config, "0007")
     asyncio.run(_run(target, _SEED, **ids))
-    command.upgrade(config, "head")
+    command.upgrade(config, "0008")
 
     def query(statement: str, **params: Any) -> list[Any]:
         return asyncio.run(_run(target, (statement,), **params))

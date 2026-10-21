@@ -9,7 +9,7 @@ import { texts } from '../texts';
 
 const t = texts.memory;
 const ID = 'd-1';
-const MEMORY_CONFIG = { ...CONFIG, memory: { enabled: true } };
+const MEMORY_CONFIG = { ...CONFIG, memory: { ...CONFIG.memory, enabled: true } };
 const START = ['start', { user_message_id: 'u-3', assistant_message_id: 'a-3' }] as [string, object];
 
 function dialog(kind: DialogKind = 'chat'): Dialog {
@@ -68,6 +68,7 @@ function pair(n: number, patch: Partial<MemoryPair> = {}): MemoryPair {
     memory_mode: 'full',
     tokens: 2400,
     dropped: false,
+    summarized: false,
     ...patch,
   };
 }
@@ -78,6 +79,7 @@ function estimate(patch: Partial<Memory> = {}): Memory {
     percent: 63,
     used_tokens: 18000,
     limit_tokens: 28500,
+    compress_pairs: null,
     pairs: [pair(1), pair(2, { question_preview: '', attachments: 1 })],
     ...patch,
   };
@@ -397,5 +399,154 @@ describe('память диалога в инструментах', () => {
     await screen.findByText(texts.docparse.pick);
     expect(screen.queryByRole('complementary', { name: t.title })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: t.title })).not.toBeInTheDocument();
+  });
+});
+
+describe('память диалога 0.8: сжатие, перенос, «Продолжить отсюда»', () => {
+  /** Три пары: сжать можно первую, две последние не сжимаются (`keep_recent_pairs` = 2). */
+  const THREE = [
+    ...MESSAGES,
+    message({ id: 'u-3', role: 'user', content: 'А арендная плата?', created_at: '2026-10-05T09:04:00Z' }),
+    message({ id: 'a-3', content: '120 000 руб. в год.', created_at: '2026-10-05T09:05:00Z' }),
+  ];
+  const COMPRESSIBLE = () => ok(estimate({ compress_pairs: { from: 1, to: 1 }, pairs: [pair(1), pair(2), pair(3)] }));
+  const SUMMARY = { text: 'Обсуждали срок аренды: 49 лет.', until_message_id: 'a-1', messages: 2 };
+  const draftRoute = `POST /api/dialogs/${ID}/memory/draft`;
+
+  it.each(['light', 'dark'] as const)(
+    'сжатие: черновик потоком → «Применить» с границей из start → тост, граница в ленте, новая оценка (тема %s)',
+    async (theme) => {
+      window.localStorage.setItem('portal.theme', theme);
+      const live = liveSse();
+      const { server, user } = setup(COMPRESSIBLE, { messages: THREE });
+      server.on(draftRoute, () => live.response);
+      server.on(`PUT /api/dialogs/${ID}/memory/summary`, (body) => ok({ ...(body as object), messages: 2 }));
+
+      await user.click(await within(await screen.findByRole('complementary', { name: t.title })).findByRole('button', { name: t.summary.compress }));
+      const modal = await screen.findByRole('dialog');
+      expect(document.documentElement.dataset.theme).toBe(theme);
+      expect(server.callsTo(draftRoute)[0]?.body).toEqual({ purpose: 'compress' });
+      live.push(['start', { until_message_id: 'a-1', messages: 2, dropped_messages: 0 }], ['delta', { text: 'Обсуждали ' }]);
+      expect(await within(modal).findByText(t.draft.streaming)).toBeInTheDocument();
+      // Во время потока применить нельзя: сказано почему.
+      await user.click(within(modal).getByRole('button', { name: t.compress.apply }));
+      expect(await within(modal).findByText(t.draft.wait)).toBeInTheDocument();
+      expect(server.callsTo(`PUT /api/dialogs/${ID}/memory/summary`)).toHaveLength(0);
+
+      live.push(['delta', { text: 'срок аренды: 49 лет.' }], ['done', { truncated: false }]);
+      live.close();
+      await waitFor(() => expect(within(modal).getByRole('textbox', { name: t.summary.title })).toHaveValue(SUMMARY.text));
+      expect(within(modal).getByRole('textbox', { name: t.summary.title })).not.toHaveAttribute('readonly');
+      const before = memoryQueries().length;
+      await user.click(within(modal).getByRole('button', { name: t.compress.apply }));
+
+      expect(await screen.findByText(t.summary.applied)).toBeInTheDocument();
+      expect(server.callsTo(`PUT /api/dialogs/${ID}/memory/summary`)[0]?.body).toEqual({ text: SUMMARY.text, until_message_id: 'a-1' });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(screen.getByText(t.summary.boundary(2), { exact: false })).toBeInTheDocument();
+      await waitFor(() => expect(memoryQueries().length).toBe(before + 1));
+    },
+  );
+
+  it('«Остановить» оставляет полученный текст для правки; 429 — заметка с «Повторить»', async () => {
+    const live = liveSse();
+    const { server, user } = setup(COMPRESSIBLE, { messages: THREE });
+    server.on(draftRoute, () => fail(429, 'draft_in_progress'));
+
+    await user.click(await within(await screen.findByRole('complementary', { name: t.title })).findByRole('button', { name: t.summary.compress }));
+    const modal = await screen.findByRole('dialog');
+    expect(await within(modal).findByText(t.draft.draftInProgress)).toBeInTheDocument();
+
+    server.on(draftRoute, () => live.response);
+    await user.click(within(modal).getByRole('button', { name: texts.common.retry }));
+    live.push(['start', { until_message_id: 'a-1', messages: 2, dropped_messages: 0 }], ['delta', { text: 'Обсуждали срок' }]);
+    await user.click(await within(modal).findByRole('button', { name: t.draft.stop }));
+    expect(await within(modal).findByText(t.draft.stopped)).toBeInTheDocument();
+    const field = within(modal).getByRole('textbox', { name: t.summary.title });
+    expect(field).toHaveValue('Обсуждали срок');
+    expect(field).not.toHaveAttribute('readonly');
+    expect(within(modal).queryByText(t.draft.draftInProgress)).not.toBeInTheDocument();
+  });
+
+  it('отмена сжатия: подтверждение → DELETE → граница уходит из ленты, тост', async () => {
+    const { server, user } = setup(
+      () => ok(estimate({ pairs: [pair(1, { summarized: true }), pair(2), pair(3)] })),
+      { messages: THREE },
+    );
+    server.on(`GET /api/dialogs/${ID}`, () => ok({ ...dialog(), summary: SUMMARY, carried: null }));
+    server.on(`DELETE /api/dialogs/${ID}/memory/summary`, () => ok());
+
+    expect(await screen.findByText(t.summary.boundary(2), { exact: false })).toBeInTheDocument();
+    const memory = await screen.findByRole('complementary', { name: t.title });
+    expect(within(memory).getByRole('button', { name: t.summary.collapsed(1, 1) })).toBeInTheDocument();
+    await user.click(within(memory).getByRole('button', { name: t.summary.cancel }));
+    const confirm = await screen.findByRole('dialog');
+    await user.click(within(confirm).getByRole('button', { name: t.summary.cancel }));
+
+    expect(await screen.findByText(t.summary.cancelled)).toBeInTheDocument();
+    expect(server.callsTo(`DELETE /api/dialogs/${ID}/memory/summary`)).toHaveLength(1);
+    expect(screen.queryByText(t.summary.boundary(2), { exact: false })).not.toBeInTheDocument();
+  });
+
+  it('перенос из меню диалога, «Один ответ дословно»: новый диалог с carried, переход и заметка о перенесённом', async () => {
+    const { server, user } = setup(COMPRESSIBLE, { messages: THREE });
+    const now = new Date().toISOString();
+    const created: Dialog = { id: 'd-2', kind: 'chat', title: null, created_at: now, updated_at: now };
+    server.on('POST /api/dialogs', () => ok(created, 201));
+    server.on('GET /api/dialogs/d-2', () =>
+      ok({ ...created, summary: null, carried: { text: '120 000 руб. в год.', source_dialog_id: ID, source_kind: 'chat', source_title: 'Аренда участка под ЛЭП' } }),
+    );
+    server.on('GET /api/dialogs/d-2/messages', () => ok({ items: [], next_cursor: null }));
+    server.on('GET /api/dialogs/d-2/memory', () => ok(estimate({ level: 'free', percent: 2, pairs: [] })));
+    await screen.findByRole('complementary', { name: t.title });
+
+    await user.click(within(screen.getByRole('main')).getAllByRole('button', { name: 'Действия: Аренда участка под ЛЭП' }).at(-1) as HTMLElement);
+    await user.click(await waitFor(() => menuItems().find((item) => item.textContent === t.transfer.menu) as HTMLElement));
+    const modal = await screen.findByRole('dialog');
+    expect(within(modal).getByText(t.transfer.notTransferred)).toBeInTheDocument();
+    await user.click(within(modal).getByText(t.transfer.verbatim));
+    // Дословно — последний ответ, без участия модели.
+    await waitFor(() => expect(within(modal).getByRole('textbox', { name: t.transfer.verbatim })).toHaveValue('120 000 руб. в год.'));
+    await user.click(within(modal).getByRole('button', { name: t.transfer.submit }));
+
+    expect(server.callsTo('POST /api/dialogs')[0]?.body).toEqual({
+      kind: 'chat',
+      carried: { text: '120 000 руб. в год.', source_dialog_id: ID },
+    });
+    expect(server.callsTo(draftRoute)).toHaveLength(0);
+    const notice = await screen.findByText(t.carried.notice, { exact: false });
+    expect(within(notice.closest('[role="status"]') as HTMLElement).getByRole('link', { name: 'Аренда участка под ЛЭП' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('«Продолжить отсюда» у ответа: окно без «Что взять», черновик до этого ответа', async () => {
+    const live = liveSse();
+    const { server, user } = setup(COMPRESSIBLE, { messages: THREE });
+    server.on(draftRoute, () => live.response);
+    await screen.findByRole('complementary', { name: t.title });
+
+    const actions = await screen.findAllByRole('button', { name: t.transfer.continue });
+    expect(actions).toHaveLength(3);
+    await user.click(actions[1] as HTMLElement);
+    const modal = await screen.findByRole('dialog');
+    expect(within(modal).getByText(t.transfer.continueTitle)).toBeInTheDocument();
+    expect(within(modal).queryByText(t.transfer.what)).not.toBeInTheDocument();
+    await user.click(within(modal).getByRole('button', { name: t.transfer.prepare }));
+    expect(server.callsTo(draftRoute)[0]?.body).toEqual({ purpose: 'transfer', until_message_id: 'a-2' });
+  });
+
+  it('функция выключена: «Продолжить отсюда» и переноса нет; граница пересказа и заметка о перенесённом остаются', async () => {
+    const { server, user } = setup(() => ok(estimate()), { messages: THREE });
+    server.on('GET /api/config', () => ok(CONFIG));
+    server.on(`GET /api/dialogs/${ID}`, () =>
+      ok({ ...dialog(), summary: SUMMARY, carried: { text: 'Сведения', source_dialog_id: null, source_kind: null, source_title: null } }),
+    );
+
+    expect(await screen.findByText(t.summary.boundary(2), { exact: false })).toBeInTheDocument();
+    expect(screen.getByText(t.carried.notice, { exact: false })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: t.transfer.continue })).not.toBeInTheDocument();
+    await user.click(within(screen.getByRole('main')).getAllByRole('button', { name: 'Действия: Аренда участка под ЛЭП' }).at(-1) as HTMLElement);
+    await waitFor(() => expect(menuItems().map((item) => item.textContent)).toContain(texts.chat.menu.rename));
+    expect(menuItems().map((item) => item.textContent)).not.toContain(t.transfer.menu);
   });
 });

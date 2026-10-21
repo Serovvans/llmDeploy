@@ -214,7 +214,7 @@ async def test_config_is_available_on_any_login_step(portal: Portal) -> None:
         "test_run": {"enabled": False, "dialect": "postgres"},
     }
     # «Память диалога» по умолчанию включена; в 0.7 у раздела только флаг (§4).
-    assert config["memory"] == {"enabled": True}
+    assert config["memory"] == {"enabled": True, "keep_recent_pairs": 2, "max_chars": 8000}
 
 
 async def test_oversized_body_is_refused_before_session_check(portal: Portal) -> None:

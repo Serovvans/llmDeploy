@@ -1,0 +1,61 @@
+/* Окна сжатия и переноса (концепция §4.9): `Modal` библиотеки, свои только отступы и строки. */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.intro,
+.muted,
+.optionNote,
+.label {
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.muted,
+.optionNote {
+  color: var(--p-text-muted);
+}
+
+/* «Куда» и «Что взять»: подпись слева, выбор справа. */
+.row {
+  display: grid;
+  /* minmax(0, …): длинный пункт выбора ответа не раздвигает окно. */
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.label {
+  padding-top: 2px;
+  font-weight: 600;
+}
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Пояснение и выбор ответа — под подписью варианта, на уровне её текста. */
+.optionNote,
+.answer {
+  padding-left: 26px;
+}
+
+.prepare {
+  align-self: flex-start;
+}
+
+.error {
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}

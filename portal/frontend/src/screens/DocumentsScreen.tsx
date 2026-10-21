@@ -343,6 +343,7 @@ export function DocumentsScreen() {
   const memory = useMemoryUi({
     kind: 'docparse',
     dialogId: id ?? null,
+    title: (id ? history.items.find((item) => item.id === id)?.title : null) ?? view?.result.file_name ?? null,
     view: dialogView,
     available: resultShown,
     params: {},
@@ -440,6 +441,11 @@ export function DocumentsScreen() {
         newLabel={labels.newLabel}
         onNewChat={() => navigate(BASE_PATH)}
         onExport={(target) => void exportDocx(target.id)}
+        onTransfer={
+          memory.transfer
+            ? (target) => memory.transfer?.(target, `[data-opener="history-${target.id}"] [tabindex="0"]`)
+            : undefined
+        }
         onRemove={(target) => startRemove(target, `history-${target.id}`)}
         onShowMore={() => loadHistory(true)}
         onRetry={() => loadHistory(false)}
@@ -452,6 +458,11 @@ export function DocumentsScreen() {
               <Hint text={texts.users.actions} pos="left">
                 <Kebab aria-label={`${texts.users.actions}: ${view.result.file_name}`}>
                   <MenuItem onClick={() => void exportDocx(dialog.id)}>{texts.chat.menu.exportDocx}</MenuItem>
+                  {memory.transfer && (
+                    <MenuItem onClick={() => memory.transfer?.(dialog, '[data-opener="header"] [tabindex="0"]')}>
+                      {texts.memory.transfer.menu}
+                    </MenuItem>
+                  )}
                   <MenuItem onClick={() => startRemove(dialog, 'header')}>{texts.chat.menu.remove}</MenuItem>
                 </Kebab>
               </Hint>
@@ -472,6 +483,7 @@ export function DocumentsScreen() {
           <div className={styles.body}>{body}</div>
         </MemoryLayout>
       </div>
+      {memory.dialogs}
       {removing && (
         <ConfirmModal
           title={labels.removeTitle(removing.title ?? labels.newLabel)}

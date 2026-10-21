@@ -30,6 +30,7 @@ from portal.core.events import EventChannel
 from portal.core.logging import code_locations
 from portal.core.ports import Clock, CurrentUser, SessionAuthenticator
 from portal.core.settings import DocparseTemplate, Settings
+from portal.dialogs.context import fields_block
 from portal.dialogs.domain import Dialog, Docparse, SummaryStatus
 from portal.dialogs.ports import DialogUnitOfWorkFactory
 from portal.dialogs.watch import INTERRUPTION_MESSAGES, Interruption, StreamWatch, watched_stream
@@ -58,7 +59,7 @@ from portal.llm.ports import (
     TokenEstimator,
 )
 from portal.tools import errors
-from portal.tools.dialog_tools import document_block, fields_block
+from portal.tools.dialog_tools import document_block
 
 logger = logging.getLogger(__name__)
 

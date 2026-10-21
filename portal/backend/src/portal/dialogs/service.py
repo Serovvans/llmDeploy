@@ -89,6 +89,50 @@ class MessageView:
 
 
 @dataclass(frozen=True)
+class SummaryView:
+    """Применённый пересказ — поле `summary` диалога (§5.1).
+
+    `until_message_id` — ответ, которым кончается пересказанная часть; `messages` — число
+    сообщений диалога до него включительно.
+    """
+
+    text: str
+    until_message_id: UUID
+    messages: int
+
+
+@dataclass(frozen=True)
+class CarriedView:
+    """Перенесённое — поле `carried` диалога (§5.1).
+
+    `source_dialog_id` и `source_kind` — `None`, когда исходного диалога владельца уже нет.
+    """
+
+    text: str
+    source_dialog_id: UUID | None
+    source_kind: DialogKind | None
+    source_title: str | None
+
+
+@dataclass(frozen=True)
+class CarriedInput:
+    """Перенесённое при создании диалога: текст и исходный диалог (§5.10.7)."""
+
+    text: str
+    source_dialog_id: UUID
+
+
+@dataclass(frozen=True)
+class DialogDetails:
+    """Диалог для `GET /api/dialogs/{id}`: разбор, пересказ и перенесённое (§5.1)."""
+
+    dialog: Dialog
+    docparse: Docparse | None
+    summary: SummaryView | None
+    carried: CarriedView | None
+
+
+@dataclass(frozen=True)
 class CursorPage[T]:
     """Часть списка «Показать ещё»; `next_cursor = None` — дальше ничего нет."""
 
@@ -149,6 +193,7 @@ class DialogService:
         settings: ChatSettings,
         empty_ttl_hours: int,
         text_max_chars: int,
+        carried_max_chars: int,
         is_forming: Callable[[UUID], bool],
         summary_forming: Callable[[UUID], bool],
         exporter: DialogExporter,
@@ -163,6 +208,7 @@ class DialogService:
         отвечает, формируется ли ответ прямо сейчас, `summary_forming` — пишется ли краткое
         содержание разбора. `document_executor` — потоки чтения документов: ждущие
         блокировку PDF стоят в их очереди и не занимают общий пул цикла событий.
+        `carried_max_chars` — предел длины перенесённого (`memory.max_chars`).
         """
         self._uow_factory = uow_factory
         self._storage = storage
@@ -175,6 +221,7 @@ class DialogService:
         self._settings = settings
         self._empty_ttl = timedelta(hours=empty_ttl_hours)
         self._text_max_chars = text_max_chars
+        self._carried_max_chars = carried_max_chars
         self._is_forming = is_forming
         self._summary_forming = summary_forming
         self._exporter = exporter
@@ -223,14 +270,59 @@ class DialogService:
         for owner, dialog_id in stale:
             await self._delete(owner, dialog_id, only_empty=True)
 
-    async def create(self, owner_id: UUID, kind: DialogKind) -> Dialog:
-        """Создать пустой диалог; заодно убрать брошенные пустые диалоги владельца."""
+    async def create(
+        self, owner_id: UUID, kind: DialogKind, carried: CarriedInput | None = None
+    ) -> Dialog:
+        """Создать пустой диалог; заодно убрать брошенные пустые диалоги владельца.
+
+        С `carried` — диалог с перенесённым (§5.10.7): источник — только свой диалог,
+        в диалог записываются текст, ссылка на источник и снимок его названия.
+        """
+        text = None
+        if carried is not None:
+            text = carried.text.strip()
+            if not text:
+                raise validation_error([field_error("carried.text", "required")])
+            if len(text) > self._carried_max_chars:
+                raise validation_error([field_error("carried.text", "too_long")])
         await self.purge_empty(owner_id)
         now = self._clock.now()
-        dialog = Dialog(uuid4(), owner_id, kind, None, now, now)
+        dialog = Dialog(uuid4(), owner_id, kind, None, now, now, carried_text=text)
         async with self._uow_factory() as uow:
+            if carried is not None:
+                source = await uow.dialogs.get_dialog(owner_id, carried.source_dialog_id)
+                if source is None:
+                    raise not_found()
+                dialog.carried_source_id = source.id
+                dialog.carried_source_title = source.title
             await uow.dialogs.add_dialog(dialog)
         return dialog
+
+    async def details(self, owner_id: UUID, dialog_id: UUID) -> DialogDetails:
+        """Диалог с разбором, пересказом и перенесённым для `GET /api/dialogs/{id}` (§5.1).
+
+        Вид источника переноса читается только из своего диалога (§9.15).
+        """
+        dialog, docparse = await self.get_with_docparse(owner_id, dialog_id)
+        summary = carried = None
+        async with self._uow_factory() as uow:
+            if dialog.summary is not None and dialog.summary_until_position is not None:
+                boundary = await uow.dialogs.summary_boundary(
+                    owner_id, dialog_id, dialog.summary_until_position
+                )
+                if boundary is not None:
+                    summary = SummaryView(dialog.summary, *boundary)
+            if dialog.carried_text is not None:
+                source = None
+                if dialog.carried_source_id is not None:
+                    source = await uow.dialogs.get_dialog(owner_id, dialog.carried_source_id)
+                carried = CarriedView(
+                    dialog.carried_text,
+                    None if source is None else source.id,
+                    None if source is None else source.kind,
+                    dialog.carried_source_title,
+                )
+        return DialogDetails(dialog, docparse, summary, carried)
 
     async def get(self, owner_id: UUID, dialog_id: UUID) -> Dialog:
         """Диалог владельца."""

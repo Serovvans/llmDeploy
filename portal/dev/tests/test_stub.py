@@ -535,3 +535,26 @@ async def test_rerank_refusals(client: httpx.AsyncClient) -> None:
     # Общая пометка отказа на реранкер не действует, а своя — не действует на ответ модели.
     assert (await client.post(RERANK, json={**body, "query": "[[stub:error]]"})).status_code == 200
     assert (await client.post(CHAT, json=_chat("[[stub:rerank-error]]"))).status_code == 200
+
+
+async def test_summary_protocol_streams_a_digest_and_obeys_marks(
+    client: httpx.AsyncClient,
+) -> None:
+    """Пересказ 0.8: хеш сообщения и число блоков диалога; пометки из диалога действуют."""
+    text = (
+        "Перескажи диалог.\n<пересказ>\nРаньше\n</пересказ>\n<диалог>\n"
+        "<пользователь>\nВопрос [[stub:reply]]x[[/stub:reply]]\n</пользователь>\n"
+        "<помощник>\nОтвет\n</помощник>\n<пользователь>\nЕщё\n</пользователь>\n</диалог>"
+    )
+    digest = hashlib.sha256(text.encode()).hexdigest()[:8]
+    chunks = [json.loads(line) for line in await _events(client, _chat(text)) if line != "[DONE]"]
+    streamed = "".join(
+        chunk["choices"][0]["delta"].get("content", "") for chunk in chunks if chunk["choices"]
+    )
+    assert streamed == f"Пересказ-заглушка {digest}: сообщений 3."
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+    cut = await _events(client, _chat(text.replace("Ещё", "Ещё [[stub:length]]")))
+    assert json.loads(cut[-2])["choices"][0]["finish_reason"] == "length"
+    busy = await client.post(CHAT, json=_chat(text.replace("Ещё", "[[stub:overloaded]]")))
+    assert busy.status_code == 429

@@ -1,10 +1,11 @@
 import { IconArrowADownRegular16 } from '@skbkontur/icons/IconArrowADownRegular16';
+import { IconArrowDCornerDownRightRegular16 } from '@skbkontur/icons/IconArrowDCornerDownRightRegular16';
 import { IconArrowRoundSyncForwardRegular16 } from '@skbkontur/icons/IconArrowRoundSyncForwardRegular16';
 import { IconCopyRegular16 } from '@skbkontur/icons/IconCopyRegular16';
 import { IconEyeOffRegular16 } from '@skbkontur/icons/IconEyeOffRegular16';
 import { IconNetDownloadRegular16 } from '@skbkontur/icons/IconNetDownloadRegular16';
 import { Button, Link, Loader, Modal, ScrollContainer, Spinner } from '@skbkontur/react-ui';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import { attachmentFileUrl } from '../../api/client';
 import type { Attachment, Source } from '../../api/types';
@@ -15,6 +16,7 @@ import { useCopy } from '../../hooks/useCopy';
 import { useFocusReturn } from '../../hooks/useFocusReturn';
 import type { FeedMemory } from '../../memory/useMemoryUi';
 import { texts } from '../../texts';
+import { SummaryBoundary } from '../memory/MemoryBlocks';
 import { Notice } from '../Notice';
 import { TitleHint } from '../TitleHint';
 import { AttachmentChip, isImage } from './AttachmentChip';
@@ -64,6 +66,8 @@ interface AnswerProps {
   dialogId: string;
   /** Своя строка раздела, когда поиск ничего не нашёл; без неё — тексты чата по тому, были ли у вопроса теги. */
   nothingFoundText?: string;
+  /** «Продолжить отсюда» (0.8): перенос разговора до этого ответа; нет — функция выключена. */
+  onContinue?: () => void;
 }
 
 type FigureSource = Source & { image_id: string };
@@ -236,6 +240,11 @@ function Answer(props: AnswerProps) {
               {t.exportAnswer}
             </Link>
           )}
+          {hasText && props.onContinue && (
+            <Link component="button" icon={<IconArrowDCornerDownRightRegular16 />} onClick={props.onContinue}>
+              {texts.memory.transfer.continue}
+            </Link>
+          )}
         </div>
       )}
     </div>
@@ -272,7 +281,7 @@ function MemoryMark({ text, label, icon, onOpen }: MemoryMarkProps) {
   );
 }
 
-const NO_MEMORY: FeedMemory = { onOpenPair: null, marked: null, reveal: null, revealing: false };
+const NO_MEMORY: FeedMemory = { onOpenPair: null, marked: null, reveal: null, revealing: false, onContinue: null };
 
 /** Что сообщает экранному чтению область состояния: фазы, а не текст ответа по словам (концепция §9). */
 function phaseText(view: DialogView): string {
@@ -384,9 +393,10 @@ export function MessageList(props: MessageListProps) {
             const pairId = message.role === 'user' ? message.id : previous?.role === 'user' ? previous.id : null;
             const marked = pairId !== null && pairId === memory.marked;
             const openPair = memory.onOpenPair && pairId ? () => memory.onOpenPair?.(pairId) : null;
+            const { onContinue } = memory;
             return (
+            <Fragment key={message.id}>
             <div
-              key={message.id}
               data-message-id={message.id}
               className={marked ? `${styles.row} ${styles.marked}` : styles.row}
             >
@@ -449,9 +459,13 @@ export function MessageList(props: MessageListProps) {
                   openingFragment={openingFragment}
                   dialogId={dialogId}
                   nothingFoundText={props.nothingFoundText}
+                  onContinue={onContinue ? () => onContinue(message.id) : undefined}
                 />
               )}
             </div>
+            {/* Граница пересказа — сразу после последнего пересказанного сообщения (0.8, §4.9). */}
+            {view.summary?.until_message_id === message.id && <SummaryBoundary summary={view.summary} />}
+            </Fragment>
             );
           })}
         </div>

@@ -112,6 +112,7 @@ def create_app(container: Container) -> FastAPI:
         await container.dialogs.align_recordings()
         yield
         await container.generation.shutdown()
+        await container.drafts.shutdown()
         await container.docparse.shutdown()
         container.sql_checker.close()
         container.hash_executor.shutdown()

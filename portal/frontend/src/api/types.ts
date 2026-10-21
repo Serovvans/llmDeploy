@@ -1,4 +1,4 @@
-/** Типы контракта `docs/portal-api.md` версии 0.17 (поля релиза 0.7). Имена полей — как в контракте. */
+/** Типы контракта `docs/portal-api.md` версии 0.17 (поля релизов 0.7 и 0.8). Имена полей — как в контракте. */
 
 export type LoginStep = 'second_factor' | 'password_change' | 'second_factor_setup' | 'ready';
 
@@ -106,8 +106,12 @@ export interface PortalConfig {
     /** Проверка на тестовых данных: при `enabled: false` переключателя нет; `dialect` — единственный проверяемый. */
     test_run: { enabled: boolean; dialect: string };
   };
-  /** Флаг «Память диалога» (контракт §4): при `false` нет индикатора и панели памяти. */
-  memory: { enabled: boolean };
+  /**
+   * «Память диалога» (контракт §4): при `enabled: false` нет индикатора, панели, сжатия и переноса.
+   * `keep_recent_pairs` — только для текстов «кроме последних двух…»: что войдёт в сжатие, отдаёт оценка;
+   * `max_chars` — предел длины пересказа и перенесённого.
+   */
+  memory: { enabled: boolean; keep_recent_pairs: number; max_chars: number };
 }
 
 export interface FieldError {
@@ -139,6 +143,25 @@ export interface Dialog {
   updated_at: string;
   /** Только у диалога вида `docparse` в ответе `GET /api/dialogs/{id}`. */
   docparse?: DocparseResult;
+  /** Только в ответе `GET /api/dialogs/{id}`: применённый пересказ; `null` — сжатия нет (контракт §5.1). */
+  summary?: DialogSummary | null;
+  /** Только в ответе `GET /api/dialogs/{id}`: перенесённое при создании; `null` — диалог создан не переносом. */
+  carried?: DialogCarried | null;
+}
+
+/** Применённый пересказ: `until_message_id` — ответ, которым кончается пересказанная часть; `messages` — сообщений до него включительно. */
+export interface DialogSummary {
+  text: string;
+  until_message_id: string;
+  messages: number;
+}
+
+/** Перенесённое (контракт §5.1): источник `null` — он удалён, ссылки нет; `source_title` `null` — у источника не было названия. */
+export interface DialogCarried {
+  text: string;
+  source_dialog_id: string | null;
+  source_kind: DialogKind | null;
+  source_title: string | null;
 }
 
 export type TranscriptionStatus = 'queued' | 'processing' | 'ready' | 'error';
@@ -281,6 +304,8 @@ export interface MemoryPair {
   tokens: number;
   /** Пара не поместится в следующий запрос при текущем выборе. */
   dropped: boolean;
+  /** Пара не дальше границы пересказа: модель получает вместо неё пересказ. */
+  summarized: boolean;
 }
 
 /** Оценка заполненности памяти диалога — `GET /api/dialogs/{id}/memory` (контракт §5.10.3). */
@@ -290,6 +315,8 @@ export interface Memory {
   percent: number;
   used_tokens: number;
   limit_tokens: number;
+  /** Номера пар, которые сожмёт следующее «Сжать раннюю часть»; `null` — сжимать нечего. Интерфейс сам не вычисляет. */
+  compress_pairs: { from: number; to: number } | null;
   pairs: MemoryPair[];
 }
 

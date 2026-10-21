@@ -99,7 +99,19 @@ class DialogRepository(Protocol):
         ...
 
     async def first_question(self, owner_id: UUID, dialog_id: UUID) -> str | None:
-        """Текст первого непустого вопроса диалога."""
+        """Текст первого непустого вопроса диалога, который уходит модели (§5.10)."""
+        ...
+
+    async def set_summary(
+        self, owner_id: UUID, dialog_id: UUID, summary: str | None, until_position: int | None
+    ) -> None:
+        """Записать пересказ и его границу; оба `None` — отменить сжатие (§5.10.6)."""
+        ...
+
+    async def summary_boundary(
+        self, owner_id: UUID, dialog_id: UUID, position: int
+    ) -> tuple[UUID, int] | None:
+        """Сообщение на позиции границы и число сообщений до неё включительно."""
         ...
 
     async def message_exists(self, owner_id: UUID, message_id: UUID) -> bool:

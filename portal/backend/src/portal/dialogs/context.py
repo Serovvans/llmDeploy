@@ -3,14 +3,16 @@
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
-from portal.dialogs.domain import Attachment, Message
+from portal.dialogs.domain import Attachment, Dialog, Message
 from portal.files.ports import MediaType
 from portal.llm.ports import MAX_IMAGES_PER_REQUEST, TokenEstimator
 
 _ATTACHMENT = "вложение"
+CARRIED_TAG = "перенесённое"
+SUMMARY_TAG = "пересказ"
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,12 @@ def data_block(tag: str, body: str, name: str | None = None) -> str:
     return f"<{opening}>\n{inert(body)}\n</{tag}>"
 
 
+def fields_block(fields: Sequence[Mapping[str, Any]]) -> str:
+    """Блок с таблицей извлечённых реквизитов разбора документа."""
+    lines = [f"{field['title']}: {field['value'] or '—'}" for field in fields]
+    return data_block("реквизиты", "\n".join(lines) or "(реквизиты не извлечены)")
+
+
 def _attachment_block(attachment: Attachment) -> str:
     scans = len(attachment.image_pages)
     if attachment.text_content:
@@ -77,11 +85,33 @@ def question_turn(content: str, attachments: Sequence[Attachment]) -> Turn:
     return Turn("user", "\n\n".join([*blocks, content]).strip(), images)
 
 
-def considered_history(messages: Sequence[Message]) -> list[tuple[Message, Message]]:
+def head_turn(dialog: Dialog) -> Turn | None:
+    """Головное сообщение: перенесённое и пересказ блоками данных; `None` — нет ни того, ни другого.
+
+    Пересказ и перенесённое — недоверенные данные: они идут только в сообщении роли
+    `user`, никогда в системном сообщении (§5.10.1).
+    """
+    blocks = [
+        data_block(tag, text)
+        for tag, text in ((CARRIED_TAG, dialog.carried_text), (SUMMARY_TAG, dialog.summary))
+        if text is not None
+    ]
+    return Turn("user", "\n\n".join(blocks)) if blocks else None
+
+
+def with_head_rules(system: str, head: Turn | None, rules: str) -> str:
+    """Системное сообщение с правилом о головном сообщении, если оно есть (§5.10.2)."""
+    return f"{system}\n\n{rules.strip()}" if head is not None else system
+
+
+def considered_history(
+    messages: Sequence[Message], summarized_until: int | None = None
+) -> list[tuple[Message, Message]]:
     """Сообщения учитываемой истории по порядку — каждое с вопросом своей пары (§5.10.1).
 
-    Пара — вопрос и следующий за ним ответ; режим пары хранится у вопроса. Обе строки пар
-    «Не учитывать» убраны; пустые ответы ещё есть — их пропускает тот, кто собирает текст.
+    Пара — вопрос и следующий за ним ответ; режим пары хранится у вопроса. Сообщения не
+    дальше границы пересказа `summarized_until` и обе строки пар «Не учитывать» убраны;
+    пустые ответы ещё есть — их пропускает тот, кто собирает текст.
     """
     considered: list[tuple[Message, Message]] = []
     question: Message | None = None
@@ -89,13 +119,16 @@ def considered_history(messages: Sequence[Message]) -> list[tuple[Message, Messa
         if message.role == "user":
             question = message
         pair = question or message
-        if pair.memory_mode != "excluded":
+        summarized = summarized_until is not None and message.position <= summarized_until
+        if pair.memory_mode != "excluded" and not summarized:
             considered.append((message, pair))
     return considered
 
 
 def pair_turns(
-    messages: Sequence[Message], attachments: Mapping[UUID, Sequence[Attachment]]
+    messages: Sequence[Message],
+    attachments: Mapping[UUID, Sequence[Attachment]],
+    summarized_until: int | None = None,
 ) -> list[tuple[UUID, Turn]]:
     """Учитываемая история для модели — каждый ход с идентификатором вопроса своей пары.
 
@@ -103,7 +136,7 @@ def pair_turns(
     пропускается, размышления не входят.
     """
     turns: list[tuple[UUID, Turn]] = []
-    for message, question in considered_history(messages):
+    for message, question in considered_history(messages, summarized_until):
         if message.role == "user":
             files = [] if message.memory_mode == "text_only" else attachments.get(message.id, [])
             turns.append((question.id, question_turn(message.content, files)))
@@ -113,10 +146,12 @@ def pair_turns(
 
 
 def history_turns(
-    messages: Sequence[Message], attachments: Mapping[UUID, Sequence[Attachment]]
+    messages: Sequence[Message],
+    attachments: Mapping[UUID, Sequence[Attachment]],
+    summarized_until: int | None = None,
 ) -> list[Turn]:
     """Учитываемая история по порядку (§5.10.1): то, что уходит модели перед вопросом."""
-    return [turn for _, turn in pair_turns(messages, attachments)]
+    return [turn for _, turn in pair_turns(messages, attachments, summarized_until)]
 
 
 def turns_tokens(turns: Sequence[Turn], estimator: TokenEstimator) -> int:
@@ -128,9 +163,9 @@ def turns_tokens(turns: Sequence[Turn], estimator: TokenEstimator) -> int:
 class MemoryFit:
     """Итог укладки истории в запрос (§5.10.2).
 
-    `dropped` — сколько сообщений истории отбросить с начала; `used` — оценка всей
-    переданной истории до отбрасывания; `limit` — объём под разговор: бюджет минус
-    системное сообщение и текущий вопрос.
+    `dropped` — сколько сообщений истории отбросить с начала; `used` — оценка головного
+    сообщения и всей переданной истории до отбрасывания; `limit` — объём под разговор:
+    бюджет минус системное сообщение и текущий вопрос.
     """
 
     dropped: int
@@ -145,15 +180,21 @@ def fit_memory(
     budget: int,
     estimator: TokenEstimator,
     min_dropped: int = 0,
+    *,
+    head: Turn | None = None,
 ) -> MemoryFit:
     """Уложить историю в бюджет — одна функция для запроса к модели и для оценки памяти.
 
-    История отбрасывается целыми сообщениями с начала, пока она не уложится в объём под
-    разговор, картинок в запросе не станет не больше 8 и оставшаяся история не начнётся
-    с вопроса. `min_dropped` — отбросить не меньше стольких (повтор после отказа модели).
+    История отбрасывается целыми сообщениями с начала, пока она вместе с головным
+    сообщением `head` не уложится в объём под разговор, картинок в запросе не станет не
+    больше 8 и оставшаяся история не начнётся с вопроса. Головное сообщение не
+    отбрасывается никогда. `min_dropped` — отбросить не меньше стольких (повтор после
+    отказа модели).
     """
     limit = budget - estimator.text(system) - turns_tokens([question], estimator)
-    used = turns_tokens(history, estimator)
+    used = turns_tokens([] if head is None else [head], estimator) + turns_tokens(
+        history, estimator
+    )
     dropped = min(min_dropped, len(history))
     # Суммы по оставшейся истории ведутся вычитанием: проход по истории один.
     tokens = used - turns_tokens(history[:dropped], estimator)
