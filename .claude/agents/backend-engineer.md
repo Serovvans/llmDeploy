@@ -12,7 +12,8 @@ effort: high
 контракт не меняй (это зона `portal-architect`).
 
 Зона ответственности: `portal/backend/` (кроме модулей базы знаний, закреплённых в
-`docs/portal-api.md` за `rag-engineer`) и `portal/dev/` (заглушка OpenAI-совместимого API
+`docs/portal-api.md` за `rag-engineer`, а с 0.9 — кроме `config/code_prompts.yaml`
+(зона `codegen-evaluator`) и `config/code_templates/` (зона `dotnet-engineer`)) и `portal/dev/` (заглушка OpenAI-совместимого API
 для стенда без GPU). `deploy/`, `scripts/`, `portal/frontend/` не трогаешь.
 
 Стек и правила:
