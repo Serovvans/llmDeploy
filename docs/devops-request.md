@@ -59,6 +59,7 @@ SSH и исходящий трафик (§1.4); он идёт параллель
 | `nvcr.io` | 443 | dcgm-exporter (мониторинг GPU) |
 | `download.docker.com`, `nvidia.github.io`, `astral.sh`, `github.com`, репозитории Ubuntu | 443 | Установка Docker, NVIDIA Container Toolkit, uv, обновления |
 | Let's Encrypt (ACME: `acme-v02.api.letsencrypt.org`) и API Timeweb Cloud | 443 | Выпуск и продление сертификата (`make cert`, таймер продления); нужен постоянно, без него сертификат не продлится |
+| `api.nuget.org` | 443 | Офлайн-набор пакетов NuGet для раздела «Код» (`make code-packages`, 0.9): только при установке и подготовке релиза, в работе не нужен |
 | NTP-сервер | 123/UDP | Синхронизация времени (TLS) |
 
 После установки исходящий доступ к Hugging Face можно закрыть — сервис работает

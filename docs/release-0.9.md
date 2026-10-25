@@ -1,0 +1,130 @@
+# Релиз 0.9: раздел «Код» (C#, GPTool) — раскатка на работающий 0.8
+
+Пояснения — `runbook.md` §3.6, §3.8, §3.11, §4.6. Всё — **[ВМ]**: на ВМ не выполнялось.
+Команды от `root`, в `tmux`. Команда с ошибкой — стоп, дальше не идти. В релизе: раздел
+«Код» вместо помощника CoGIS (проекты, мастер «Новый GPTool», панель «Сборка», «Скачать
+для CoGIS»), новый сервис `code-sandbox`. Сборка при выпуске выключена; включается на
+шаге 11 после проверки на настоящих DLL CoGIS.
+
+```bash
+export LIVE=/root/LLM/llmDeploy               # рабочий клон: из него запущен сервис
+export REL=/root/LLM/llmRelease               # релизный клон: создаётся на шаге 1
+export BAK=/var/lib/docker/portal-backups     # копии: не на диске /
+export SDK="$LIVE/deploy/cogis-sdk"           # DLL CoGIS: вне git, создаётся на шаге 4
+export COGIS=<пользователь>@<сервер CoGIS>    # SSH-доступ на сервер CoGIS
+grep -E '^(COMPOSE_PROFILES|GPU_MEM_UTIL)=' "$LIVE/deploy/.env"   # значения для шагов 2 и 7
+```
+
+Ниже `PROFILES=embeddings,rerank GPU_MEM_UTIL=0.81` — замените на значения из `.env`
+(профиль `portal` не указывать).
+
+Новые переменные `.env`: нет. Новые ключи конфигурации — файл `portal/backend/config/code.yaml`,
+раздел `code` (в накладке `deploy/portal/config.override.yaml` менять только флаги):
+`enabled` (`true`) — раздел «Код»; `build.enabled` (`false`) — сборка C#; прочие
+(`max_projects`, `build.max_parallel` = 2, `build.timeout_seconds`, `fix.attempts` = 2,
+`packages` — офлайн-набор NuGet) трогать не нужно.
+Миграция `0010_code_v09` только добавляет таблицы (проекты, файлы, версии, сборки) и поля
+со значениями по умолчанию: прежние диалоги работают как раньше; диалоги помощника CoGIS
+остаются только для чтения и переносятся в «Код».
+Новое: сервис `code-sandbox` (образ собирается из релизного клона; сеть без выхода наружу,
+портов на хост нет) и том `llm_code-packages` с офлайн-набором NuGet.
+
+## Перед началом
+
+- Работает 0.8: `cd "$LIVE" && make ps && git log -1 --oneline` — все сервисы healthy.
+- Владелец слил `feat/code` в `main` и отправил: `git -C "$LIVE" fetch && git -C "$LIVE" log -1 --oneline origin/main` — коммит релиза 0.9 (далее `<релиз>`). `git -C "$LIVE" status --short` — пусто.
+- Место: `df -h /var/lib/docker "$BAK"` — разные устройства.
+- `PORTAL_SECRET_KEY` и `BIFROST_ENCRYPTION_KEY` сохранены вне ВМ.
+- Шаг 2 (до окна) выходит на `api.nuget.org:443` (`devops-request.md` §1.4): `curl -sSI https://api.nuget.org/v3/index.json | head -n 1` — `200`. Нет — стоп: открыть доступ или `HTTPS_PROXY` в окружении.
+- Есть SSH-доступ с ВМ на сервер CoGIS (`$COGIS`) с чтением `/usr/elitegis/server/` и `/usr/elitegis/plugins/`.
+- Окно — в часы с малой нагрузкой; проверки шагов 10–13 ведёт один человек.
+- Первая строка отката — флаг `code.enabled: false`.
+
+## Подготовка (сервис работает)
+
+1. Релизный клон: `git clone "$(git -C "$LIVE" remote get-url origin)" "$REL" && cd "$REL" && git checkout <релиз>` — `ls "$REL/deploy/.env"` сообщает «нет файла».
+2. `cd "$REL" && make release-prepare LIVE="$LIVE" PROFILES=embeddings,rerank GPU_MEM_UTIL=0.81` — собраны образы, загружен офлайн-набор NuGet с проверкой SHA-512 (строка «офлайн-набор пакетов NuGet»), в конце напечатаны команды окна и отката; вывод сохранить, записать `<прежний коммит>`. «не все пакеты загружены» — стоп: проверить доступ к `api.nuget.org` и повторить шаг 2.
+3. `cd "$REL" && make release-rehearse LIVE="$LIVE"` — строка «репетиция миграций прошла за N с» (применяется 0010 на копии рабочей базы).
+4. Файлы CoGIS в `$SDK` (собственность заказчика, в git не попадают):
+    ```bash
+    install -d -m 755 "$SDK"
+    scp "$COGIS:/usr/elitegis/server/eLiteGIS.Server.dll" "$COGIS:/usr/elitegis/server/Atemiko.eLiteMap.dll" "$SDK/"
+    ssh "$COGIS" 'ls /usr/elitegis/plugins/' > "$SDK/plugins.txt"
+    for p in Npgsql Microsoft.Extensions.Logging.Abstractions Microsoft.Extensions.DependencyInjection.Abstractions; do
+      f=$(grep -ixm1 "$p.dll" "$SDK/plugins.txt") && scp "$COGIS:/usr/elitegis/plugins/$f" "$SDK/"
+    done
+    ```
+    Цикл копирует DLL пакетов набора, уже стоящие на сервере CoGIS (стартовый набор — три пакета выше; если в `code.packages` накладки другие — по их `id`). Проверка: `ls -1 "$SDK"` — `eLiteGIS.Server.dll`, `Atemiko.eLiteMap.dll`, `plugins.txt` и DLL каждого пакета набора, названного в `plugins.txt`. Не хватает — стоп: повторить копирование (имена с учётом регистра). Нет SSH с ВМ на сервер CoGIS — те же файлы (два из `/usr/elitegis/server/`, список `/usr/elitegis/plugins/` в `plugins.txt`, DLL пакетов набора из `/usr/elitegis/plugins/`) перенести в `$SDK` любым доступным способом; проверка та же.
+
+## Бэкап (начало окна; сообщить сотрудникам о перерыве)
+
+5. `cd "$REL" && make release-backup LIVE="$LIVE" DIR="$BAK"` — «Копия готова: <путь>», в `ls "$BAK"` нет `.partial`. Путь записать: это единственный путь отката кода после миграции. Проекты и версии входят в копию; `$SDK` и офлайн-набор — нет.
+
+## Обновление
+
+6. `cd "$LIVE" && git checkout <релиз>` — `git log -1 --oneline` показывает `<релиз>`.
+7. `cd "$LIVE" && make portal PROFILES=embeddings,rerank GPU_MEM_UTIL=0.81` — завершилась без ошибки (миграция `0010` применяется при старте `portal-api`; офлайн-набор уже загружен, повторно не качается).
+8. `cd "$LIVE" && make cogis-sdk` — «SDK CoGIS подключён: версия …», в таблице `eLiteGIS.Server.dll` и `Atemiko.eLiteMap.dll` вида `cogis`, `Npgsql.dll` вида `server`. Текст «ОШИБКА: …» — стоп: исправить набор по строке «что делать» и повторить; при сомнении — «Откат».
+
+## Проверка
+
+9. Сервисы и шлюз:
+    ```bash
+    cd "$LIVE" && make ps                         # всё healthy, в том числе code-sandbox
+    make key NAME=smoke REQUESTS=100              # напечатает ключ sk-bf-…
+    make smoke KEY=<ключ smoke>
+    make smoke-portal                             # PASS code_sandbox: SDK CoGIS <версия>
+    make revoke ID=<id ключа smoke>
+    ```
+10. Сборка выключена: в браузере «Код» → «Создать из примера» → «Создать проект» (имя `AddressEmailTool`) — открылся проект, в панели «Сборка» строка «Сборка на портале выключена…». Иначе — стоп, «Откат», первая строка.
+11. Включить сборку. В `deploy/portal/config.override.yaml` добавить в существующий раздел `code:`, если он есть, иначе добавить раздел (второго ключа `code:` быть не должно):
+    ```yaml
+    code:
+      build:
+        enabled: true
+    ```
+    ```bash
+    docker compose -f "$LIVE/deploy/docker-compose.yml" restart portal-api
+    ```
+    Проверка (критерий 33 **[ВМ]**): в проекте `AddressEmailTool` — «Собрать»: «Собрано», «Правила GPTool» без нарушений («Нарушений нет»), внизу панели «библиотеки CoGIS ‹версия›», не `stub`. Ошибки «Не удалось найти тип или имя…» — имена заглушки не совпали с DLL: вернуть `enabled: false`, перезапустить `portal-api`, сообщить разработчику текст ошибок.
+12. Мастер «Новый GPTool» с настоящими DLL (критерий 33 **[ВМ]**): создать пять проектов и в каждом нажать «Собрать» — у всех «Собрано» и «Нарушений нет»: (а) один инструмент без базы; (б) один с флажком «Инструмент работает с базой данных», входной `Email`, выходной `Result`; (в) три инструмента; (г) название по-английски `Gp`; (д) входной параметр `WorkspaceName` без базы. Любой не собран — стоп: выключить сборку (шаг 11), сообщить разработчику.
+13. Архив в CoGIS (критерий 36 **[ВМ]**): в проекте (б) — «Скачать для CoGIS» → «Скачать архив»; все `.dll` из архива скопировать в `/usr/elitegis/plugins/` на сервере CoGIS; в CoGIS Server «Настройки → Сервисы геообработки → Подключаемые .NET библиотеки» → «+», путь и имя класса из памятки, «Проверить», «ОК». Делать на тестовом сервере или в тестовой базе CoGIS; на рабочем сервере после проверки удалить тестовый инструмент и его DLL из `/usr/elitegis/plugins/`. Проверка: в «Создание инструмента геообработки» инструмент виден в своей категории. Не виден — стоп: выключить сборку, сообщить разработчику версию CoGIS и текст памятки.
+
+Всё прошло — сообщить сотрудникам, что окно закончено и раздел «Код» доступен. Иначе — «Откат».
+
+## После раскатки
+
+- Критерий 38 **[ВМ]**: замеряет разработчик на этапе eval-0.9 после раскатки; порог задаёт владелец по первому замеру.
+- Убрать временное — после принятия, когда откат не нужен: `rm -rf "$REL" "$LIVE/deploy/rollback"`; копию шага 5 перенести с ВМ (`runbook.md` §4.4).
+
+## Откат
+
+1. Первая линия — флаги, без отката кода и данных. В `deploy/portal/config.override.yaml` в существующем разделе `code:`, если он есть, иначе добавив его, задать:
+    ```yaml
+    code:
+      enabled: false
+    ```
+    ```bash
+    docker compose -f "$LIVE/deploy/docker-compose.yml" restart portal-api portal-worker
+    ```
+    Проверка: в рейке «CoGIS» и прежний экран помощника, `/code` переходит на `/cogis`. Проекты сохраняются, но не видны. Отключить только сборку — `code.build.enabled: false` и `restart portal-api`: редактор и помощник работают, «Собрать» нет.
+2. Откат кода. У миграции `0010` нет обратного хода: после старта нового `portal-api` код откатывается только с восстановлением копии шага 5 (`portal-design.md` §8.5); созданное после неё (проекты, версии) теряется. Конфигурация 0.8 не знает ключа `code`: до `make release-rollback` (в обеих ветках ниже) удалить раздел `code:` из `deploy/portal/config.override.yaml`. Проверка: `grep -n '^code:' "$LIVE/deploy/portal/config.override.yaml"` ничего не выводит.
+    ```bash
+    docker ps -a --filter name=portal-api --format '{{.Image}}'   # тег = 12 символов <релиз> — новый
+    cd "$LIVE" && git checkout <прежний коммит>
+    cd "$REL" && make release-rollback LIVE="$LIVE" FROM=<путь копии шага 5>   # ввести yes
+    cd "$LIVE" && make ps && make smoke-portal                    # healthy, смоук прошёл
+    ```
+    Если образ `portal-api` прежний (новый не стартовал) — без копии:
+    `cd "$LIVE" && git checkout <прежний коммит> && cd "$REL" && make release-rollback LIVE="$LIVE"`.
+    Сбой шага 7 до записи `.env`: `cd "$LIVE" && git checkout <прежний коммит> && make up`.
+    Сбой до шага 6 — ничего не откатывать.
+
+## Приложение. Установка с нуля (новая ВМ сразу на 0.9)
+
+Порядок — `vpn-launch.md`; здесь только отличия. `$LIVE` — клон, из которого идёт установка; `LIVE`, `SDK`, `COGIS` — как в начале файла.
+
+- До шага 6 (портал): открыть исходящий `api.nuget.org:443` (`devops-request.md` §1.4) и создать `deploy/cogis-sdk/` с файлами CoGIS — шаг 4 выше, где `$SDK` = `deploy/cogis-sdk` клона. `make portal` сам собирает `code-sandbox` и загружает офлайн-набор; профили `PROFILES` — как в шаге 6 `vpn-launch.md`.
+- После шага 6 (до шага 7): `make cogis-sdk` — шаг 8 выше. Сборка остаётся выключенной.
+- В шаге 8 (чек-лист): после проверки `make smoke-portal` — шаги 10–13 выше (включение сборки — шаг 11; на новой ВМ диалогов помощника CoGIS нет). Бэкап — как в `vpn-launch.md`; `deploy/cogis-sdk/` в него не входит.
+- Миграции, репетиция, релизный клон, откат — не нужны.
