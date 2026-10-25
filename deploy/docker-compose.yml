@@ -364,12 +364,17 @@ services:
       # Каталогом, а не файлом: накладка config.override.yaml необязательна, и bind
       # отсутствующего файла создал бы на его месте каталог.
       - ./portal:/etc/portal:ro
+      # Справочник API для помощника и редактора (code.sdk_index_dir); папка SDK и том
+      # набора сюда не монтируются (docs/portal-api.md §13.5).
+      - cogis-sdk-index:/data/cogis-sdk-index:ro
     networks:
       - edge
       - portal
       # От песочницы portal-api не зависит (depends_on нет): без неё проверка SQL
       # получает статус «недоступно», остальное работает.
       - sandbox
+      # От песочницы сборки тоже не зависит: без неё сборка — «сборка недоступна».
+      - code-sandbox
     healthcheck:
       # curl и wget в образе нет; /healthz отвечает 503, если база недоступна.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
@@ -533,6 +538,56 @@ services:
       retries: 5
       start_period: 30s
 
+  # Песочница сборки C# (docs/portal-design.md §3.3, §8.5; docs/portal-api.md §7.5.12,
+  # §13.5). Всё, что в неё приходит, — враждебный код; секретов и переменных .env нет.
+  code-sandbox:
+    image: llm-code-sandbox:${PORTAL_IMAGE_TAG:?}
+    build:
+      context: ../portal/code-sandbox
+      target: runtime
+    profiles: [portal]
+    restart: unless-stopped
+    # Журнал сохраняется с ротацией: служба пишет только числа, а вывод процесса
+    # компиляции отбрасывает (docs/portal-api.md §7.5.12).
+    logging: *logging
+    read_only: true
+    tmpfs:
+      # На диск служба не пишет; /tmp — для служебных файлов среды .NET.
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Без дампов памяти: в дампе был бы исходный код сотрудников.
+    ulimits:
+      core: 0
+    # Две сборки (code.build.max_parallel) — каждая в своём процессе .NET примерно на
+    # 20 потоков — и служба. Подкачка запрещена: с ней предел памяти не был бы границей;
+    # при нехватке OOM снимает процесс сборки, а не службу. Значения уточнить на ВМ.
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 2
+    pids_limit: 256
+    volumes:
+      # Собственность заказчика: только на ВМ, вне git и образов (docs/portal-design.md §7).
+      - ./cogis-sdk:/sdk:ro
+      # Индекс пишет только make cogis-sdk разовым запуском index с этим томом на запись.
+      - cogis-sdk-index:/index:ro
+      - code-packages:/packages:ro
+    networks:
+      - code-sandbox
+    healthcheck:
+      # curl и wget в образе нет; /health отвечает 200 и без SDK.
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 networks:
   edge:
   inference:
@@ -541,6 +596,10 @@ networks:
     internal: true
   # Только portal-api и песочница SQL; выхода наружу нет (docs/portal-design.md §8.1).
   sandbox:
+    internal: true
+  # Только portal-api и песочница сборки; с сетью песочницы SQL не общая
+  # (docs/portal-design.md §3).
+  code-sandbox:
     internal: true
 
 volumes:
@@ -553,3 +612,7 @@ volumes:
   portal-files:
   # Веса модели речи: восстановимы загрузкой, в резервную копию не входят.
   asr-models:
+  # Индекс SDK и офлайн-набор пакетов восстановимы (make cogis-sdk и цель загрузки
+  # набора), в резервную копию не входят (docs/portal-api.md §13.5).
+  cogis-sdk-index:
+  code-packages:

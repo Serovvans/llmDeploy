@@ -1,0 +1,10 @@
+# Результаты сборки и тесты в образ не нужны; *.dll и *.nupkg исключены целиком, чтобы
+# DLL CoGIS заказчика не попали в контекст сборки даже по ошибке (CLAUDE.md, правило 10).
+**/bin/
+**/obj/
+**/TestResults/
+tests/
+**/*.dll
+**/*.nupkg
+Dockerfile
+.dockerignore

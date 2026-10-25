@@ -1,0 +1,11 @@
+# Wizard "Новый GPTool" (portal-api.md §7.5.4). Starting set (А-103): types of CoGIS beyond
+# these five are added here after checking the API reference built from the real DLLs.
+parameter_types:
+  - { id: string,   title: "Строка",       csharp: "string?",  using: null, input: true, output: true,  required_check: "string.IsNullOrWhiteSpace({name})" }
+  - { id: int,      title: "Целое число",  csharp: "int",      using: null, input: true, output: false, required_check: null }
+  - { id: double,   title: "Число",        csharp: "double",   using: null, input: true, output: false, required_check: null }
+  - { id: bool,     title: "Да или нет",   csharp: "bool",     using: null, input: true, output: false, required_check: null }
+  - { id: datetime, title: "Дата и время", csharp: "DateTime", using: null, input: true, output: false, required_check: null }
+required_message: "Не задан параметр «{title}»."
+database: { usings: ["Atemiko.eLiteMap.Geodatabase", "Npgsql"], packages: ["Npgsql"] }
+example: { packages: ["Npgsql"] }

@@ -1,7 +1,7 @@
 """Логика install.sh, не требующая ВМ: .env, профили этапов, сборка и проверки портала.
 
 Скрипт копируется во временное дерево (``scripts/`` + ``deploy/``) и подключается через
-``source``; ``docker``, ``git`` и ``curl`` подменены заглушками в ``PATH``.
+``source``; ``docker``, ``git``, ``curl`` и ``uv`` подменены заглушками в ``PATH``.
 """
 
 import base64
@@ -49,6 +49,11 @@ if [[ "$1" == "rev-parse" ]]; then cat "$dir/.commit"; else cat "$STUB_DIR/dirty
 exit 0
 """
 COMMIT = "0123456789ab"
+# Записывает аргументы и каталог запуска (with_env.sh переходит в scripts/).
+UV_STUB = """#!/usr/bin/env bash
+echo "$* cwd=$(basename "$PWD")" >>"$STUB_DIR/uv.log"
+[[ ! -e "$STUB_DIR/fail-uv" ]]
+"""
 # Отдаёт код ответа по окончанию адреса (последний аргумент), как curl -w '%{http_code}'.
 CURL_STUB = """#!/usr/bin/env bash
 url="${!#}"
@@ -85,8 +90,10 @@ class Sandbox:
         (root / "deploy").mkdir()
         self.stubs.mkdir()
         shutil.copy(REPO / "scripts" / "install.sh", root / "scripts")
+        shutil.copy(REPO / "scripts" / "with_env.sh", root / "scripts")
         shutil.copy(REPO / "deploy" / ".env.example", root / "deploy")
-        for name, body in (("docker", DOCKER_STUB), ("git", GIT_STUB), ("curl", CURL_STUB)):
+        stubs = (("docker", DOCKER_STUB), ("git", GIT_STUB), ("curl", CURL_STUB), ("uv", UV_STUB))
+        for name, body in stubs:
             stub = self.stubs / name
             stub.write_text(body)
             stub.chmod(0o755)
@@ -115,6 +122,10 @@ class Sandbox:
     def env(self) -> dict[str, str]:
         pairs = (line.split("=", 1) for line in self.env_file.read_text().splitlines())
         return {pair[0]: pair[1] for pair in pairs if len(pair) == 2 and pair[0].isidentifier()}
+
+    def uv_calls(self) -> list[str]:
+        log = self.stubs / "uv.log"
+        return log.read_text().splitlines() if log.exists() else []
 
     def docker_calls(self) -> list[str]:
         log = self.stubs / "docker.log"
@@ -285,10 +296,10 @@ def test_gateway_stage_leaves_site_mode_empty(sandbox: Sandbox) -> None:
 # --- сборка образов ------------------------------------------------------------
 
 
-BUILD = "build portal-api portal-worker portal-web sql-sandbox"
+BUILD = "build portal-api portal-worker portal-web sql-sandbox code-sandbox"
 RELEASE_IMAGES = [
     f"llm-{service}:{COMMIT}"
-    for service in ("portal-api", "portal-worker", "portal-web", "sql-sandbox")
+    for service in ("portal-api", "portal-worker", "portal-web", "sql-sandbox", "code-sandbox")
 ]
 
 
@@ -481,6 +492,30 @@ def test_speech_weights_are_not_loaded_without_portal(sandbox: Sandbox) -> None:
     sandbox.write_env({})
     assert sandbox.run("profiles=gateway\nportal_enabled=0\npreload_models").returncode == 0
     assert not any("asr" in call for call in sandbox.docker_calls())
+    assert sandbox.uv_calls() == []
+
+
+def test_offline_packages_are_loaded_with_portal_config_of_this_clone(sandbox: Sandbox) -> None:
+    sandbox.write_env(GATEWAY_ENV)
+    result = sandbox.run("live_dir=\nportal_enabled=1\npreload_code_packages")
+    assert result.returncode == 0, result.stderr
+    assert sandbox.uv_calls() == ["run code_packages.py cwd=scripts"]
+
+
+def test_release_preparation_loads_packages_with_live_overlay(sandbox: Sandbox) -> None:
+    sandbox.write_env(GATEWAY_ENV)
+    result = sandbox.run("live_dir=/opt/llm\nportal_enabled=1\npreload_code_packages")
+    assert result.returncode == 0, result.stderr
+    assert sandbox.uv_calls()[0].startswith(
+        "run code_packages.py --config-dir /opt/llm/deploy/portal "
+    )
+
+
+def test_failed_package_load_stops_installation(sandbox: Sandbox) -> None:
+    sandbox.write_env(GATEWAY_ENV)
+    (sandbox.stubs / "fail-uv").touch()
+    result = sandbox.run("live_dir=\nportal_enabled=1\npreload_code_packages")
+    assert_refused(result, "офлайн-набор пакетов не загружен", "make code-packages")
 
 
 # --- релиз: подготовка и путь отката -------------------------------------------

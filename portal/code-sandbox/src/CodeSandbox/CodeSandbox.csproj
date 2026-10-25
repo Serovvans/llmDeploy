@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <AssemblyName>code-sandbox</AssemblyName>
+    <RootNamespace>CodeSandbox</RootNamespace>
+    <CopyNetCoreReferencePack>true</CopyNetCoreReferencePack>
+    <IsTransformWebConfigDisabled>true</IsTransformWebConfigDisabled>
+    <PublishDocumentationFile>false</PublishDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Roslyn of the .NET 8.0.4xx SDK and Visual Studio 17.14: the last release with a net8.0 build. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="[4.14.0]" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Update="packages.lock.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="CodeSandbox.Tests" />
+  </ItemGroup>
+</Project>

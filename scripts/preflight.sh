@@ -49,6 +49,10 @@ readonly ENDPOINTS=(
   "https://ghcr.io/v2/"
   "https://pkg-containers.githubusercontent.com/"
   "https://nvcr.io/v2/"
+  # Образы .NET песочницы сборки C# и пакеты NuGet: при сборке образа и загрузке
+  # офлайн-набора (docs/portal-design.md §7).
+  "https://mcr.microsoft.com/v2/"
+  "https://api.nuget.org/v3/index.json"
 )
 
 declare -a SUMMARY=()

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Stub of the CoGIS server library: only the names from the customer GPTool instruction. -->
+  <PropertyGroup>
+    <AssemblyName>eLiteGIS.Server</AssemblyName>
+    <RootNamespace>eLiteGIS</RootNamespace>
+    <InformationalVersion>stub</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

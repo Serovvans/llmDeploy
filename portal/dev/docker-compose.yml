@@ -97,10 +97,12 @@ services:
     volumes:
       - portal-files:/data/files
       - ./config.override.yaml:/etc/portal/config.override.yaml:ro
+      - cogis-sdk-index:/data/cogis-sdk-index:ro
     networks:
       - edge
       - portal
       - sandbox
+      - code-sandbox
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
       interval: 10s
@@ -229,11 +231,81 @@ services:
       retries: 5
       start_period: 30s
 
+  # Песочница сборки — тот же образ и те же ограничения, что на ВМ (проверки изоляции,
+  # CLAUDE.md, пайплайн «Код», правило 2), плюс заглушка SDK в /stub-sdk. Настоящие DLL
+  # в deploy/cogis-sdk/ (вне git) важнее заглушки; выбор — один и тот же в обоих сервисах.
+  # Индекс строится заново при каждом запуске стенда — как make cogis-sdk на ВМ.
+  code-sandbox-index:
+    image: portal-dev-code-sandbox:stand
+    build:
+      context: ../code-sandbox
+      target: stand
+    logging: *logging
+    entrypoint: ["sh", "-c"]
+    command: ["if [ -f /sdk/eLiteGIS.Server.dll ]; then d=/sdk; else d=/stub-sdk; fi; exec /app/code-sandbox index --sdk \"$$d\" --out /index"]
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ../../deploy/cogis-sdk:/sdk:ro
+      - cogis-sdk-index:/index
+
+  code-sandbox:
+    image: portal-dev-code-sandbox:stand
+    build:
+      context: ../code-sandbox
+      target: stand
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      code-sandbox-index:
+        condition: service_completed_successfully
+    # Манифест сверяется с той папкой, по которой построен индекс.
+    entrypoint: ["sh", "-c"]
+    command: ["if [ -f /sdk/eLiteGIS.Server.dll ]; then d=/sdk; else d=/stub-sdk; fi; export Sandbox__SdkDir=\"$$d\"; exec /app/code-sandbox serve"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      core: 0
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 2
+    pids_limit: 256
+    volumes:
+      - ../../deploy/cogis-sdk:/sdk:ro
+      - cogis-sdk-index:/index:ro
+      # Пуст, пока в него не загружен офлайн-набор: сборка с пакетами — unknown_package.
+      - code-packages:/packages:ro
+    networks:
+      - code-sandbox
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 networks:
   edge:
   portal:
     internal: true
   sandbox:
+    internal: true
+  code-sandbox:
     internal: true
 
 volumes:
@@ -242,3 +314,5 @@ volumes:
   qdrant-data:
   portal-files:
   asr-models:
+  cogis-sdk-index:
+  code-packages:

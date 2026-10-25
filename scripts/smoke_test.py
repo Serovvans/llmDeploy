@@ -28,7 +28,10 @@ cookie — 401; ``POST`` без ``X-Portal-Csrf`` — 403.
 compose ps``; только на машине, где работает стек). При ``SITE_MODE=portal`` с этим же
 флагом проверяются сервисы пакета 0.5 (docs/portal-design.md §8.2): контейнер песочницы
 SQL здоров; при профиле ``rerank`` реранкер отвечает через Bifrost на loopback-порту ВМ
-с ключом портала — так, как к нему обращается сам портал.
+с ключом портала — так, как к нему обращается сам портал; песочница сборки C# отвечает на
+``GET /health`` из ``portal-api`` (docs/portal-api.md §7.5.12) и сообщает версию SDK
+CoGIS — пока ``make cogis-sdk`` не выполнен, версии нет, и это не ошибка: сборка до
+этого выключена.
 
 С флагом ``--check-rate-limit N`` выполняется только проверка лимита: до N запросов подряд,
 ожидается HTTP 429 от Bifrost. Для неё нужен отдельный ключ с малым лимитом запросов
@@ -133,6 +136,13 @@ PORTAL_SESSION_PATH = "/api/auth/session"
 PORTAL_CSRF_PROBE_PATH = "/api/auth/logout"
 COMPOSE_TIMEOUT_S = 60
 SQL_SANDBOX_SERVICE = "sql-sandbox"
+# Песочница сборки доступна только из portal-api, по своей внутренней сети; curl в
+# образе portal-api нет — запрос делает его Python.
+CODE_SANDBOX_HEALTH_URL = "http://code-sandbox:8080/health"
+CODE_SANDBOX_PROBE = (
+    "import urllib.request; "
+    f"print(urllib.request.urlopen('{CODE_SANDBOX_HEALTH_URL}', timeout=10).read().decode())"
+)
 RERANK_PROFILE = "rerank"
 # Bifrost на ВМ: только loopback (deploy/docker-compose.yml); тот же адрес, что у keys.py.
 DEFAULT_BIFROST_URL = "http://127.0.0.1:8081"
@@ -757,6 +767,20 @@ def check_service_healthy(
     return f"healthy: {service}"
 
 
+def check_code_sandbox(compose_file: str, runner: ComposeRunner = run_compose) -> str:
+    """Песочница сборки отвечает ``portal-api``; в итоге — версия SDK CoGIS или её отсутствие."""
+    output = runner(compose_file, ["exec", "-T", "portal-api", "python", "-c", CODE_SANDBOX_PROBE])
+    try:
+        version = json.loads(output)["sdk_version"]
+    except (json.JSONDecodeError, LookupError, TypeError) as exc:
+        raise SmokeTestError(
+            f"неожиданный ответ {CODE_SANDBOX_HEALTH_URL}: {output[:200]}"
+        ) from exc
+    if not version:
+        return "SDK CoGIS не подключён — сборка недоступна до make cogis-sdk"
+    return f"SDK CoGIS {version}"
+
+
 def rerank_payload() -> JsonObject:
     """Запрос к реранкеру в том виде, в каком его шлёт портал (docs/portal-api.md §12.1)."""
     return {"model": RERANK_MODEL, "query": RERANK_QUERY, "documents": list(RERANK_DOCUMENTS)}
@@ -851,7 +875,8 @@ def build_checks(
 
     ``direct`` — без проверок сайта (их обеспечивает Caddy); ``site_only`` — без запросов к
     модели; ``compose_file`` — добавить проверку здоровья сервисов, а при портале — ещё и
-    сервисов пакета 0.5: песочницы SQL и, если задан ``rerank``, реранкера.
+    сервисов пакета 0.5 и раздела «Код»: песочниц SQL и сборки и, если задан ``rerank``,
+    реранкера.
     """
     checks: list[Check] = []
     if not site_only:
@@ -874,6 +899,7 @@ def build_checks(
             checks.append(
                 ("sql_sandbox", lambda: check_service_healthy(compose_file, SQL_SANDBOX_SERVICE))
             )
+            checks.append(("code_sandbox", lambda: check_code_sandbox(compose_file)))
             if rerank is not None:
                 checks.append(("rerank", lambda: check_rerank(client, rerank)))
     return checks

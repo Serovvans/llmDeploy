@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    .NET 8 reference assemblies for user compilations: copied from the targeting pack of the
+    SDK that builds the project into "ref/" next to the binaries (portal-api.md §7.5.12).
+  -->
+  <PropertyGroup Condition="'$(CopyNetCoreReferencePack)' == 'true'">
+    <NetCoreReferencePackDir>$(NetCoreTargetingPackRoot)/Microsoft.NETCore.App.Ref/$(BundledNETCoreAppPackageVersion)/ref/net8.0</NetCoreReferencePackDir>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(CopyNetCoreReferencePack)' == 'true'">
+    <None Include="$(NetCoreReferencePackDir)/*.dll" Link="ref/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+  <Target Name="CheckNetCoreReferencePack" BeforeTargets="Build" Condition="'$(CopyNetCoreReferencePack)' == 'true' And !Exists('$(NetCoreReferencePackDir)/System.Runtime.dll')">
+    <Error Text="Reference pack not found: $(NetCoreReferencePackDir)" />
+  </Target>
+</Project>

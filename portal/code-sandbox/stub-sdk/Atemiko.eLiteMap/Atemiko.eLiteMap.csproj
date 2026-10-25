@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Stub of the CoGIS map library: only the names from the customer GPTool instruction. -->
+  <PropertyGroup>
+    <AssemblyName>Atemiko.eLiteMap</AssemblyName>
+    <RootNamespace>Atemiko.eLiteMap</RootNamespace>
+    <InformationalVersion>stub</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

@@ -85,6 +85,7 @@ export LOGIN NAME SINCE EVENT LIMIT DIR FROM LIVE
         portal-reindex \
         portal-reindex-recreate portal-eval-search \
         portal-reprocess-start portal-reprocess-pause portal-reprocess-resume portal-reprocess-status \
+        cogis-sdk code-packages \
         release-prepare release-rehearse release-backup release-rollback backup restore \
         up down restart ps logs preload \
         dev-up dev-reset dev-down dev-test-install dev-test dev-check-stand check
@@ -97,6 +98,7 @@ help: ## Показать список целей
 	@echo "Этап 1 (модель):  make preflight && make model [PROFILES=monitoring]"
 	@echo "Этап 2 (доступ):  make gateway LLM_HOSTNAME=llm.<домен> TLS_MODE=corp|internal (для corp с Let's Encrypt сначала make cert)"
 	@echo "Этап 3 (портал):  make key NAME=portal RERANK=1, ключ — в PORTAL_LLM_API_KEY в deploy/.env, затем make portal"
+	@echo "Сборка C# (Код):  DLL с сервера CoGIS и plugins.txt — в deploy/cogis-sdk/, затем make cogis-sdk"
 	@echo "Релиз портала:    make release-prepare, release-rehearse, release-backup, release-rollback — из клона релизного коммита с LIVE=<рабочий клон>; make portal — в рабочем клоне; порядок в scripts/release.sh"
 
 # --- подготовка ВМ ---
@@ -215,6 +217,14 @@ portal-reprocess-resume: ## Возобновить массовую переоб
 portal-reprocess-status: ## Ход переобработки: очередь, сбои, пауза
 	$(COMPOSE) exec -T portal-worker portal reprocess status
 
+# Раздел «Код» (docs/portal-design.md §7, §8.5): DLL CoGIS — собственность заказчика, только
+# в deploy/cogis-sdk/ на ВМ; флаг сборки обе цели не меняют.
+cogis-sdk: ## Подключить SDK CoGIS из deploy/cogis-sdk/: проверка файлов, перечень с версиями и SHA-256, справочник API, перезапуск песочницы сборки
+	$(SUDO) bash $(SCRIPTS_DIR)/cogis_sdk.sh
+
+code-packages: ## Загрузить офлайн-набор пакетов NuGet (code.packages) с проверкой SHA-512; повторить после правки списка в накладке
+	$(WITH_ENV) uv run code_packages.py
+
 # --- релиз на работающей ВМ (docs/portal-design.md §8.2) ---
 
 # Из отдельного клона релизного коммита; аргументы — те же, что получит make portal в окне.
@@ -303,7 +313,7 @@ dev-check-stand: ## Проверки образов на поднятом сте
 
 # Запускать без sudo: тесты бэкенда портала поднимают PostgreSQL, а он от root не стартует.
 # Первому запуску нужна сеть (uv sync, npm ci).
-check: ## Локальные проверки: docker compose config, ruff, mypy, pytest, shellcheck, портал; не одновременно с make dev-test
+check: ## Локальные проверки: docker compose config, ruff, mypy, pytest, shellcheck, портал, песочница сборки C# (в контейнере .NET SDK); не одновременно с make dev-test
 	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
 		sed -e 's/^\([A-Za-z_]*\)=$$/\1=placeholder/' $(DEPLOY_DIR)/.env.example >"$$tmp"; \
 		for profiles in "" "gateway" "gateway,embeddings,monitoring" \
@@ -323,3 +333,4 @@ check: ## Локальные проверки: docker compose config, ruff, mypy
 	cd $(PORTAL_DIR)/dev && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest -q
 	cd $(PORTAL_DIR)/frontend && npm ci && npm run check
 	cd $(E2E_DIR) && npm ci && npm run typecheck
+	bash $(SCRIPTS_DIR)/check_code_sandbox.sh
