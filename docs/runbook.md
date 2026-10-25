@@ -872,7 +872,7 @@ make portal-reprocess-resume         # возобновить
 
 **SDK CoGIS** — DLL заказчика, лежат только в `deploy/cogis-sdk/` на ВМ (вне git и образов).
 Состав — в заголовке `scripts/cogis_sdk.sh`: `eLiteGIS.Server.dll` и `Atemiko.eLiteMap.dll`
-из `/usr/elitegis/server/`, `plugins.txt` (`ls /usr/elitegis/plugins/` на сервере CoGIS) и
+из `/usr/elitegis/server/`, `plugins.txt` (`ls -1 /usr/elitegis/plugins/` на сервере CoGIS, по одному имени в строке) и
 копии DLL пакетов набора, уже стоящих на сервере (стартовый набор — `Npgsql.dll`,
 `Microsoft.Extensions.Logging.Abstractions.dll`,
 `Microsoft.Extensions.DependencyInjection.Abstractions.dll`; нужны те, что названы в

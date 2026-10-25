@@ -11,7 +11,7 @@ export LIVE=/root/LLM/llmDeploy               # рабочий клон: из н
 export REL=/root/LLM/llmRelease               # релизный клон: создаётся на шаге 1
 export BAK=/var/lib/docker/portal-backups     # копии: не на диске /
 export SDK="$LIVE/deploy/cogis-sdk"           # DLL CoGIS: вне git, создаётся на шаге 4
-export COGIS=<пользователь>@<сервер CoGIS>    # SSH-доступ на сервер CoGIS
+export SRC=/root/cogis-files               # папка с файлами CoGIS на ВМ (если папка на другой машине — шаг 4)
 grep -E '^(COMPOSE_PROFILES|GPU_MEM_UTIL)=' "$LIVE/deploy/.env"   # значения для шагов 2 и 7
 ```
 
@@ -36,7 +36,7 @@ grep -E '^(COMPOSE_PROFILES|GPU_MEM_UTIL)=' "$LIVE/deploy/.env"   # значен
 - Место: `df -h /var/lib/docker "$BAK"` — разные устройства.
 - `PORTAL_SECRET_KEY` и `BIFROST_ENCRYPTION_KEY` сохранены вне ВМ.
 - Шаг 2 (до окна) выходит на `api.nuget.org:443` (`devops-request.md` §1.4): `curl -sSI https://api.nuget.org/v3/index.json | head -n 1` — `200`. Нет — стоп: открыть доступ или `HTTPS_PROXY` в окружении.
-- Есть SSH-доступ с ВМ на сервер CoGIS (`$COGIS`) с чтением `/usr/elitegis/server/` и `/usr/elitegis/plugins/`.
+- Есть папка с шестью файлами: `eLiteGIS.Server.dll`, `Atemiko.eLiteMap.dll` (с сервера CoGIS, `/usr/elitegis/server/`), `Npgsql.dll`, `Microsoft.Extensions.Logging.Abstractions.dll`, `Microsoft.Extensions.DependencyInjection.Abstractions.dll` (`/usr/elitegis/plugins/`) и `plugins.txt` — список файлов `/usr/elitegis/plugins/`, по одному имени в строке (на сервере CoGIS: `ls -1 /usr/elitegis/plugins/ > plugins.txt`; обычный `ls` печатает столбцами — не подходит).
 - Окно — в часы с малой нагрузкой; проверки шагов 10–13 ведёт один человек.
 - Первая строка отката — флаг `code.enabled: false`.
 
@@ -45,16 +45,11 @@ grep -E '^(COMPOSE_PROFILES|GPU_MEM_UTIL)=' "$LIVE/deploy/.env"   # значен
 1. Релизный клон: `git clone "$(git -C "$LIVE" remote get-url origin)" "$REL" && cd "$REL" && git checkout <релиз>` — `ls "$REL/deploy/.env"` сообщает «нет файла».
 2. `cd "$REL" && make release-prepare LIVE="$LIVE" PROFILES=embeddings,rerank GPU_MEM_UTIL=0.81` — собраны образы, загружен офлайн-набор NuGet с проверкой SHA-512 (строка «офлайн-набор пакетов NuGet»), в конце напечатаны команды окна и отката; вывод сохранить, записать `<прежний коммит>`. «не все пакеты загружены» — стоп: проверить доступ к `api.nuget.org` и повторить шаг 2.
 3. `cd "$REL" && make release-rehearse LIVE="$LIVE"` — строка «репетиция миграций прошла за N с» (применяется 0010 на копии рабочей базы).
-4. Файлы CoGIS в `$SDK` (собственность заказчика, в git не попадают):
+4. Файлы CoGIS в `$SDK` (собственность заказчика, в git не попадают). Папка на другой машине — перенести на ВМ (с этой машины): `scp -r <папка> <админ>@<вм>:/tmp/cogis-sdk` (папки `/tmp/cogis-sdk` на ВМ ещё нет — её создаст `scp`), затем на ВМ `export SRC=/tmp/cogis-sdk`. Копирование:
     ```bash
-    install -d -m 755 "$SDK"
-    scp "$COGIS:/usr/elitegis/server/eLiteGIS.Server.dll" "$COGIS:/usr/elitegis/server/Atemiko.eLiteMap.dll" "$SDK/"
-    ssh "$COGIS" 'ls /usr/elitegis/plugins/' > "$SDK/plugins.txt"
-    for p in Npgsql Microsoft.Extensions.Logging.Abstractions Microsoft.Extensions.DependencyInjection.Abstractions; do
-      f=$(grep -ixm1 "$p.dll" "$SDK/plugins.txt") && scp "$COGIS:/usr/elitegis/plugins/$f" "$SDK/"
-    done
+    install -d -m 755 "$SDK" && cp "$SRC"/* "$SDK/"
     ```
-    Цикл копирует DLL пакетов набора, уже стоящие на сервере CoGIS (стартовый набор — три пакета выше; если в `code.packages` накладки другие — по их `id`). Проверка: `ls -1 "$SDK"` — `eLiteGIS.Server.dll`, `Atemiko.eLiteMap.dll`, `plugins.txt` и DLL каждого пакета набора, названного в `plugins.txt`. Не хватает — стоп: повторить копирование (имена с учётом регистра). Нет SSH с ВМ на сервер CoGIS — те же файлы (два из `/usr/elitegis/server/`, список `/usr/elitegis/plugins/` в `plugins.txt`, DLL пакетов набора из `/usr/elitegis/plugins/`) перенести в `$SDK` любым доступным способом; проверка та же.
+    Проверка: `ls -1 "$SDK"` — ровно шесть файлов выше (другие DLL с сервера не нужны) и `grep -ciE '\.dll[[:space:]]*$' "$SDK/plugins.txt"` — больше нуля. Не так — стоп: добавить недостающее в папку, убрать лишнее из `$SDK`, повторить копирование. Если в накладке `code.packages` другие пакеты — DLL каждого пакета, названного в `plugins.txt`, тоже взять с сервера CoGIS (`/usr/elitegis/plugins/`). Временную `/tmp/cogis-sdk` после проверки удалить.
 
 ## Бэкап (начало окна; сообщить сотрудникам о перерыве)
 
@@ -122,7 +117,7 @@ grep -E '^(COMPOSE_PROFILES|GPU_MEM_UTIL)=' "$LIVE/deploy/.env"   # значен
 
 ## Приложение. Установка с нуля (новая ВМ сразу на 0.9)
 
-Порядок — `vpn-launch.md`; здесь только отличия. `$LIVE` — клон, из которого идёт установка; `LIVE`, `SDK`, `COGIS` — как в начале файла.
+Порядок — `vpn-launch.md`; здесь только отличия. `$LIVE` — клон, из которого идёт установка; `LIVE`, `SDK`, `SRC` — как в начале файла.
 
 - До шага 6 (портал): открыть исходящий `api.nuget.org:443` (`devops-request.md` §1.4) и создать `deploy/cogis-sdk/` с файлами CoGIS — шаг 4 выше, где `$SDK` = `deploy/cogis-sdk` клона. `make portal` сам собирает `code-sandbox` и загружает офлайн-набор; профили `PROFILES` — как в шаге 6 `vpn-launch.md`.
 - После шага 6 (до шага 7): `make cogis-sdk` — шаг 8 выше. Сборка остаётся выключенной.
