@@ -52,7 +52,10 @@ internal sealed class SandboxOptions
     public string ResolvedReferenceDir => ReferenceDir ?? Path.Combine(AppContext.BaseDirectory, "ref");
 }
 
-/// <summary>Full metadata names of the CoGIS types used by the GPTool rules (portal-api.md §7.5.13).</summary>
+/// <summary>
+/// Full metadata names of the CoGIS types used by the GPTool rules (portal-api.md §7.5.13),
+/// as declared in <c>eLiteGIS.Server.dll</c> 12.0.4161.0.
+/// </summary>
 internal sealed class GpToolNames
 {
     /// <summary>Base class of a tool.</summary>
@@ -62,11 +65,11 @@ internal sealed class GpToolNames
     public string Factory { get; set; } = "eLiteGIS.Geoprocessing.IGpToolFactory";
 
     /// <summary>Description attribute (Russian and English text).</summary>
-    public string Description { get; set; } = "eLiteGIS.Geoprocessing.GpDescriptionAttribute";
+    public string Description { get; set; } = "eLiteGIS.Utilities.GpDescriptionAttribute";
 
     /// <summary>Category attribute.</summary>
     public string Category { get; set; } = "eLiteGIS.Geoprocessing.GpCategoryAttribute";
 
     /// <summary>Icon attribute.</summary>
-    public string Icon { get; set; } = "eLiteGIS.Geoprocessing.GpToolIconAttribute";
+    public string Icon { get; set; } = "eLiteGIS.Utilities.GpToolIconAttribute";
 }

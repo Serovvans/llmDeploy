@@ -29,8 +29,8 @@ CoGIS). Справка для агентов раздела «Код»; где �
 
 ```csharp
 using Atemiko.eLiteMap.Geodatabase;   // подключение к БД (Workspace, WorkspaceName)
-using eLiteGIS.Geoprocessing;         // GpTool, IGpToolFactory, атрибуты
-using eLiteGIS.Utilities;             // UserException и др.
+using eLiteGIS.Geoprocessing;         // GpTool, IGpToolFactory, GpCategory, UserException
+using eLiteGIS.Utilities;             // GpDescription, GpToolIcon, GpRequired (сверено с DLL 12.0.4161.0)
 using Npgsql;
 using System;
 

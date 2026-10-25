@@ -19,6 +19,7 @@ public sealed class RulesTests : IDisposable
 
     private const string FirstTool = """
         using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
 
         namespace Demo
         {
@@ -44,6 +45,7 @@ public sealed class RulesTests : IDisposable
 
     private const string SecondTool = """
         using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
 
         namespace Demo
         {
@@ -101,7 +103,7 @@ public sealed class RulesTests : IDisposable
     [Fact]
     public void ToolWithoutDescription()
     {
-        var tool = SecondTool.Replace("[GpDescription(\"Второй\", englishDescription: \"Second\")]", "[GpDescription(\"Второй\")]", StringComparison.Ordinal);
+        var tool = SecondTool.Replace("[GpDescription(\"Второй\", englishDescription: \"Second\")]", "[GpDescription(\"Второй\", \"\")]", StringComparison.Ordinal);
 
         var rules = Check(Factory, FirstTool, tool);
 
@@ -119,6 +121,25 @@ public sealed class RulesTests : IDisposable
         var finding = Assert.Single(Check(Factory, FirstTool, SecondTool.Replace(attribute, replacement, StringComparison.Ordinal)).Findings);
 
         Assert.Equal(("tool_attributes", "SecondTool.cs"), (finding.Rule, finding.File));
+    }
+
+    [Theory]
+    [InlineData("[GpDescription(\"Второй\", englishDescription: \"Second\")]", "GpDescriptionAttribute(string russianDescription, string englishDescription)")]
+    [InlineData("[GpToolIcon(\"fa fa-map\")]", "GpToolIconAttribute(string cssIcon)")]
+    public void AttributeWithTheSameShortNameInAnotherNamespaceIsNotCounted(string attribute, string constructor)
+    {
+        // Old stub layout: the attribute in eLiteGIS.Geoprocessing instead of eLiteGIS.Utilities.
+        var name = constructor[..constructor.IndexOf("Attribute", StringComparison.Ordinal)];
+        var lookalike = $"namespace eLiteGIS.Geoprocessing {{ public class {name}Attribute : System.Attribute {{ public {constructor} {{ }} }} }}";
+        var tool = SecondTool.Replace(attribute, attribute.Replace($"[{name}(", $"[eLiteGIS.Geoprocessing.{name}(", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.NotEqual(SecondTool, tool);
+
+        var factory = Factory.Replace("typeof(FirstTool), ", string.Empty, StringComparison.Ordinal);
+
+        var finding = Assert.Single(Check(factory, tool, ("Lookalike.cs", lookalike)).Findings);
+
+        Assert.Equal(("tool_attributes", "SecondTool.cs"), (finding.Rule, finding.File));
+        Assert.Contains(name, finding.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -224,6 +245,7 @@ public sealed class RulesTests : IDisposable
     {
         const string tool = """
             using eLiteGIS.Geoprocessing;
+            using eLiteGIS.Utilities;
 
             [GpToolIcon("fa fa-map")]
             [GpCategory("Карты")]

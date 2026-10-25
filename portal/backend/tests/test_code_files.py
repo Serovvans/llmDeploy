@@ -365,6 +365,9 @@ async def test_scaffold_type_and_library_are_not_a_project_name(
         ("addmunicipalcontacttool", False),
         ("validateInput", False),
         ("InnerExecute", False),
+        ("execute", False),
+        ("TaskId", False),
+        ("temporaryWorkspace", False),
         ("targetworkspace", True),
         ("OpenConnection", True),
         ("GetConnectionString", True),
@@ -385,12 +388,15 @@ async def test_parameter_cannot_repeat_tool_member(
             "/api/code/projects", json={"source": "wizard", "wizard": _wizard(**tool)}
         )
         assert response.status_code == 422, response.text
-        fields = [item["field"] for item in response.json()["error"]["fields"]]
-        assert fields == [f"tools.0.{group}.0.name"]
+        fields = [(item["field"], item["code"]) for item in response.json()["error"]["fields"]]
+        assert fields == [(f"tools.0.{group}.0.name", "invalid_format")]
 
 
-async def test_database_member_names_are_free_without_database(settings: Settings) -> None:
-    parameter = {"name": "WorkspaceName", "type": "string", "required": False}
+@pytest.mark.parametrize("name", ["WorkspaceName", "Executor"])
+async def test_database_member_names_are_free_without_database(
+    settings: Settings, name: str
+) -> None:
+    parameter = {"name": name, "type": "string", "required": False}
     tool = {"uses_database": False, "inputs": [{**parameter, "title_ru": "a", "title_en": "a"}]}
     async with code_portal(settings) as (portal, _):
         client = await portal.employee()

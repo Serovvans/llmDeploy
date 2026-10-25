@@ -19,42 +19,24 @@ public abstract class GpTool
     public abstract void InnerExecute();
 }
 
-/// <summary>Russian and English description of a tool or a parameter.</summary>
-[AttributeUsage(AttributeTargets.Class | AttributeTargets.Property)]
-public sealed class GpDescriptionAttribute : Attribute
-{
-    /// <summary>Creates the description.</summary>
-    /// <param name="description">Russian text.</param>
-    /// <param name="englishDescription">English text.</param>
-    public GpDescriptionAttribute(string description, string? englishDescription = null)
-    {
-    }
-}
-
 /// <summary>Category of a tool in the CoGIS tool list.</summary>
 [AttributeUsage(AttributeTargets.Class)]
 public sealed class GpCategoryAttribute : Attribute
 {
     /// <summary>Creates the category.</summary>
-    /// <param name="category">Category name.</param>
-    public GpCategoryAttribute(string category)
+    /// <param name="name">Category name.</param>
+    public GpCategoryAttribute(string name)
     {
     }
 }
 
-/// <summary>Font Awesome icon of a tool.</summary>
-[AttributeUsage(AttributeTargets.Class)]
-public sealed class GpToolIconAttribute : Attribute
+/// <summary>Error that CoGIS shows to the user as is.</summary>
+public class UserException : Exception
 {
-    /// <summary>Creates the icon.</summary>
-    /// <param name="icon">Font Awesome classes, for example <c>fa fa-envelope</c>.</param>
-    public GpToolIconAttribute(string icon)
+    /// <summary>Creates the error.</summary>
+    /// <param name="exceptionMessage">Text for the user.</param>
+    public UserException(string exceptionMessage)
+        : base(exceptionMessage)
     {
     }
-}
-
-/// <summary>Marks a required input parameter.</summary>
-[AttributeUsage(AttributeTargets.Property)]
-public sealed class GpRequiredAttribute : Attribute
-{
 }

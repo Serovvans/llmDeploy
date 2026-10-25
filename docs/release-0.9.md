@@ -33,6 +33,7 @@ grep -E '^(COMPOSE_PROFILES|GPU_MEM_UTIL)=' "$LIVE/deploy/.env"   # значен
 
 - Работает 0.8: `cd "$LIVE" && make ps && git log -1 --oneline` — все сервисы healthy.
 - Владелец слил `feat/code` в `main` и отправил: `git -C "$LIVE" fetch && git -C "$LIVE" log -1 --oneline origin/main` — коммит релиза 0.9 (далее `<релиз>`). `git -C "$LIVE" status --short` — пусто.
+- Релизного клона нет: `ls "$REL"` — «нет такого файла». Есть (от прошлой раскатки) — убедиться, что своего в нём нет (`git -C "$REL" status --short` пусто, `deploy/.env` нет), и `rm -rf "$REL"`.
 - Место: `df -h /var/lib/docker "$BAK"` — разные устройства.
 - `PORTAL_SECRET_KEY` и `BIFROST_ENCRYPTION_KEY` сохранены вне ВМ.
 - Окно — в часы с малой нагрузкой; проверки шагов 10–13 ведёт один человек.
@@ -64,10 +65,10 @@ grep -E '^(COMPOSE_PROFILES|GPU_MEM_UTIL)=' "$LIVE/deploy/.env"   # значен
 9. Сервисы и шлюз:
     ```bash
     cd "$LIVE" && make ps                         # всё healthy, в том числе code-sandbox
-    make key NAME=smoke REQUESTS=100              # напечатает ключ sk-bf-…
-    make smoke KEY=<ключ smoke>
-    make smoke-portal                             # PASS code_sandbox: SDK CoGIS <версия>
-    make revoke ID=<id ключа smoke>
+    make key NAME=smoke-0.9 REQUESTS=100          # напечатает ключ sk-bf-…; имя занято навсегда (revoke только деактивирует)
+    make smoke KEY=<ключ smoke-0.9>
+    make smoke-portal                             # ИТОГ: PASS; строка code_sandbox — SDK CoGIS <версия>
+    make revoke ID=<id ключа smoke-0.9>
     ```
 10. Сборка выключена: в браузере «Код» → «Создать из примера» → «Создать проект» (имя `AddressEmailTool`) — открылся проект, в панели «Сборка» строка «Сборка на портале выключена…». Иначе — стоп, «Откат», первая строка.
 11. Включить сборку. В `deploy/portal/config.override.yaml` добавить в существующий раздел `code:`, если он есть, иначе добавить раздел (второго ключа `code:` быть не должно):
