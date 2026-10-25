@@ -81,7 +81,8 @@ internal static class SdkIndexer
             }
         }
 
-        var sdkVersion = versionSource!.InformationalVersion ?? versionSource.FileVersion ?? versionSource.Version;
+        // The real eLiteGIS.Server.dll keeps the default InformationalVersion "1.0.0"; its FileVersion is the release.
+        var sdkVersion = versionSource!.FileVersion ?? versionSource.InformationalVersion ?? versionSource.Version;
         var plugins = ReadPlugins(Path.Combine(sdkDir, pluginsName!));
 
         var manifest = new SdkManifest(SdkManifest.CurrentFormat, sdkVersion, files, plugins);

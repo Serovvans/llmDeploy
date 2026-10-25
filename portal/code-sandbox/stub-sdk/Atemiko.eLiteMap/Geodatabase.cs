@@ -1,7 +1,7 @@
 namespace Atemiko.eLiteMap.Geodatabase;
 
 /// <summary>Database connection selected by the user of a tool.</summary>
-public class Workspace
+public abstract class Workspace
 {
     /// <summary>Connection description.</summary>
     public WorkspaceName? WorkspaceName { get; }
@@ -11,7 +11,7 @@ public class Workspace
 public class WorkspaceName
 {
     /// <summary>Connection properties by the names from <see cref="PropertyNames"/>.</summary>
-    public Dictionary<string, object>? ConnectionProperties { get; }
+    public IDictionary<string, object>? ConnectionProperties { get; }
 
     /// <summary>Keys of <see cref="ConnectionProperties"/>.</summary>
     public static class PropertyNames

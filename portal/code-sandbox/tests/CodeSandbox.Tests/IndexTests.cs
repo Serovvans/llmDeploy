@@ -21,14 +21,27 @@ public sealed class IndexTests
         var gpTool = reference.Types.Single(type => type is { Namespace: "eLiteGIS.Geoprocessing", Name: "GpTool" });
         Assert.Equal(("class", "cogis", "public abstract class GpTool"), (gpTool.Kind, gpTool.Origin, gpTool.Signature));
         Assert.Contains(new ApiMember("method", "ValidateInput", "public virtual void ValidateInput()"), gpTool.Members);
-        var description = reference.Types.Single(type => type.Name == "GpDescriptionAttribute");
-        Assert.Contains(description.Members, member => member.Signature == "public GpDescriptionAttribute(string description, string? englishDescription = null)");
+        var description = reference.Types.Single(type => type is { Namespace: "eLiteGIS.Utilities", Name: "GpDescriptionAttribute" });
+        Assert.Contains(description.Members, member => member.Signature == "public GpDescriptionAttribute(string russianDescription, string englishDescription)");
         var names = reference.Types.Single(type => type is { Namespace: "Atemiko.eLiteMap.Geodatabase", Name: "WorkspaceName.PropertyNames" });
         Assert.Contains(new ApiMember("field", "ConnectionString", "public const string ConnectionString = \"ConnectionString\""), names.Members);
-        Assert.Contains(reference.Types, type => type is { Namespace: "eLiteGIS.Utilities", Name: "UserException", Origin: "cogis" });
+        Assert.Contains(reference.Types, type => type is { Namespace: "eLiteGIS.Geoprocessing", Name: "UserException", Origin: "cogis" });
         Assert.Contains(reference.Types, type => type is { Namespace: "System", Name: "String", Origin: "dotnet" });
         Assert.DoesNotContain(reference.Types, type => type.Namespace == "System.Runtime.CompilerServices");
         Assert.Equal(reference.Types.OrderBy(type => type.Namespace, StringComparer.Ordinal).ThenBy(type => type.Name, StringComparer.Ordinal).Select(type => type.Name), reference.Types.Select(type => type.Name));
+    }
+
+    [Theory]
+    [InlineData("[assembly: AssemblyFileVersion(\"12.0.4161.0\")] [assembly: AssemblyInformationalVersion(\"1.0.0\")]", "12.0.4161.0")]
+    [InlineData("[assembly: AssemblyInformationalVersion(\"13.0-rc\")]", "13.0-rc")]
+    [InlineData("[assembly: AssemblyVersion(\"12.0.0.0\")]", "12.0.0.0")]
+    public void SdkVersionIsFileThenInformationalThenAssemblyVersion(string attributes, string expected)
+    {
+        var server = TestSdk.BuildLibrary("eLiteGIS.Server", $"using System.Reflection; {attributes} namespace eLiteGIS.Geoprocessing {{ public abstract class GpTool {{ }} }}");
+        using var sdk = TestSdk.Create(extraFiles: new Dictionary<string, byte[]> { ["eLiteGIS.Server.dll"] = server });
+
+        Assert.Equal(expected, Read<SdkManifest>(sdk, SdkManifest.FileName).SdkVersion);
+        Assert.Equal(expected, Read<ApiReference>(sdk, ApiReference.FileName).SdkVersion);
     }
 
     [Fact]

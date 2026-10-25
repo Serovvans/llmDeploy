@@ -1495,6 +1495,7 @@ docker-compose.yml коммита …» значит, что `git checkout` пр
 | Портал: загрузка в базу знаний — «На сервере заканчивается место для файлов» (`507 storage_full`) | Свободного места тома файлов меньше `media.min_free_bytes`: `df -h /var/lib/docker`, освободить место (3.9) |
 | Портал: на файл 64–200 МБ в базу знаний сотрудник видит «Запрос слишком большой. Сократите текст или выберите файл поменьше» (413 от Caddy) | Caddy запущен с Caddyfile до 0.6: `sudo docker compose -f deploy/docker-compose.yml up -d --force-recreate --no-deps caddy` |
 | Портал: документы с `document_too_long`, добавленные до 0.6 | `make portal-reindex ONLY_ERRORS=1` — обработаются по новым пределам |
+| `make smoke` с самой ВМ: `CERTIFICATE_VERIFY_FAILED … Hostname mismatch` | `getent hosts <LLM_HOSTNAME>` даёт внешний адрес: с ВМ имя ведёт не на неё (снаружи проброшен только 18443). Проверка: `echo \| openssl s_client -connect 127.0.0.1:443 -servername <имя> \| openssl x509 -noout -subject` — имя сервиса. Решение: строка `127.0.0.1 <имя>` в `/etc/hosts` ВМ (действует только на процессы самой ВМ) |
 | Клиент: 401/403 | Нет ключа, ключ неверный или отозван (`make keys`) |
 | Клиент: 404 | Путь не из разрешённых: Caddy пропускает только `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models` |
 | Клиент: 429 | Исчерпан лимит ключа; поднять лимит в UI Bifrost или выдать отдельный ключ |

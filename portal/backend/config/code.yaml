@@ -23,7 +23,7 @@ code:
   reference_always:
     - eLiteGIS.Geoprocessing.GpTool
     - eLiteGIS.Geoprocessing.IGpToolFactory
-    - eLiteGIS.Utilities.UserException
+    - eLiteGIS.Geoprocessing.UserException
     - Atemiko.eLiteMap.Geodatabase.Workspace
     - Atemiko.eLiteMap.Geodatabase.WorkspaceName
   build_messages_max: 50

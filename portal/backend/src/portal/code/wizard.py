@@ -24,8 +24,42 @@ _ICON = re.compile(r"[a-z0-9 -]{1,100}")
 _WORD = re.compile(r"[A-Za-z0-9]+")
 # Как у тегов (А-63): разрыв строки и невидимое переупорядочивание в литерале C# — нет.
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
-# Члены класса инструмента в шаблонах, которые имя параметра не может повторить (§7.5.4).
-TOOL_MEMBERS = ("ValidateInput", "InnerExecute")
+# Члены класса инструмента, которые имя параметра не может повторить (§7.5.4): методы
+# шаблона и открытые и защищённые члены `GpTool` по DLL CoGIS 12.0.4161.0 (А-124).
+TOOL_MEMBERS = (
+    "ValidateInput",
+    "InnerExecute",
+    "AddDebugStep",
+    "AddForDisposing",
+    "AddProgressMessage",
+    "AddPublicMessage",
+    "AsPath",
+    "CreateLocalFile",
+    "Execute",
+    "ExpandEditTrackerFields",
+    "FillOutputParameters",
+    "GenerateTemporaryWorkspace",
+    "GetFilePathInWorkingDirectory",
+    "GetFolderPathInWorkingDirectory",
+    "GetInputParameterTypes",
+    "GetRequiredParameters",
+    "PingDatabases",
+    "SetInputParameter",
+    "SetToolParameters",
+    "ThrowIfCancelled",
+    "TryDispose",
+    "ValidateTool",
+    "CurrentUserName",
+    "DefaultParametersValues",
+    "MappingFromToolLocalNameToModelGuid",
+    "OwnJobEnvironment",
+    "ParentInputParametersByModelGuid",
+    "ParentInputRequiredParametersGuids",
+    "ParentOutputParametersByModelGuid",
+    "ServerLocalization",
+    "TaskId",
+    "TemporaryWorkspace",
+)
 DATABASE_MEMBERS = ("TargetWorkspace", "OpenConnection", "GetConnectionString", "WorkspaceName")
 
 

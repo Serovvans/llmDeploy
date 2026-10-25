@@ -5,5 +5,7 @@
     <RootNamespace>eLiteGIS</RootNamespace>
     <InformationalVersion>stub</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <!-- sdk_version prefers the file version; without it the stub reports "stub". -->
+    <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
   </PropertyGroup>
 </Project>

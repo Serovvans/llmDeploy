@@ -1,6 +1,6 @@
 # Контракт портала сотрудников
 
-Версия 0.20. Дата: 2026-10-25. Сверен с ПД версии 0.9 (раздел «Код»
+Версия 0.21. Дата: 2026-10-25. Сверен с ПД версии 0.9 (раздел «Код»
 0.9–1.0, решения владельца от 2026-10-24, §14 решения 1–27), `CLAUDE.md`, раздел
 «Пайплайн «Код» (0.9–1.0)», и ПИ версии 0.15 (§5.13, API-32…API-44); версия 0.17 — с ПД
 версии 0.7 (изменение 0.7 — «Память диалога», решения владельца от 2026-10-20) и
@@ -14,6 +14,27 @@
 этапов 2–5, без изменения утверждённого поведения, кроме отмеченных мест; 0.14 — решение
 владельца по итогам этапа 7. ПИ под пакет обновлялся параллельно: его запросы
 API-17…API-24 сведены в §15.3 и сверены по итогам ревью этапа.
+
+Изменение 0.21 (исправление 0.9.1: сверка **[ВМ]** с DLL CoGIS 12.0.4161.0 при раскатке
+0.9; решение принято оркестратором 2026-10-25 по сверке с DLL, А-124). Маршрутов, таблиц,
+полей, параметров, протокола `code-sandbox` и текстов интерфейса не добавлено и не
+изменено.
+- **Имена правил GPTool** — по `reference.json` настоящих DLL: `GpDescriptionAttribute`,
+  `GpToolIconAttribute`, `GpRequiredAttribute` — в `eLiteGIS.Utilities`, `UserException` — в
+  `eLiteGIS.Geoprocessing` (в 0.20 — наоборот, по комментариям инструкции заказчика); с
+  прежними именами правила давали на ВМ ложные находки. Заглушка SDK — с теми же
+  пространствами имён и конструкторами (§7.5.13).
+- **`code.reference_always`** — `eLiteGIS.Geoprocessing.UserException` вместо
+  несуществующего `eLiteGIS.Utilities.UserException` (§13.6).
+- **Имя параметра мастера** — `invalid_format` и при совпадении без учёта регистра с
+  открытыми и защищёнными членами `GpTool` по справочнику (20 методов и 10 свойств сверх
+  `ValidateInput` и `InnerExecute`): иначе свойство скрыло бы член базового класса
+  (`CS0108`). Текст отказа прежний; в заглушку SDK эти члены не добавляются (§7.5.4).
+- **`sdk_version`** — версия файла `eLiteGIS.Server.dll`, затем информационная, затем версия
+  сборки: информационная у настоящей DLL — «1.0.0» по умолчанию (§7.5.14).
+- Раскатка — новый образ `code-sandbox` и повтор `make cogis-sdk`; сборки, сделанные до неё,
+  сохраняют свои находки и `sdk_version` до новой сборки кнопкой. Зоны и тесты — §13.1,
+  сверка — §15.4.
 
 Изменение 0.20 (приёмка `accept-0.9`; решения приняты оркестратором 2026-10-25 по
 рекомендации, А-119…А-123). Маршрутов, таблиц и параметров не добавлено; новое — поле
@@ -3640,7 +3661,20 @@ null, restored_from: string | null }` — `created_at` у `build_succeeded` — 
   `name` параметра — `^[A-Za-z_][A-Za-z0-9_]{0,63}$`, не ключевое слово C#, без повтора в
   инструменте без учёта регистра и без совпадения без учёта регистра с именами, занятыми в
   классе инструмента: с итоговым именем класса своего инструмента (ниже; иначе `CS0542`),
-  `ValidateInput`, `InnerExecute` (`CS0102`), а при `uses_database` — и с `TargetWorkspace`,
+  `ValidateInput`, `InnerExecute` (`CS0102`), остальными открытыми и защищёнными членами
+  `GpTool` по справочнику DLL CoGIS 12.0.4161.0 (свойство скрыло бы член базового класса —
+  предупреждение `CS0108`, сборка проходит, но поведение CoGIS на запуске неясно; при
+  обновлении CoGIS список сверяется со справочником) **[А-124]** — методами
+  `AddDebugStep`, `AddForDisposing`, `AddProgressMessage`, `AddPublicMessage`, `AsPath`,
+  `CreateLocalFile`, `Execute`, `ExpandEditTrackerFields`, `FillOutputParameters`,
+  `GenerateTemporaryWorkspace`, `GetFilePathInWorkingDirectory`,
+  `GetFolderPathInWorkingDirectory`, `GetInputParameterTypes`, `GetRequiredParameters`,
+  `PingDatabases`, `SetInputParameter`, `SetToolParameters`, `ThrowIfCancelled`,
+  `TryDispose`, `ValidateTool` и свойствами `CurrentUserName`, `DefaultParametersValues`,
+  `MappingFromToolLocalNameToModelGuid`, `OwnJobEnvironment`,
+  `ParentInputParametersByModelGuid`, `ParentInputRequiredParametersGuids`,
+  `ParentOutputParametersByModelGuid`, `ServerLocalization`, `TaskId`, `TemporaryWorkspace`,
+  а при `uses_database` — и с `TargetWorkspace`,
   `OpenConnection`, `GetConnectionString` (`CS0102`), `WorkspaceName` (свойство скрыло бы
   тип в `WorkspaceName.PropertyNames` — `CS1061`) (`invalid_format`). Прочие
   имена шаблонов свойство не скрывает: локальные переменные важнее свойств, а тип в
@@ -4357,21 +4391,28 @@ null` (сервис жив, сборка ответит `503`).
 #### 7.5.13 Правила GPTool
 
 ПД §5.4: проверяются после успешной компиляции семантической моделью компилятора, без
-загрузки сборки на исполнение. Имена — по инструкции заказчика
-(`.claude/notes/code-workshop/gptool.md`); песочница сравнивает полные имена типов
-символов, а сами имена держит в своей конфигурации — сверка с настоящими DLL **[ВМ]**,
-до неё — как в заглушке SDK:
-- `eLiteGIS.Geoprocessing`: `GpTool`, `IGpToolFactory` (метод `Type[] GetToolTypes()`),
-  атрибуты `GpDescriptionAttribute` (русский текст и `englishDescription`),
-  `GpCategoryAttribute`, `GpToolIconAttribute`, `GpRequiredAttribute`;
-- `eLiteGIS.Utilities.UserException`;
-- `Atemiko.eLiteMap.Geodatabase`: `Workspace` (свойство `WorkspaceName`), `WorkspaceName`
-  (`ConnectionProperties`, `PropertyNames.ConnectionString`, `Host`, `Port`, `Database`,
-  `User`, `Password`).
+загрузки сборки на исполнение. Простые имена — по инструкции заказчика
+(`.claude/notes/code-workshop/gptool.md`), пространства имён и сигнатуры — сверено с DLL
+CoGIS 12.0.4161.0, 2026-10-25 (`reference.json` настоящих DLL, А-124); песочница
+сравнивает полные имена типов символов, а сами имена держит в своей конфигурации:
+- `eLiteGIS.Geoprocessing`: `GpTool` (`public virtual void ValidateInput()`, `public
+  abstract void InnerExecute()`), `IGpToolFactory` (`Type[] GetToolTypes()`),
+  `GpCategoryAttribute(string name)`, `UserException(string exceptionMessage)`;
+- `eLiteGIS.Utilities`: `GpDescriptionAttribute(string russianDescription, string
+  englishDescription)`, `GpToolIconAttribute(string cssIcon)`, `GpRequiredAttribute()`;
+- `Atemiko.eLiteMap.Geodatabase`: `Workspace` (абстрактный, свойство `WorkspaceName`),
+  `WorkspaceName` (`IDictionary<string, object> ConnectionProperties`, вложенный
+  `PropertyNames`: `ConnectionString`, `Host`, `Port`, `Database`, `User`, `Password`).
 
-Заглушка SDK (`portal/code-sandbox/`, `dotnet-engineer`) содержит только эти имена — в
-`eLiteGIS.Server.dll` первые два пространства имён, в `Atemiko.eLiteMap.dll` третье
-(ПД решение 26); имена файлов DLL — как в инструкции.
+Комментарии `using` в инструкции относят атрибуты к `eLiteGIS.Geoprocessing`, а
+`UserException` — к `eLiteGIS.Utilities`; верно — по DLL, как выше. Шаблоны мастера,
+пример и промпты от этого не зависят: файлы инструментов подключают оба пространства имён
+`eLiteGIS.*`, фабрика — только `eLiteGIS.Geoprocessing` (`IGpToolFactory`).
+
+Заглушка SDK (`portal/code-sandbox/`, `dotnet-engineer`) содержит только эти имена и
+сигнатуры — в `eLiteGIS.Server.dll` оба пространства имён `eLiteGIS.*`, в
+`Atemiko.eLiteMap.dll` — `Atemiko.eLiteMap.Geodatabase` (ПД решение 26); имена файлов DLL
+— как в инструкции.
 
 **Инструмент** — неабстрактный класс проекта, прямо или через предков наследующий
 `GpTool`. **Параметр** — открытое свойство экземпляра, объявленное в классе инструмента,
@@ -4464,8 +4505,10 @@ null` (сервис жив, сборка ответит `503`).
 сборки эталонного набора .NET 8 в образе песочницы (например, `System.Text.Json.dll`,
 скопированная с сервера): в ссылки сборки и в `Reference` выгрузки она не входит
 (§7.5.12, §7.5.5), в таблице команды — с этим видом **[А-116]**; `server` — остальные
-DLL. `sdk_version` — информационная версия `eLiteGIS.Server.dll`,
-иначе версия файла, иначе версия сборки; у заглушки — `"stub"`.
+DLL. `sdk_version` — версия файла `eLiteGIS.Server.dll` (`AssemblyFileVersionAttribute`),
+иначе информационная (`AssemblyInformationalVersionAttribute`), иначе версия сборки: у
+настоящей DLL информационная — «1.0.0» по умолчанию, а версия файла — номер выпуска
+(12.0.4161.0) **[А-124]**; у заглушки версии файла нет, информационная — `"stub"`.
 
 `reference.json` — справочник API (ПД §3.3):
 
@@ -7219,6 +7262,21 @@ Caddy не меняются (новый поток — под `/api/*` с `text/
 | `backend-engineer` | Ответ песочницы: `bundle[].file_name` `../a.dll`, `a/b.dll`, `a\b.dll`, `a.txt`, `.a.dll`, `a..dll`, повтор `A.dll` и `a.dll`, `<name>.dll` в другом регистре, элемент `on_server` с переводом строки — `503 build_unavailable`, прежняя сборка и архив целы; `Microsoft.Extensions.Logging.Abstractions.dll` проходит |
 | `backend-engineer` | Имя проекта: `Npgsql`, `npgsql`, `System`, `SYSTEM`, `mscorlib`, `netstandard`, `WindowsBase`, а при пакете `Dapper` в наборе фикстуры — `dapper` — `invalid_format` в мастере, примере, импорте и переносе; `Npgsql2`, `Systems` — допустимы |
 
+**Исправление 0.9.1** (0.21, А-124). Протокол, маршруты, схема БД, миграции, шаблоны
+мастера, промпты и тексты интерфейса не меняются.
+
+| Исполнитель | Что делает |
+|---|---|
+| `dotnet-engineer` | `portal/code-sandbox/`: полные имена правил GPTool — по §7.5.13 (`GpDescriptionAttribute`, `GpToolIconAttribute`, `GpRequiredAttribute` — `eLiteGIS.Utilities`, `UserException` — `eLiteGIS.Geoprocessing`); заглушка SDK — те же пространства имён и конструкторы; члены `GpTool` из справочника сверх инструкции (§7.5.4) в неё не добавляются (`CLAUDE.md`, пайплайн «Код», правило 10); `sdk_version` в `manifest.json` — порядок источников §7.5.14 |
+| `backend-engineer` | `config/code.yaml`: `code.reference_always` — `eLiteGIS.Geoprocessing.UserException` (§13.6); если имя есть в значениях по умолчанию `Settings` или фикстурах тестов — там же. `portal/code/wizard.py`: члены `GpTool` из §7.5.4 — в `TOOL_MEMBERS`, сравнение без учёта регистра, отказ прежний. Фронтенд списка не держит — `frontend-engineer` работы нет |
+
+Обязательные тесты 0.21:
+
+| Зона | Что проверяет тест |
+|---|---|
+| `dotnet-engineer` | xUnit на заглушке: правильный проект с атрибутами из `eLiteGIS.Utilities` — без находок; без `GpToolIcon` — находка `tool_attributes`; `index`: DLL с версией файла `12.0.4161.0` и информационной `1.0.0` — `sdk_version` `12.0.4161.0`, без версии файла — информационная, заглушка — `"stub"` |
+| `backend-engineer` | Мастер: имя параметра `execute`, `TaskId`, `temporaryWorkspace` (входной и выходной) — `invalid_format` у поля параметра; `Executor` — допустимо |
+
 ### 13.2 Слои
 
 Внутри каждого модуля: домен (сущности и порты — `typing.Protocol`) и сценарии не
@@ -8313,7 +8371,7 @@ llm-portal-api:<PORTAL_IMAGE_TAG> portal code-packages`; каталог накл
 | `code.reasoning_effort` | Уровень размышлений помощника и попыток цикла: `low` \| `medium` \| `xhigh` | `medium` |
 | `code.max_output_tokens` | Предел длины ответа помощника — в него входят размышления; правка присылает файлы целиком | 16384 |
 | `code.reference_max_tokens` | Бюджет блока `<справочник>` (§7.5.14) | 6000 |
-| `code.reference_always` | Полные имена типов справочника, которые идут первыми (§7.5.14) | `eLiteGIS.Geoprocessing.GpTool`, `eLiteGIS.Geoprocessing.IGpToolFactory`, `eLiteGIS.Utilities.UserException`, `Atemiko.eLiteMap.Geodatabase.Workspace`, `Atemiko.eLiteMap.Geodatabase.WorkspaceName` |
+| `code.reference_always` | Полные имена типов справочника, которые идут первыми (§7.5.14) | `eLiteGIS.Geoprocessing.GpTool`, `eLiteGIS.Geoprocessing.IGpToolFactory`, `eLiteGIS.Geoprocessing.UserException`, `Atemiko.eLiteMap.Geodatabase.Workspace`, `Atemiko.eLiteMap.Geodatabase.WorkspaceName` |
 | `code.build_messages_max` | Строк сообщений сборки в блоке `<сборка>` (§7.5.9) | 50 |
 | `code.editor_dotnet_types` | Полные имена частых типов .NET, которые `GET /api/code/sdk` отдаёт редактору для подсказок (§7.5.14, А-112); имя без числа параметров типа берёт все одноимённые (`Task` и `Task<TResult>`); имени нет в индексе — пропускается | `System.String`, `System.Int32`, `System.Int64`, `System.Double`, `System.Decimal`, `System.Boolean`, `System.DateTime`, `System.TimeSpan`, `System.Guid`, `System.Math`, `System.Convert`, `System.Exception`, `System.ArgumentException`, `System.InvalidOperationException`, `System.Collections.Generic.List`, `System.Collections.Generic.Dictionary`, `System.Collections.Generic.HashSet`, `System.Collections.Generic.IEnumerable`, `System.Collections.Generic.KeyValuePair`, `System.IO.File`, `System.IO.Path`, `System.IO.Directory`, `System.Linq.Enumerable`, `System.Text.StringBuilder`, `System.Text.Encoding`, `System.Threading.Tasks.Task` |
 | `code.sdk_index_dir` | Каталог индекса SDK в `portal-api` (§7.5.14) | `/data/cogis-sdk-index` |
@@ -8752,6 +8810,7 @@ docparse.dialog_reserve_tokens / 2` (§7.3; при стартовых значе
 | А-121 | Сколько читать и называть при импорте большого архива (приёмка 0.9: ~20 тыс. записей — ответ в мегабайты) | С первого `project_limit` остальные `.cs` не читаются; `skipped_files` и `unmatched_packages` — до 100 записей, общее число пропущенных — `skipped_total` (только добавление поля). Цена: меньший файл после первого не поместившегося в проект не попадает — что войдёт, решает порядок путей. Принято оркестратором 2026-10-25 по рекомендации (§7.5.5) |
 | А-122 | Доверять ли именам DLL в ответе песочницы (приёмка 0.9: `bundle[].file_name` шло в архив без проверки) | Нет: простое имя `.dll` без `/`, `\`, `..`, без повторов в архиве без учёта регистра, то же для `on_server` (строки памятки); иначе — ответ не по протоколу, `503 build_unavailable`. Новый код не нужен: отказ песочницы интерфейс уже показывает. Принято оркестратором 2026-10-25 по рекомендации (§7.5.7, §7.5.12) |
 | А-123 | Можно ли назвать проект как библиотеку (`Npgsql`, `System`) | Нет, без учёта регистра: `<name>.dll` легла бы поверх DLL пакета в архиве и на сервере, а одноимённая ссылка спорит со сборкой проекта. Список — `id` из `code.packages` и четыре имени эталонного набора .NET 8 без точки: это всё, что `portal-api` знает без запросов, а имена с точкой правило имени и так не пропускает. DLL пакета с именем файла не по `id` правило не ловит; проверка — только при создании, имя после создания не меняется (А-96). Принято оркестратором 2026-10-25 по рекомендации (§7.5.3) |
+| А-124 | Откуда брать полные имена правил GPTool и `sdk_version` (сверка **[ВМ]** с DLL CoGIS 12.0.4161.0 при раскатке 0.9: ложные находки правил, в `code.reference_always` — несуществующий тип) | Имена — по `reference.json` настоящих DLL, а не по комментариям `using` инструкции заказчика: атрибуты `GpDescription`, `GpToolIcon`, `GpRequired` — `eLiteGIS.Utilities`, `UserException` — `eLiteGIS.Geoprocessing`; заглушка — так же (§7.5.13, §13.6). `sdk_version` — версия файла `eLiteGIS.Server.dll`, затем информационная, затем версия сборки: информационная у настоящей DLL — «1.0.0» по умолчанию и выпуски не различает (§7.5.14). Имя параметра мастера не совпадает без учёта регистра с открытыми и защищёнными членами `GpTool` по справочнику — 20 методов и 10 свойств сверх `ValidateInput` и `InnerExecute`: свойство скрыло бы член базового класса (`CS0108` — только предупреждение, но поведение CoGIS на запуске неясно); отказ — прежний `invalid_format`, в заглушку эти члены не идут (§7.5.4). Простые имена, состав правил и тексты не меняются. Принято оркестратором 2026-10-25 по сверке с DLL |
 
 ### 15.3 Соответствие запросам ПИ §12
 
@@ -8894,7 +8953,7 @@ API-32…API-44 — по ПИ версии 0.15 этапа `contract-0.9` (2026-
 | Коэффициенты оценки по калибровке (0.7) | ВМ, после недели обычной работы: владелец, `backend-engineer` | `llm.chars_per_token` 2.0 и `llm.tokens_per_image` 3200 сверяются со строками `prompt usage`; 0.8 — после этого (ПД §8.4). Показывать ли процент на виду — решение владельца (ПД §5.7) |
 | Качество пересказа и задержка соседних ответов во время сжатия (0.8) | ВМ, после релиза 0.8: владелец | ПД §10, п. 31 **[ВМ]**: пересказ сохраняет числа, реквизиты и SQL; задержка первого токена в чате во время сжатия (ПД §8.4). Стартовые `memory.summary_max_tokens` 4096 и `memory.max_chars` 8000 подбираются по замеру |
 | DOCX, у которого нет части `word/document.xml` | Известное ограничение, как до 0.16 | `detect` признаёт DOCX по имени `word/document.xml`, а читатель берёт основную часть по связи `officeDocument` (§1.5). DOCX, где основная часть называется иначе (например, `word/document2.xml`) и `word/document.xml` нет, получает `415 unsupported_file_type`. Word так не пишет; встречается у сторонних генераторов. Не исправляется |
-| Совпадение заглушки SDK с настоящими DLL CoGIS (0.9): пространства имён, конструкторы атрибутов (`englishDescription`), `Workspace.WorkspaceName`, `PropertyNames` | Владелец или `dotnet-engineer` с DLL в `deploy/cogis-sdk/`, до включения `code.build.enabled` (ПД §8.5, решение 24) | Имена — по инструкции заказчика (§7.5.13). Расхождение — правка имён песочницы, шаблонов мастера и §7.5.13; открытые члены `GpTool` сверх `ValidateInput` и `InnerExecute` — в занятые имена параметра (§7.5.4); критерий ПД §10 п. 33 **[ВМ]** |
+| Совпадение заглушки SDK с настоящими DLL CoGIS (0.9): пространства имён, конструкторы атрибутов (`englishDescription`), `Workspace.WorkspaceName`, `PropertyNames` | Сверено с DLL CoGIS 12.0.4161.0, 2026-10-25 (`reference.json`, 0.21) | Пространства имён `GpDescriptionAttribute`, `GpToolIconAttribute`, `GpRequiredAttribute` и `UserException` разошлись — исправлены в §7.5.13, заглушке и `code.reference_always` (А-124); конструкторы атрибутов (`englishDescription`), `Workspace.WorkspaceName`, `PropertyNames` совпали. Открытые и защищённые члены `GpTool` по справочнику (20 методов и 10 свойств сверх `ValidateInput` и `InnerExecute`) внесены в занятые имена параметра (§7.5.4); после обновления CoGIS список сверяется заново. Критерий ПД §10 п. 33 **[ВМ]** — повторить после раскатки 0.9.1 |
 | Ложные находки `output_parameter` и `parameter_accessors` на рабочих инструментах заказчика (0.9) | `eval-0.9` и первые проекты на ВМ: `codegen-evaluator`, владелец | Эвристика А-102; ложная находка закрывает архив. Если встретится — правило уточняется (ПД §11), а не обходится |
 | Типы параметров CoGIS сверх пяти базовых (0.9) | После `make cogis-sdk`: `dotnet-engineer` по справочнику | Строки `wizard.yaml` (А-103); код портала не меняется |
 | DLL сервера CoGIS, одноимённые сборкам .NET 8 (0.9) | ВМ, при первом `make cogis-sdk`: владелец | Таблица команды показывает их видом `framework`; в ссылки сборки и выгрузки они не входят (А-116). Проверка — каркас мастера собирается с настоящей папкой SDK (ПД §10 п. 33 **[ВМ]**), выгруженный проект собирается в Visual Studio без `CS1703` и `CS0433` |
