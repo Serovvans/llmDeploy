@@ -53,7 +53,7 @@ export function projectNameServerError(code: string, name: string): string | nul
     case 'too_long':
       return w.name.tooLong;
     case 'invalid_format':
-      // Имя прошло правило символов — значит, оно занято: служебное слово C#, имя каркаса или имя Windows (контракт §7.5.3).
+      // Имя прошло правило символов — значит, оно занято: служебное слово C#, имя каркаса, имя библиотеки или имя Windows (контракт §7.5.3).
       return projectNameError(name) ?? w.name.reserved(name);
     default:
       return null;
@@ -546,11 +546,11 @@ export function importLines(report: ImportReport, project: CodeProject, config: 
     lines.push(t.missing(missing.map((item) => [item.id, item.version].filter(Boolean).join(' ')).join(', ')));
   }
   const skipped = report.skipped_files.slice(0, LIST_LIMIT).map((item) => t.skippedLine(item.path, importReason(item.reason, item.path, config)));
-  if (report.skipped_files.length > 0) {
-    lines.push(t.skipped(report.skipped_files.length));
+  if (report.skipped_total > 0) {
+    lines.push(t.skipped(report.skipped_total));
   }
   const tail = report.ignored_files > 0 ? [t.ignored(report.ignored_files)] : [];
-  return { lines: [...lines, ...tail], skipped, more: Math.max(0, report.skipped_files.length - LIST_LIMIT) };
+  return { lines: [...lines, ...tail], skipped, more: Math.max(0, report.skipped_total - skipped.length) };
 }
 
 /** Причина отказа портала у файла правки (таблица §5.13.11); `null` — строка без причины. */

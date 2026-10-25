@@ -1,16 +1,17 @@
 /**
  * Критерии 4, 5 (на заглушке), 6 и 8 (docs/portal-design.md §10): общий документ находится
  * у другого сотрудника, ответ показывает источник с документом, страницей и цитатой;
- * личный документ другим не виден; помощник CoGIS ссылается на загруженную документацию.
+ * личный документ другим не виден; помощник проекта «Код» ссылается на загруженную документацию CoGIS.
  *
  * Общая база на стенде одна на все тесты, поэтому у каждого теста свои слова-метки:
  * по ним лексический поиск ставит документ теста первым источником.
  */
 import { uniqueSuffix } from '../support/accounts';
+import { askCode, simpleProject } from '../support/code';
 import { pngImage, textFile, textPdf } from '../support/files';
 import { expect, test } from '../support/fixtures';
 import { must } from '../support/must';
-import { addKbDocument, chatWithAnswer, createDialog, eventsOf, expectError, parseStream } from '../support/portal';
+import { addKbDocument, chatWithAnswer, createDialog, eventsOf, expectError } from '../support/portal';
 import { chooseKnowledge, expectAnswerReady, send, toast } from '../support/ui';
 
 function token(): string {
@@ -147,7 +148,9 @@ test('скан без текстового слоя индексируется �
   );
 });
 
-test('помощник CoGIS отвечает со ссылками на документацию CoGIS и не берёт обычные документы', async ({
+// С 0.9 помощник CoGIS — помощник проекта раздела «Код»: поиск по документации CoGIS при каждом вопросе
+// (docs/portal-api.md §7.5.8).
+test('помощник проекта «Код» отвечает со ссылками на документацию CoGIS и не берёт обычные документы', async ({
   newMember,
   pageAs,
 }) => {
@@ -165,30 +168,25 @@ test('помощник CoGIS отвечает со ссылками на док�
   const available = await (await reader.api.get('/api/kb/cogis-documentation')).json();
   expect(available).toEqual({ available: true });
 
-  const page = await pageAs(reader, '/cogis');
-  await expect(page.getByText('В базе знаний нет документации CoGIS')).toHaveCount(0);
-  await send(page, `IPlugin${mark}`, 'Опишите, что должен делать плагин');
-  await expectAnswerReady(page);
-
   // Всё, что помощник передал модели, — только документация CoGIS.
-  const dialogId = await createDialog(reader.api, 'cogis');
-  const stream = await reader.api.post(`/api/dialogs/${dialogId}/messages`, {
-    data: { content: `IPlugin${mark}`, action: 'write' },
-  });
-  const events = parseStream(await stream.text());
-  const sources = eventsOf(events, 'sources').flatMap((event) => event.data.sources);
+  const viaApi = await simpleProject(reader.api, 'ApiAsk');
+  const sources = eventsOf(await askCode(reader.api, viaApi.dialog_id, `IPlugin${mark}`), 'sources').flatMap((event) => event.data.sources);
   expect(sources[0]).toMatchObject({ n: 1, document_title: manual.name, page: null });
   expect(sources.map((source: { document_id: string }) => source.document_id)).not.toContain(ordinaryDocument.id);
+
+  const project = await simpleProject(reader.api, 'UiAsk');
+  const page = await pageAs(reader, `/code/${project.id}`);
+  await expect(page.getByText('В базе знаний нет документации CoGIS')).toHaveCount(0);
+  await send(page, `IPlugin${mark}`, 'Опишите, что должен делать инструмент или что в нём изменить');
+  // Ответ заглушки несёт правку: вместо «Ответ готов» объявляется её приход (portal-ui.md §9).
+  await expect(page.getByRole('status').filter({ hasText: 'Помощник подготовил правку: 1 файл' })).toBeAttached();
+  await expect(page.getByRole('button', { name: 'Ответить заново' })).toBeVisible();
 
   await expect(page.getByRole('heading', { name: 'Источники' })).toBeVisible();
   const card = page.getByRole('button', { name: new RegExp(`^1\\s*${manual.name}`) });
   await expect(card).toContainText(`Интерфейс IPlugin${mark} описывает точку входа плагина`);
   // У документа без страниц страница в источнике не показывается.
   await expect(card).not.toContainText('стр.');
-
-  // Вопрос остаётся в истории помощника.
-  await page.reload();
-  await expect(page.getByRole('complementary', { name: 'История' }).getByRole('link')).toHaveCount(2);
 });
 
 test('удаление: чужой общий документ сотрудник удалить не может, автор — может; карточка источника остаётся', async ({

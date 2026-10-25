@@ -18,6 +18,17 @@
   line-height: 18px;
 }
 
+/* Two columns: each label is placed over the start of its column's text (offsets from Monaco's layout). */
+.columns {
+  position: relative;
+  height: 27px;
+}
+
+.columns span {
+  position: absolute;
+  top: 4px;
+}
+
 .editor {
   flex: 1;
   min-height: 0;

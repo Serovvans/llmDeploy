@@ -121,6 +121,9 @@ SCAFFOLD_NAMES = frozenset(
         "WorkspaceName",
     }
 )
+# Эталонные сборки .NET 8 с простым именем без точки: `<name>.dll` проекта спорила бы с
+# ними. Без учёта регистра, вместе с `id` пакетов `code.packages` (§7.5.3, А-123).
+FRAMEWORK_NAMES = frozenset({"mscorlib", "netstandard", "system", "windowsbase"})
 _PROJECT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 _PART = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
 _DRIVE = re.compile(r"[A-Za-z]:")
@@ -131,13 +134,20 @@ def windows_reserved(name: str) -> bool:
     return name.partition(".")[0].lower() in _WINDOWS_RESERVED
 
 
-def project_name_error(name: str) -> str | None:
-    """Код поля для имени проекта; `None` — имя годно."""
+def project_name_error(name: str, packages: Iterable[str]) -> str | None:
+    """Код поля для имени проекта; `None` — имя годно.
+
+    `packages` — `id` всех пакетов `code.packages`: имя проекта не совпадает с ними без
+    учёта регистра, как и с `FRAMEWORK_NAMES`. Проверяется только при создании (А-96).
+    """
+    folded = name.lower()
     if (
         not _PROJECT_NAME.fullmatch(name)
         or name in CSHARP_KEYWORDS
         or name in SCAFFOLD_NAMES
         or windows_reserved(name)
+        or folded in FRAMEWORK_NAMES
+        or any(folded == package.lower() for package in packages)
     ):
         return "invalid_format"
     return None

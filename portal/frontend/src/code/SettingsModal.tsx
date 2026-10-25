@@ -19,7 +19,7 @@ function NameRow({ label, value }: { label: string; value: string }) {
     <div className={styles.name}>
       <span className={styles.label}>{label}</span>
       <code className={styles.mono}>{value}</code>
-      <Link onClick={() => void copy(value)}>{copyLabel}</Link>
+      <Link component="button" onClick={() => void copy(value)}>{copyLabel}</Link>
     </div>
   );
 }
@@ -116,7 +116,7 @@ export function SettingsModal({ project, sdk, onClose, onSaved, onProjectGone, s
                 {hidden > 0 && (
                   <>
                     {' '}
-                    <Link onClick={() => setAllLibraries(true)}>{s.showAll}</Link>
+                    <Link component="button" onClick={() => setAllLibraries(true)}>{s.showAll}</Link>
                   </>
                 )}
               </p>

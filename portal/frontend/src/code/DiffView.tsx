@@ -7,6 +7,7 @@ import styles from './DiffView.module.css';
 const t = texts.workshop.editor;
 type Setup = typeof import('./monaco/setup');
 type DiffEditor = ReturnType<Setup['monaco']['editor']['createDiffEditor']>;
+type SideEditor = ReturnType<DiffEditor['getOriginalEditor']>;
 /** Две колонки «Было» / «Стало» — когда область редактора от 900 px (§5.13.11). */
 const SIDE_BY_SIDE_MIN = 900;
 
@@ -26,6 +27,8 @@ export function DiffView({ setup, theme, path, before, after }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<DiffEditor | null>(null);
   const [wide, setWide] = useState(true);
+  // Where the text of each column starts: the labels stand over the code, not over the line numbers.
+  const [columns, setColumns] = useState<{ before: number; after: number } | null>(null);
   const monaco = setup.monaco;
 
   useEffect(() => {
@@ -52,14 +55,26 @@ export function DiffView({ setup, theme, path, before, after }: Props) {
       contextmenu: true,
     });
     editor.current = created;
+    const textLeft = (side: SideEditor) => {
+      const dom = side.getDomNode();
+      return dom ? dom.getBoundingClientRect().left - node.getBoundingClientRect().left + side.getLayoutInfo().contentLeft : 0;
+    };
+    const place = () => setColumns({ before: textLeft(created.getOriginalEditor()), after: textLeft(created.getModifiedEditor()) });
+    const layouts = [created.getOriginalEditor().onDidLayoutChange(place), created.getModifiedEditor().onDidLayoutChange(place)];
+    let frame = 0;
     const observer = new ResizeObserver(([entry]) => {
       if (entry) {
         setWide(entry.contentRect.width >= SIDE_BY_SIDE_MIN);
       }
+      // The first layout of the inner editors happens before the listeners above exist.
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(place);
     });
     observer.observe(node);
     return () => {
+      window.cancelAnimationFrame(frame);
       observer.disconnect();
+      layouts.forEach((listener) => listener.dispose());
       const model = created.getModel();
       created.dispose();
       model?.original.dispose();
@@ -95,9 +110,13 @@ export function DiffView({ setup, theme, path, before, after }: Props) {
   return (
     <div className={styles.view}>
       {wide ? (
-        <div className={styles.labels} aria-hidden="true">
-          <span>{t.before}</span>
-          <span>{t.after}</span>
+        <div className={`${styles.labels} ${styles.columns}`} aria-hidden="true">
+          {columns && (
+            <>
+              <span style={{ left: columns.before }}>{t.before}</span>
+              <span style={{ left: columns.after }}>{t.after}</span>
+            </>
+          )}
         </div>
       ) : (
         <div className={styles.labels} aria-hidden="true">

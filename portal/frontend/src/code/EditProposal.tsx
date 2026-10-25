@@ -65,7 +65,7 @@ function Verification({ verification }: { verification: CodeVerification }) {
           <span className={styles.line}>
             <IconXCircleRegular16 className={styles.error} />
             {e.failed(errors.length)}{' '}
-            <Link aria-expanded={open} aria-controls={listId} onClick={() => setOpen((value) => !value)}>
+            <Link component="button" aria-expanded={open} aria-controls={listId} onClick={() => setOpen((value) => !value)}>
               {e.remaining}
             </Link>
           </span>
@@ -111,7 +111,8 @@ interface Props {
   pending: boolean;
   onReview: () => void;
   onReject: () => void;
-  onVersions: () => void;
+  /** `opener` — значение `data-opener` у обёртки ссылки «Версии»: на неё вернётся фокус. */
+  onVersions: (opener: string) => void;
 }
 
 /** Карточка правки под ответом помощника (концепция §5.13.11). */
@@ -174,7 +175,7 @@ export function EditProposal({ projectId, messageId, edit, config, currentText, 
         <Button size="small" use="primary" disabled={pending} onClick={onReview}>
           {e.review}
         </Button>
-        <Link disabled={pending} onClick={onReject}>
+        <Link component="button" disabled={pending} onClick={onReject}>
           {e.reject}
         </Link>
       </div>
@@ -185,15 +186,18 @@ export function EditProposal({ projectId, messageId, edit, config, currentText, 
       <p className={styles.line}>
         <IconCheckARegular16 />
         {accepted === edit.files.length ? e.accepted(date) : e.acceptedPart(accepted, edit.files.length, date)}{' '}
-        <Link onClick={onVersions}>{e.versions}</Link>
+        <span data-opener={`edit-versions-${messageId}`}>
+          <Link component="button" onClick={() => onVersions(`edit-versions-${messageId}`)}>{e.versions}</Link>
+        </span>
       </p>
     );
   } else {
     decision = <p className={styles.muted}>{edit.status === 'rejected' ? e.rejected : e.superseded}</p>;
   }
 
+  // Без вкладок фокус после решения возвращается на карточку (§9): её находит экран проекта.
   return (
-    <div className={styles.card}>
+    <div className={styles.card} tabIndex={-1} data-edit-card={messageId}>
       <h3 className={styles.title}>{e.title(edit.files.length)}</h3>
       <ul className={styles.files}>
         {edit.files.map((file) => {

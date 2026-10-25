@@ -11,6 +11,7 @@ import { useChat } from '../chat/ChatProvider';
 import { EmptyState } from '../components/EmptyState';
 import { Notice } from '../components/Notice';
 import { TitleHint } from '../components/TitleHint';
+import { useFocusReturn } from '../hooks/useFocusReturn';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useSession } from '../session/SessionContext';
 import { formatSize, texts } from '../texts';
@@ -23,7 +24,7 @@ import { useCode } from './CodeContext';
 import { CodeEditor, type Fragment, type Jump } from './CodeEditor';
 import type { CreatedState } from './CodeHome';
 import { EditTab, type Decision } from './EditTab';
-import { EDIT_TAB, EditorTabs } from './EditorTabs';
+import { EDIT_TAB, EditorTabs, TAB_PANEL_ID, tabElementId } from './EditorTabs';
 import { ProjectFiles } from './FileTree';
 import { useMonaco } from './monaco/loader';
 import { useProjectActions } from './projectActions';
@@ -120,10 +121,26 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
   const [unavailable, setUnavailable] = useState(false);
   const [jump, setJump] = useState<Jump | null>(null);
   const [modal, setModal] = useState<'archive' | 'settings' | 'versions' | null>(null);
+  const rememberOpener = useFocusReturn(modal !== null);
+  /** Окно открывается с кнопки или ссылки внутри `[data-opener=…]`: после закрытия фокус вернётся на неё (§9). */
+  const openModal = (kind: 'archive' | 'settings' | 'versions', opener: string) => {
+    rememberOpener(`[data-opener="${opener}"] :is(a, button)`);
+    setModal(kind);
+  };
   const [readOnly, setReadOnly] = useState(false);
   const [decisionPending, setDecisionPending] = useState<string | null>(null);
   const [report, setReport] = useState(created?.importReport ?? null);
+  // The import report is kept on screen, but the address forgets it: a page reload does not bring it back.
+  const hasReport = Boolean(created?.importReport);
+  useEffect(() => {
+    if (hasReport) {
+      navigate(location.pathname, { replace: true, state: null });
+    }
+  }, [hasReport, location.pathname, navigate]);
   const [tabHint, setTabHint] = useState(false);
+  // Куда перевести фокус после «Посмотреть и принять» и после решения по правке (§9).
+  const [focusAfter, setFocusAfter] = useState<'edit' | 'editor' | { card: string } | null>(null);
+  const focusDone = useCallback(() => setFocusAfter(null), []);
   const opened = useRef(false);
 
   const projectGone = useCallback(() => {
@@ -254,9 +271,12 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
       } else {
         SingleToast.push(count === total ? w.edit.acceptedToast(count) : w.edit.acceptedPartToast(count, total));
       }
-      if (editMessage === messageId) {
+      const editClosing = editMessage === messageId;
+      const fileShown = active !== null && active !== EDIT_TAB;
+      if (editClosing) {
         closeTab(EDIT_TAB);
       }
+      setFocusAfter(fileShown || (editClosing && tabs.length > 0) ? 'editor' : { card: messageId });
       return { kind: 'done' };
     } catch (error) {
       if (isApiError(error, 'edit_decided')) {
@@ -288,7 +308,15 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
     void state.flush();
     setEditMessage(messageId);
     setActive(EDIT_TAB);
+    setFocusAfter('edit');
   };
+
+  // Без открытых файлов фокус после решения — на карточку правки в ленте помощника.
+  useEffect(() => {
+    if (focusAfter !== null && typeof focusAfter === 'object') {
+      document.querySelector<HTMLElement>(`[data-edit-card="${focusAfter.card}"]`)?.focus();
+    }
+  }, [focusAfter]);
 
   const rejectEdit = (messageId: string) => {
     const edit = view?.messages.find((message) => message.id === messageId)?.code_edit;
@@ -315,8 +343,8 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
     show: showAssistant,
     reloadProject: () => void reload(),
     decisionPending,
-    onOpenSettings: () => setModal('settings'),
-    onOpenVersions: () => setModal('versions'),
+    onOpenSettings: (opener) => openModal('settings', opener),
+    onOpenVersions: (opener) => openModal('versions', opener),
     onReview: review,
     onRejectEdit: rejectEdit,
     onOpenFragment: openFragment,
@@ -385,6 +413,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
   const conflictFile = state.conflict ? files.find((file) => file.id === state.conflict?.fileId) : undefined;
   const imported = report ? importLines(report, project, codeConfig, sdk) : null;
   const showEdit = active === EDIT_TAB && editMessage !== null;
+  const editorTab = showEdit ? EDIT_TAB : (activeFile?.id ?? null);
 
   let editorArea: React.ReactNode;
   if (monaco.status === 'failed') {
@@ -412,6 +441,8 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
             projectId={id}
             messageId={editMessage}
             decide={(accept, total) => decide(editMessage, accept, total)}
+            focusFirst={focusAfter === 'edit'}
+            onFocused={focusDone}
           />
         )}
         {activeFile ? (
@@ -431,6 +462,8 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
               build={project.build}
               readOnly={readOnly}
               jump={jump}
+              focus={focusAfter === 'editor'}
+              onFocused={focusDone}
               onExplain={(fragment: Fragment | null) => assistant.ask({ kind: 'explain', fragment })}
               onChangeSelection={(fragment) => assistant.ask({ kind: 'change', fragment })}
             />
@@ -442,9 +475,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
     );
   }
 
-  const layout = [styles.project, assistantOpen ? styles.withAssistant : '', expanded && route.kind !== 'disabled' ? styles.buildOpen : '']
-    .filter(Boolean)
-    .join(' ');
+  const layout = assistantOpen ? `${styles.project} ${styles.withAssistant}` : styles.project;
 
   return (
     <div className={layout}>
@@ -480,12 +511,16 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
           </TitleHint>
         </div>
         <div className={styles.headerActions}>
-          <Button size="small" icon={<IconTimeClockMoveBackRegular16 />} onClick={() => setModal('versions')}>
-            {w.project.versions}
-          </Button>
-          <Button size="small" icon={<IconSettingsGearRegular16 />} onClick={() => setModal('settings')}>
-            {w.project.settings}
-          </Button>
+          <span data-opener="versions">
+            <Button size="small" icon={<IconTimeClockMoveBackRegular16 />} onClick={() => openModal('versions', 'versions')}>
+              {w.project.versions}
+            </Button>
+          </span>
+          <span data-opener="settings">
+            <Button size="small" icon={<IconSettingsGearRegular16 />} onClick={() => openModal('settings', 'settings')}>
+              {w.project.settings}
+            </Button>
+          </span>
           <Hint text={assistantOpen ? w.project.hideAssistant : w.project.showAssistant}>
             <Button
               size="small"
@@ -505,7 +540,11 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
               <Kebab aria-label={`${texts.users.actions}: ${project.name}`}>
                 <MenuItem onClick={() => actions.exportProject(project.id, project.name)}>{w.exportVs}</MenuItem>
                 <MenuSeparator />
-                <MenuItem onClick={() => actions.askRemove({ id: project.id, name: project.name })}>{w.removeProject}</MenuItem>
+                <MenuItem
+                  onClick={() => actions.askRemove({ id: project.id, name: project.name }, '[data-opener="project-header"] [tabindex="0"]')}
+                >
+                  {w.removeProject}
+                </MenuItem>
               </Kebab>
             </Hint>
           </span>
@@ -515,7 +554,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
         <EditorTabs
           tabs={fileTabs}
           edit={editMessage ? (view?.messages.find((message) => message.id === editMessage)?.code_edit?.files.length ?? 0) : null}
-          active={showEdit ? EDIT_TAB : (activeFile?.id ?? null)}
+          active={editorTab}
           saveState={state.saveState}
           tabHint={tabHint}
           onSelect={(tabId) => (tabId === EDIT_TAB ? setActive(EDIT_TAB) : openFile(tabId))}
@@ -540,7 +579,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
               {imported.lines.map((line) => (
                 <span key={line} className={styles.reportLine}>
                   {line}
-                  {line === w.imported.skipped(report?.skipped_files.length ?? 0) && (
+                  {line === w.imported.skipped(report?.skipped_total ?? 0) && (
                     <span className={styles.reportList}>
                       {imported.skipped.map((item) => (
                         <span key={item} className={styles.reportItem}>
@@ -555,7 +594,13 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
             </Notice>
           </div>
         )}
-        <div className={styles.editorArea}>{editorArea}</div>
+        {editorTab ? (
+          <div className={styles.editorArea} role="tabpanel" id={TAB_PANEL_ID} aria-labelledby={tabElementId(editorTab)}>
+            {editorArea}
+          </div>
+        ) : (
+          <div className={styles.editorArea}>{editorArea}</div>
+        )}
       </div>
       <BuildPanel
         state={route}
@@ -577,7 +622,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
         onTab={setBuildTab}
         onBuild={() => void runBuild()}
         onFix={() => assistant.ask({ kind: 'fix' })}
-        onDownload={() => setModal('archive')}
+        onDownload={() => openModal('archive', 'archive')}
         onExportVs={() => actions.exportProject(project.id, project.name)}
         onJump={(path, line, column) => {
           const file = files.find((item) => item.path === path);

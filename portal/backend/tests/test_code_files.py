@@ -1,6 +1,8 @@
 """Мастер, импорт и выгрузка ZIP раздела «Код» (docs/portal-api.md §7.5.4, §7.5.5)."""
 
+import base64
 import io
+import tracemalloc
 import zipfile
 from typing import Any
 from uuid import uuid4
@@ -12,7 +14,10 @@ from portal.code.domain import CodeLimits, ProjectView
 from portal.code.edit import parse_edit
 from portal.code.paths import conflicts, path_error, project_name_error
 from portal.code.wizard import class_names
-from portal.core.settings import Settings
+from portal.code.zipio import read_import
+from portal.core.errors import AppError
+from portal.core.settings import CodePackage, Settings
+from tests import samples
 from tests.code_support import code_portal, edit_answer, file_of, new_project
 
 pytestmark = pytest.mark.anyio
@@ -125,6 +130,96 @@ async def test_import_refusals(settings: Settings, data: bytes, status: int, cod
         assert (await client.get("/api/code/projects")).json()["items"] == []
 
 
+@pytest.mark.parametrize("method", [zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2])
+def test_import_entry_lying_about_its_size_is_not_unpacked(method: int) -> None:
+    """Размер в оглавлении подделан: запись не распаковывается дальше предела файла."""
+    data = samples.zip_claiming_size({"A.cs": bytes(30_000_000)}, method, "A.cs", 100)
+    limits = CodeLimits(50, 16_384, 262_144, (".cs",))
+    tracemalloc.start()
+    try:
+        with pytest.raises(AppError) as refused:
+            read_import(data, limits, [], 1 << 20)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert refused.value.code == "import_no_files"
+    assert peak < 5_000_000
+
+
+_LIMITS = CodeLimits(50, 16_384, 262_144, (".cs",))
+
+
+def _skipped(result: Any) -> list[tuple[str, str]]:
+    return [(item["path"], item["reason"]) for item in result.skipped_files]
+
+
+def test_import_stops_reading_once_project_is_full() -> None:
+    """С первого `project_limit` остальные `.cs` не читаются (§7.5.5, А-121)."""
+    sources = {f"F{index:02}.cs": b"class F {}" for index in range(60)}
+    result = read_import(_zip(sources), _LIMITS, [], 1 << 20)
+    assert [path for path, _ in result.files] == [f"F{index:02}.cs" for index in range(50)]
+    assert _skipped(result) == [(f"F{index:02}.cs", "project_limit") for index in range(50, 60)]
+    assert result.skipped_total == 10
+
+    # D.cs — битые данные (контрольная сумма не сходится), E.cs сжат bzip2.
+    marker = b"BROKEN-CONTENT-MARKER"
+    entries = {"A.cs": b"class A {}", "B.cs": b"class B {}", "C.cs": b"x", "D.cs": marker}
+    data = samples.zip_with_method(
+        _zip({**entries, "E.cs": b"class E {}"}), "E.cs", zipfile.ZIP_BZIP2
+    )
+    data = data.replace(marker, b"BROKEN-CONTENT-MARKEX")
+    read = read_import(data, _LIMITS, [], 1 << 20)
+    assert _skipped(read) == [("D.cs", "unreadable"), ("E.cs", "unreadable")]
+    full = read_import(data, CodeLimits(2, 16_384, 262_144, (".cs",)), [], 1 << 20)
+    assert [path for path, _ in full.files] == ["A.cs", "B.cs"]
+    assert _skipped(full) == [(name, "project_limit") for name in ("C.cs", "D.cs", "E.cs")]
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_import_entries_not_stored_or_deflated_are_unreadable(method: int) -> None:
+    """`.cs` и `.csproj`, сжатые bzip2 и LZMA, не распаковываются (§7.5.5, А-120)."""
+    data = _zip({"A.cs": b"class A {}", "B.cs": b"class B {}", "P.csproj": _CSPROJ})
+    for name in ("B.cs", "P.csproj"):
+        data = samples.zip_with_method(data, name, method)
+    result = read_import(data, _LIMITS, [], 1 << 20)
+    assert [path for path, _ in result.files] == ["A.cs"]
+    assert _skipped(result) == [("B.cs", "unreadable"), ("P.csproj", "unreadable")]
+    assert result.unmatched_packages == [] and result.packages == []
+
+
+async def test_import_report_lists_first_hundred_skipped(settings: Settings) -> None:
+    """`skipped_files` — первые 100 по порядку шагов, `skipped_total` — все (А-121)."""
+    entries = {f"Bad name {index:03}.cs": b"x" for index in range(150)}
+    data = _zip({"A.cs": b"class A {}", **entries, "Broken.csproj": b"<Project"})
+    async with code_portal(settings) as (portal, _):
+        client = await portal.employee()
+        response = await _import(client, data)
+        assert response.status_code == 201, response.text
+        report = response.json()["import"]
+    assert report["skipped_total"] == 151
+    assert report["skipped_files"] == [
+        {"path": f"Bad name {index:03}.cs", "reason": "invalid_path"} for index in range(100)
+    ]
+
+
+def test_import_report_names_at_most_hundred_packages(settings: Settings) -> None:
+    """`unmatched_packages` — до 100 разных в порядке появления; пакеты проекта — все."""
+    references = "".join(
+        f'<PackageReference Include="Pkg{index:03}" Version="1.0.0" />' for index in range(150)
+    )
+    csproj = (
+        f'<Project><ItemGroup><PackageReference Include="Pkg000" Version="1.0.0" />{references}'
+        '<PackageReference Include="Npgsql" Version="9.0.3" /></ItemGroup></Project>'
+    ).encode()
+    result = read_import(
+        _zip({"A.cs": b"class A {}", "P.csproj": csproj}), _LIMITS, settings.code.packages, 1 << 20
+    )
+    assert [item["id"] for item in result.unmatched_packages] == [
+        f"Pkg{index:03}" for index in range(100)
+    ]
+    assert result.packages == ["Npgsql"]
+
+
 async def test_import_size_limit(settings: Settings) -> None:
     async with code_portal(settings, import_max_bytes=1000) as (portal, _):
         client = await portal.employee()
@@ -222,28 +317,46 @@ async def test_wizard_scaffold_with_base_type_title(settings: Settings) -> None:
         assert "typeof(GpTool2)" in file_of(project, "GpToolFactory.cs")["content"]
 
 
+_DAPPER = CodePackage(id="Dapper", version="2.1.35", sha512=base64.b64encode(bytes(64)).decode())
+
+
 @pytest.mark.parametrize("way", ["wizard", "transfer", "example", "import"])
-async def test_scaffold_type_is_not_a_project_name(settings: Settings, way: str) -> None:
-    # Пространство имён `GpTool` скрыло бы базовый класс каркаса (CS0118).
-    async with code_portal(settings) as (portal, _):
+async def test_scaffold_type_and_library_are_not_a_project_name(
+    settings: Settings, way: str
+) -> None:
+    """Имя каркаса и имя библиотеки — `invalid_format` на всех путях создания (§7.5.3).
+
+    Пространство имён `GpTool` скрыло бы базовый класс каркаса (CS0118); `<name>.dll`
+    легла бы поверх DLL пакета или эталонной сборки (А-123).
+    """
+    names = ["GpTool", "Npgsql", "npgsql", "System", "SYSTEM", "mscorlib", "netstandard"]
+    names += ["WindowsBase", "dapper"]
+    async with code_portal(settings, packages=(*settings.code.packages, _DAPPER)) as (portal, _):
         client = await portal.employee()
-        wizard = {**_wizard(), "name": "GpTool"}
-        if way == "import":
-            response = await _import(client, _zip({"A.cs": b"class A {}"}), name="GpTool")
-        else:
-            body: dict[str, Any] = {"source": way, "wizard": wizard}
-            if way == "example":
-                body = {"source": "example", "name": "GpTool"}
-            elif way == "transfer":
-                body = {
-                    "source": "wizard",
-                    "wizard": wizard,
-                    "carried": {"text": "Итоги", "source_dialog_id": str(uuid4())},
-                }
-            response = await client.post("/api/code/projects", json=body)
-        assert response.status_code == 422, response.text
-        fields = response.json()["error"]["fields"]
-        assert [(item["field"], item["code"]) for item in fields] == [("name", "invalid_format")]
+        for name in [*names, "Npgsql2", "Systems"]:
+            wizard = {**_wizard(), "name": name}
+            if way == "import":
+                response = await _import(client, _zip({"A.cs": b"class A {}"}), name=name)
+            else:
+                body: dict[str, Any] = {"source": way, "wizard": wizard}
+                if way == "example":
+                    body = {"source": "example", "name": name}
+                elif way == "transfer":
+                    body = {
+                        "source": "wizard",
+                        "wizard": wizard,
+                        "carried": {"text": "Итоги", "source_dialog_id": str(uuid4())},
+                    }
+                response = await client.post("/api/code/projects", json=body)
+            if name not in names:
+                # Перенос из несуществующего диалога — 404 уже после проверки имени.
+                assert response.status_code == (404 if way == "transfer" else 201), name
+                continue
+            assert response.status_code == 422, (name, response.text)
+            fields = response.json()["error"]["fields"]
+            assert [(item["field"], item["code"]) for item in fields] == [
+                ("name", "invalid_format")
+            ], name
 
 
 @pytest.mark.parametrize(
@@ -343,10 +456,17 @@ async def test_project_count_limit(settings: Settings) -> None:
         ("DateTime", False),
         ("GpCategoryAttribute", False),
         ("gptool", True),
+        ("Npgsql", False),
+        ("NPGSQL", False),
+        ("dapper", False),
+        ("System", False),
+        ("windowsbase", False),
+        ("Npgsql2", True),
+        ("Systems", True),
     ],
 )
 def test_project_name_rules(name: str, valid: bool) -> None:
-    assert (project_name_error(name) is None) is valid
+    assert (project_name_error(name, ["Npgsql", "Dapper"]) is None) is valid
 
 
 def test_path_conflicts_are_case_insensitive() -> None:

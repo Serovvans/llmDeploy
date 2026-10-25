@@ -31,7 +31,8 @@ export function Crumb() {
 }
 
 interface SectionLayoutProps {
-  title: string;
+  /** Без названия шапки нет: служебное состояние со своим заголовком или загрузка. */
+  title?: string;
   /** Есть ли перед названием ссылка на начало раздела (мастер). */
   crumb?: boolean;
   /** Своя рабочая область вместо прокручиваемой колонки (прежний диалог). */
@@ -46,13 +47,15 @@ export function SectionLayout({ title, crumb = false, bare = false, actions, chi
     <div className={styles.section}>
       <ProjectList />
       <div className={styles.area}>
-        <header className={styles.header}>
-          <div className={styles.titleRow}>
-            {crumb && <Crumb />}
-            <h1 className={styles.title}>{title}</h1>
-          </div>
-          {actions}
-        </header>
+        {title !== undefined && (
+          <header className={styles.header}>
+            <div className={styles.titleRow}>
+              {crumb && <Crumb />}
+              <h1 className={styles.title}>{title}</h1>
+            </div>
+            {actions}
+          </header>
+        )}
         {bare ? (
           children
         ) : (

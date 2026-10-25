@@ -2,9 +2,9 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { CodeBuild, CodeProject, CodeSdk, PortalConfig } from '../api/types';
+import type { CodeBuild, CodeEdit, CodeProject, CodeSdk, Message, PortalConfig } from '../api/types';
 import { CONFIG, fail, mockApi, ok, session } from '../test/mockApi';
-import { renderApp } from '../test/renderApp';
+import { menuItems, renderApp } from '../test/renderApp';
 import { texts } from '../texts';
 
 // Monaco в jsdom не работает: экран проверяется без редактора — он остаётся в «Загрузка редактора…».
@@ -137,6 +137,112 @@ describe('раздел «Код»: экран проекта', () => {
 
     await waitFor(() => expect(server.callsTo(`POST /api/code/projects/${ID}/files`)).toHaveLength(1));
     await waitFor(() => expect(server.callsTo('GET /api/dialogs/d-1/memory')).toHaveLength(2), { timeout: 2000 });
+  });
+
+  it('«Настройки» → Esc: фокус возвращается на кнопку, открывшую окно (§9)', async () => {
+    const { user } = setup({ 'GET /api/sql/schemas': () => ok({ items: [] }) });
+    await projectOpened();
+    const opener = screen.getByRole('button', { name: w.project.settings });
+    await user.click(opener);
+    await screen.findByRole('button', { name: w.settings.save });
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it('«Действия» → «Удалить проект» → «Отмена»: фокус возвращается на «Действия» (§9)', async () => {
+    const { user, server } = setup();
+    await projectOpened();
+    const opener = screen.getByRole('button', { name: `${texts.users.actions}: AddressEmailTool` });
+    await user.click(opener);
+    await user.click(await waitFor(() => menuItems().find((item) => item.textContent === w.removeProject) as HTMLElement));
+    const modal = await screen.findByRole('dialog');
+    await user.click(within(modal).getByRole('button', { name: texts.common.cancel }));
+
+    await waitFor(() => expect(opener).toHaveFocus());
+    expect(server.callsTo(`DELETE /api/code/projects/${ID}`)).toHaveLength(0);
+  });
+
+  it('приход правки объявляется; «Отклонить» без открытых файлов — фокус на карточку правки (§9)', async () => {
+    const edit: CodeEdit = {
+      status: 'proposed',
+      files: [
+        { path: 'A.cs', change: 'added', decision: null },
+        { path: 'B.cs', change: 'added', decision: null },
+      ],
+      rejected_files: [],
+      incomplete: false,
+      verification: null,
+      decided_at: null,
+    };
+    const base: Omit<Message, 'id' | 'role' | 'content' | 'created_at'> = {
+      status: 'complete',
+      error_code: null,
+      reasoning: null,
+      reasoning_seconds: null,
+      attachments: [],
+      sources: null,
+      sources_found: null,
+      sql_check: null,
+      sql_run: null,
+      sql_dangers: null,
+      dropped_messages: 0,
+      memory_mode: 'full',
+    };
+    const question: Message = { ...base, id: 'u-1', role: 'user', content: 'Добавь два файла', created_at: '2026-10-25T10:00:00Z' };
+    const answer: Message = { ...base, id: 'a-1', role: 'assistant', content: 'Готово', code_edit: edit, created_at: '2026-10-25T10:01:00Z' };
+    const { user, server } = setup({
+      [`GET /api/code/projects/${ID}`]: () => ok(project({ files: [], build: null })),
+      'GET /api/dialogs/d-1/messages': () => ok({ items: [answer, question], next_cursor: null }),
+      [`GET /api/code/projects/${ID}/edits/a-1`]: () => fail(500, 'internal_error'),
+      [`POST /api/code/projects/${ID}/edits/a-1/decision`]: () =>
+        ok({ edit: { ...edit, status: 'rejected' }, project: project({ files: [], build: null }) }),
+    });
+    await projectOpened();
+
+    expect(await screen.findByText(w.edit.announce(2))).toHaveAttribute('role', 'status');
+    await user.click(screen.getByText(w.edit.reject));
+    await waitFor(() => expect(server.callsTo(`POST /api/code/projects/${ID}/edits/a-1/decision`)).toHaveLength(1));
+    await waitFor(() => expect(document.activeElement?.getAttribute('data-edit-card')).toBe('a-1'));
+  });
+
+  it('порядок списка проектов — по времени изменения: открытие не поднимает строку, новый файл поднимает (§5.13.3)', async () => {
+    const item = (id: string, name: string, updatedAt: string) => ({ id, name, updated_at: updatedAt, build: null });
+    const file = { id: 'f-2', path: 'Helpers.cs', content: '', revision: 1, updated_at: '2026-10-25T12:00:00Z' };
+    let created = false;
+    let listed = false;
+    const { user } = setup({
+      // The list is read once: what it shows afterwards is the screen's own bookkeeping.
+      'GET /api/code/projects': () => {
+        if (listed) {
+          return new Promise(() => undefined);
+        }
+        listed = true;
+        return ok({ items: [item('p-2', 'ParcelTool', '2026-10-25T11:00:00Z'), item(ID, 'AddressEmailTool', '2026-10-25T10:00:00Z')], next_cursor: null });
+      },
+      [`POST /api/code/projects/${ID}/files`]: () => {
+        created = true;
+        return ok(file, 201);
+      },
+      [`GET /api/code/projects/${ID}`]: () =>
+        ok(created ? project({ files: [...project().files, file], updated_at: file.updated_at }) : project()),
+    });
+    const order = async () => {
+      await user.click(screen.getByText(`← ${w.allProjects}`));
+      const list = await screen.findByRole('complementary', { name: w.projects });
+      return within(list).getAllByRole('listitem').map((row) => within(row).getByRole('link').textContent);
+    };
+    await projectOpened();
+
+    expect((await order()).map((text) => text?.startsWith('ParcelTool'))).toEqual([true, false]);
+
+    await user.click(screen.getByRole('link', { name: /AddressEmailTool/ }));
+    await projectOpened();
+    await user.click(screen.getByRole('button', { name: w.files.add }));
+    await user.type(screen.getByLabelText(w.files.label), 'Helpers.cs{Enter}');
+    await screen.findByRole('tab', { name: /Helpers\.cs/ });
+
+    expect((await order()).map((text) => text?.startsWith('AddressEmailTool'))).toEqual([true, false]);
   });
 
   it('раздел выключен — адрес проекта ведёт на прежний экран помощника CoGIS', async () => {

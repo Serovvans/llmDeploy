@@ -26,6 +26,8 @@ export type SaveState =
   | { kind: 'saved' }
   | { kind: 'saving' }
   | { kind: 'offline' }
+  /** The file was changed in another tab: the warning above the editor explains it, the line stays empty. */
+  | { kind: 'conflict' }
   | { kind: 'error'; text: string };
 
 export interface Conflict {
@@ -209,7 +211,7 @@ export function useProject(id: string, config: CodeConfig | null, sectionOff: (e
           } else if (isApiError(error, 'file_changed')) {
             // Файл изменили в другой вкладке: до выбора сотрудника он не сохраняется (§5.13.6).
             setConflict({ fileId, revision: Number(error.details.revision) });
-            setSaveState({ kind: 'saved' });
+            setSaveState({ kind: 'conflict' });
           } else if (isApiError(error, 'not_found')) {
             setSaveState({ kind: 'saved' });
             void fileGone(fileId);
@@ -296,6 +298,7 @@ export function useProject(id: string, config: CodeConfig | null, sectionOff: (e
           }
           adopt(next, false);
           setChangedSinceBuild(false);
+          setSaveState({ kind: 'saved' });
         },
         (error: unknown) => {
           setConflict(current);

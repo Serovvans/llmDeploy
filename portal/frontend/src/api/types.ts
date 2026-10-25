@@ -616,7 +616,9 @@ export type ImportSkipReason = 'invalid_path' | 'file_too_large' | 'not_text' | 
 
 export interface ImportReport {
   ignored_files: number;
+  /** No more than 100 entries (contract §7.5.5, А-121): counts come from `skipped_total`. */
   skipped_files: { path: string; reason: string }[];
+  skipped_total: number;
   unmatched_packages: { id: string; version: string | null; offline_version: string | null }[];
 }
 

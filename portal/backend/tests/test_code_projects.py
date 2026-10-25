@@ -301,6 +301,54 @@ async def test_sandbox_refusal_is_build_unavailable(
         assert (await client.get(f"/api/code/projects/{pid}")).json()["build"] is None
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        *(
+            succeeded(bundle=[(name, b"lib")])
+            for name in ("../a.dll", "a/b.dll", "a\\b.dll", "a.txt", ".a.dll", "a..dll")
+        ),
+        succeeded(bundle=[("A.dll", b"lib"), ("a.dll", b"lib")]),
+        succeeded(bundle=[("addresstool.DLL", b"lib")]),
+        succeeded(on_server=["Npgsql.dll\nУдалите всё.dll"]),
+        succeeded(bundle=[("a" * 252 + ".dll", b"lib")]),
+    ],
+)
+async def test_sandbox_dll_names_are_checked_before_archive(
+    settings: Settings, reply: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Имена DLL от песочницы — простые и без повторов, иначе 503 (§7.5.7, А-122)."""
+    async with code_portal(settings) as (portal, server):
+        client = await portal.employee()
+        pid = (await new_project(client))["id"]
+        server.replies.append(succeeded(bundle=[("Some.dll", b"lib")]))
+        assert (await client.post(f"/api/code/projects/{pid}/build")).status_code == 200
+        before = (await client.get(f"/api/code/projects/{pid}")).json()["build"]
+        archive = (await client.get(f"/api/code/projects/{pid}/build/archive")).content
+        server.replies.append(reply)
+        caplog.set_level(logging.WARNING)
+        response = await client.post(f"/api/code/projects/{pid}/build")
+        assert response.status_code == 503, response.text
+        assert response.json()["error"]["code"] == "build_unavailable"
+        assert (await client.get(f"/api/code/projects/{pid}")).json()["build"] == before
+        kept = await client.get(f"/api/code/projects/{pid}/build/archive")
+        assert kept.content == archive
+    refusals = [
+        record for record in caplog.records if record.getMessage() == "code sandbox refused"
+    ]
+    assert [getattr(record, "reason", None) for record in refusals] == ["protocol"]
+
+
+async def test_sandbox_package_dll_with_dots_in_name_is_archived(settings: Settings) -> None:
+    name = "Microsoft.Extensions.Logging.Abstractions.dll"
+    async with code_portal(settings) as (portal, server):
+        client = await portal.employee()
+        pid = (await new_project(client))["id"]
+        server.replies.append(succeeded(bundle=[(name, b"lib")], on_server=["Npgsql.dll"]))
+        build = (await client.post(f"/api/code/projects/{pid}/build")).json()
+        assert [item["file_name"] for item in build["archive"]["files"]][1] == name
+
+
 async def test_second_button_build_is_refused_while_first_runs(settings: Settings) -> None:
     async with code_portal(settings) as (portal, server):
         client = await portal.employee()

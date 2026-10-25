@@ -6,6 +6,7 @@ import { ChatProvider } from './chat/ChatProvider';
 import { MediaUploadsProvider } from './chat/MediaUploads';
 import { DocparseProvider } from './docparse/DocparseProvider';
 import { AppShell } from './components/AppShell';
+import { ConfigNotice } from './components/ConfigNotice';
 import { ChatScreen } from './screens/ChatScreen';
 import { CodeScreen } from './screens/CodeScreen';
 import { CogisScreen } from './screens/CogisScreen';
@@ -34,7 +35,11 @@ const CodeSection = lazy(() => import('./code/CodeSection'));
 function CogisRoute() {
   const { config } = useSession();
   const { id } = useParams();
-  if (config?.code.enabled) {
+  // Until the flag is known neither screen is mounted: the old one would fetch its dialogs and flash.
+  if (!config) {
+    return <ConfigNotice />;
+  }
+  if (config.code.enabled) {
     return <Navigate to={id ? `/code/dialogs/${id}` : '/code'} replace />;
   }
   return <CogisScreen />;

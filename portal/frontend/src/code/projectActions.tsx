@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { api } from '../api/client';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { useFocusReturn } from '../hooks/useFocusReturn';
 import { texts } from '../texts';
 import { useCode } from './CodeContext';
 import { saveBlob } from './download';
@@ -17,6 +18,7 @@ export function useProjectActions() {
   const { forgetProject, sectionOff } = useCode();
   const [removing, setRemoving] = useState<{ id: string; name: string } | null>(null);
   const [pending, setPending] = useState(false);
+  const rememberOpener = useFocusReturn(removing !== null);
 
   const exportProject = (id: string, name: string) => {
     SingleToast.push(w.project.exporting);
@@ -58,5 +60,11 @@ export function useProjectActions() {
     />
   );
 
-  return { exportProject, askRemove: setRemoving, modal };
+  /** `opener` — селектор элемента, на который вернётся фокус после «Отмена». */
+  const askRemove = (project: { id: string; name: string }, opener: string) => {
+    rememberOpener(opener);
+    setRemoving(project);
+  };
+
+  return { exportProject, askRemove, modal };
 }

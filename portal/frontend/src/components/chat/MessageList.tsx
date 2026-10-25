@@ -339,6 +339,10 @@ function phaseText(view: DialogView): string {
     // Проверять было нечего или у блоков нет объявления — обычное «Ответ готов».
     return sqlRunAnnouncement(last.sql_run) || t.phase.done;
   }
+  if (last.code_edit && last.code_edit.files.length > 0) {
+    // Приход правки помощника раздела «Код» объявляется вместо «Ответ готов» (концепция §9).
+    return texts.workshop.edit.announce(last.code_edit.files.length);
+  }
   return last.status === 'complete' || last.status === 'length_limit' ? t.phase.done : '';
 }
 

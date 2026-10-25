@@ -16,6 +16,7 @@
 import type { APIRequestContext, Page } from '@playwright/test';
 
 import { newApi, uniqueSuffix } from '../support/accounts';
+import { simpleProject, wizardTool } from '../support/code';
 import { textPdf } from '../support/files';
 import { expect, test, type Member } from '../support/fixtures';
 import { must } from '../support/must';
@@ -23,7 +24,9 @@ import { askChat, askSql, createDialog, eventsOf, expectError, parseStream, type
 import { promptUsage } from '../support/stand';
 import { expectAnswerReady, toast } from '../support/ui';
 
-type Kind = 'chat' | 'sql' | 'cogis' | 'docparse';
+// С 0.9 помощник CoGIS — помощник проекта раздела «Код» (диалог `code`, docs/portal-api.md §7.5.8):
+// новые диалоги `cogis` не создаются, перенос «в CoGIS» создаёт проект.
+type Kind = 'chat' | 'sql' | 'code' | 'docparse';
 type Target = Exclude<Kind, 'docparse'>;
 
 interface Pair {
@@ -73,7 +76,7 @@ interface Draft {
 const MEMORY_QUERY: Record<Kind, string> = {
   chat: 'mode=fast&search=false',
   sql: 'action=write&dialect=postgres',
-  cogis: 'action=write',
+  code: 'action=write',
   docparse: '',
 };
 const STUB_SUMMARY = /^Пересказ-заглушка [0-9a-f]{8}: сообщений (\d+)\.$/;
@@ -115,9 +118,22 @@ async function ask(api: APIRequestContext, kind: Target, dialogId: string, conte
   if (kind === 'sql') {
     return askSql(api, dialogId, content);
   }
-  const response = await api.post(`/api/dialogs/${dialogId}/messages`, { data: { content, action: 'write' } });
+  const response = await api.post(`/api/dialogs/${dialogId}/messages`, { data: { content, action: 'write', file_ids: null, target: null } });
   expect(response.status(), await response.text()).toBe(200);
   return parseStream(await response.text());
+}
+
+/** Имена проектов по идентификатору диалога помощника: название источника `code` — имя проекта. */
+const projectNames = new Map<string, string>();
+
+/** Новый диалог вида `kind`; у `code` — диалог помощника нового проекта мастера. */
+async function newDialog(api: APIRequestContext, kind: Target): Promise<string> {
+  if (kind !== 'code') {
+    return createDialog(api, kind);
+  }
+  const project = await simpleProject(api, `P${uniqueSuffix()}`);
+  projectNames.set(project.dialog_id, project.name);
+  return project.dialog_id;
 }
 
 /** `prompt_tokens` по заглушке для последнего ответа диалога, заданного после `since`. */
@@ -143,6 +159,13 @@ async function askDocparse(api: APIRequestContext, dialogId: string, content: st
   expect(parseStream(await response.text()).at(-1)?.event).toBe('done');
 }
 
+/** Проект «Кода» с одним вопросом и ответом помощника; возвращает идентификатор проекта. */
+async function projectWithAnswer(api: APIRequestContext, mark: string): Promise<string> {
+  const project = await simpleProject(api, `P${uniqueSuffix()}`);
+  expect((await ask(api, 'code', project.dialog_id, `Вопрос code ${mark}`)).at(-1)?.event).toBe('done');
+  return project.id;
+}
+
 /** Диалог указанного вида с одним вопросом и ответом. */
 async function dialogWithAnswer(api: APIRequestContext, kind: Kind, mark: string): Promise<string> {
   if (kind === 'docparse') {
@@ -150,7 +173,7 @@ async function dialogWithAnswer(api: APIRequestContext, kind: Kind, mark: string
     await askDocparse(api, id, `Какой срок ${mark}?`);
     return id;
   }
-  const id = await createDialog(api, kind);
+  const id = await newDialog(api, kind);
   expect((await ask(api, kind, id, `Вопрос ${kind} ${mark}`)).at(-1)?.event).toBe('done');
   return id;
 }
@@ -194,7 +217,14 @@ async function saveSummary(api: APIRequestContext, dialogId: string, text: strin
   return response.json();
 }
 
-async function carry(api: APIRequestContext, kind: Kind, text: string, source: string): Promise<string> {
+async function carry(api: APIRequestContext, kind: Target, text: string, source: string): Promise<string> {
+  if (kind === 'code') {
+    // Перенос в «Код» — новый проект из формы мастера (docs/portal-api.md §7.5.4).
+    const wizard = { name: `P${uniqueSuffix()}`, tools: [wizardTool()] };
+    const response = await api.post('/api/code/projects', { data: { source: 'wizard', wizard, carried: { text, source_dialog_id: source } } });
+    expect(response.status(), await response.text()).toBe(201);
+    return (await response.json()).project.dialog_id;
+  }
   const response = await api.post('/api/dialogs', { data: { kind, carried: { text, source_dialog_id: source } } });
   expect(response.status(), await response.text()).toBe(201);
   return (await response.json()).id;
@@ -485,17 +515,17 @@ test.describe('критерий 31: сжатие', () => {
 // ---------------------------------------------------------------------------------------------
 
 test.describe('критерий 32: перенос', () => {
-  test('из каждого вида диалога в новый чат, SQL и CoGIS — пересказом и одним ответом; в разбор — нельзя', async ({ newMember }) => {
+  test('из каждого вида диалога в новый чат, SQL и «Код» — пересказом и одним ответом; в разбор — нельзя', async ({ newMember }) => {
     const { api } = await newMember();
     const mark = uniqueSuffix();
-    for (const kind of ['chat', 'sql', 'cogis', 'docparse'] as const) {
+    for (const kind of ['chat', 'sql', 'code', 'docparse'] as const) {
       const source = await dialogWithAnswer(api, kind, mark);
-      const title = (await dialogOf(api, source)).title;
+      const title = kind === 'code' ? must(projectNames.get(source), 'имя проекта') : (await dialogOf(api, source)).title;
       const draft = await prepareDraft(api, source, { purpose: 'transfer' });
       // Разбор: краткое содержание с реквизитами — не блоки вопроса или ответа; один вопрос с ответом.
       expect(blocksSent(draft), kind).toBe(2);
       const verbatim = (await lastAnswer(api, source)).content;
-      for (const target of ['chat', 'sql', 'cogis'] as const) {
+      for (const target of ['chat', 'sql', 'code'] as const) {
         for (const text of [draft.text, verbatim]) {
           const created = await carry(api, target, text, source);
           expect(await dialogOf(api, created), `${kind} → ${target}`).toMatchObject({
@@ -507,20 +537,21 @@ test.describe('критерий 32: перенос', () => {
       await expectError(await api.post('/api/dialogs', { data: { kind: 'docparse', carried: { text: draft.text, source_dialog_id: source } } }), 422, 'validation_error');
     }
     // Диалоги с перенесённым — в истории, хотя сообщений в них нет: «брошенными» они не считаются.
-    for (const target of ['chat', 'sql', 'cogis'] as const) {
-      const list = (await (await api.get(`/api/dialogs?kind=${target}&limit=100`)).json()).items as unknown[];
+    for (const target of ['chat', 'sql', 'code'] as const) {
+      const address = target === 'code' ? '/api/code/projects?limit=100' : `/api/dialogs?kind=${target}&limit=100`;
+      const list = (await (await api.get(address)).json()).items as unknown[];
       // 4 источника × 2 способа и ещё сам источник того же вида.
       expect(list.length, target).toBe(9);
     }
   });
 
-  test('перенесённое учитывается в каждом ответе и не исключается — в чате, SQL и CoGIS', async ({ newMember }) => {
+  test('перенесённое учитывается в каждом ответе и не исключается — в чате, SQL и «Код»', async ({ newMember }) => {
     const { api } = await newMember();
     const source = await chatWith(api, ['Источник']);
     // 6 000 символов — 2 000 по заглушке.
     const carried = `Сведения: ${'Ф'.repeat(6_000)}`;
-    for (const kind of ['chat', 'sql', 'cogis'] as const) {
-      const plain = await createDialog(api, kind);
+    for (const kind of ['chat', 'sql', 'code'] as const) {
+      const plain = await newDialog(api, kind);
       const withCarried = await carry(api, kind, carried, source);
       for (const question of ['Первый вопрос', 'Второй вопрос']) {
         let since = new Date().toISOString();
@@ -599,7 +630,7 @@ test.describe('критерий 32: перенос', () => {
     await expect(page.getByRole('link', { name: title, exact: true })).toHaveCount(0);
   });
 
-  test('перенос в интерфейсе: пересказом из чата в SQL, одним ответом из CoGIS в чат, из разбора в чат, «Продолжить отсюда» в SQL', async ({
+  test('перенос в интерфейсе: пересказом из чата в SQL, одним ответом из «Код» в чат, из разбора в чат, «Продолжить отсюда» в SQL', async ({
     newMember,
     pageAs,
   }) => {
@@ -628,18 +659,22 @@ test.describe('критерий 32: перенос', () => {
     await expect(page.getByText('— модель учитывает их в каждом ответе', { exact: false })).toBeVisible();
     await expect(panel(page)).toContainText('Модель учитывает их в каждом ответе');
 
-    // CoGIS → чат одним ответом, через кнопку панели памяти.
-    const cogis = await dialogWithAnswer(api, 'cogis', mark);
-    const cogisAnswer = (await lastAnswer(api, cogis)).content;
-    await page.goto(`/cogis/${cogis}`);
+    // «Код» → чат одним ответом, через кнопку панели памяти.
+    const codeProject = await simpleProject(api, `P${uniqueSuffix()}`);
+    const codeDialog = codeProject.dialog_id;
+    expect((await ask(api, 'code', codeDialog, `Вопрос code ${mark}`)).at(-1)?.event).toBe('done');
+    const codeAnswer = (await lastAnswer(api, codeDialog)).content;
+    await page.goto(`/code/${codeProject.id}`);
+    // В «Коде» панель при открытии проекта скрыта (docs/portal-ui.md §5.13.12).
+    await meter(page).click();
     await panel(page).getByRole('button', { name: 'Перенести в новый диалог…' }).click();
     await modal.getByText('Чат', { exact: true }).click();
     await modal.getByText('Один ответ дословно', { exact: true }).click();
-    await expect(modal.getByRole('textbox', { name: 'Один ответ дословно' })).toHaveValue(cogisAnswer);
+    await expect(modal.getByRole('textbox', { name: 'Один ответ дословно' })).toHaveValue(codeAnswer);
     await modal.getByRole('button', { name: 'Перенести' }).click();
     await expect(page).toHaveURL(/\/chat\/[0-9a-f-]{36}$/);
-    const fromCogis = must(/\/chat\/([0-9a-f-]{36})$/.exec(page.url()), 'адрес чата')[1] as string;
-    expect((await dialogOf(api, fromCogis)).carried).toMatchObject({ text: cogisAnswer, source_kind: 'cogis' });
+    const fromCode = must(/\/chat\/([0-9a-f-]{36})$/.exec(page.url()), 'адрес чата')[1] as string;
+    expect((await dialogOf(api, fromCode)).carried).toMatchObject({ text: codeAnswer, source_kind: 'code' });
 
     // Разбор → чат (вид по умолчанию) пересказом.
     const docparse = await dialogWithAnswer(api, 'docparse', mark);
@@ -671,17 +706,28 @@ test.describe('критерий 32: перенос', () => {
 // Панель памяти: положение переживает перезагрузку во всех видах диалога
 // ---------------------------------------------------------------------------------------------
 
-test('панель памяти: скрыть и показать — положение переживает перезагрузку в чате, SQL, CoGIS и разборе', async ({ newMember, pageAs }) => {
+test('панель памяти: скрыть и показать — положение переживает перезагрузку в чате, SQL и разборе, в «Коде» не запоминается', async ({ newMember, pageAs }) => {
   const member = await newMember();
   const mark = uniqueSuffix();
   const paths = [
     `/chat/${await dialogWithAnswer(member.api, 'chat', mark)}`,
     `/sql/${await dialogWithAnswer(member.api, 'sql', mark)}`,
-    `/cogis/${await dialogWithAnswer(member.api, 'cogis', mark)}`,
+    `/code/${await projectWithAnswer(member.api, mark)}`,
     `/documents/${await dialogWithAnswer(member.api, 'docparse', mark)}`,
   ];
   const page = await pageAs(member, must(paths[0], 'путь'));
   for (const path of paths) {
+    if (path.startsWith('/code/')) {
+      // В «Коде» панель при открытии скрыта и положение не запоминается (docs/portal-ui.md §5.13.12).
+      await page.goto(path);
+      await expect(meter(page), path).toBeVisible();
+      await expect(panel(page), path).toHaveCount(0);
+      await meter(page).click();
+      await expect(panel(page), path).toBeVisible();
+      await page.reload();
+      await expect(panel(page), path).toHaveCount(0);
+      continue;
+    }
     await page.goto(path);
     await expect(panel(page), path).toBeVisible();
     await panelToggle(page).click();

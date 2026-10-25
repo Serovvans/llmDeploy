@@ -153,6 +153,40 @@ def docx_package(
     return buffer.getvalue()
 
 
+def zip_claiming_size(entries: dict[str, bytes], method: int, name: str, size: int) -> bytes:
+    """ZIP из `entries` со сжатием `method`, где у записи `name` заявлен размер `size`.
+
+    Размер подменяется и в локальном заголовке, и в оглавлении: так архив-бомба выглядит
+    по оглавлению маленьким.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", method) as archive:
+        for part_name, content in entries.items():
+            archive.writestr(part_name, content)
+    data = bytearray(buffer.getvalue())
+    encoded = name.encode()
+    for signature, size_at, name_at in ((b"PK\x03\x04", 22, 30), (b"PK\x01\x02", 24, 46)):
+        start = 0
+        while (start := data.find(signature, start)) >= 0:
+            if data[start + name_at : start + name_at + len(encoded)] == encoded:
+                data[start + size_at : start + size_at + 4] = size.to_bytes(4, "little")
+            start += 4
+    return bytes(data)
+
+
+def zip_with_method(source: bytes, name: str, method: int) -> bytes:
+    """Тот же ZIP, где запись `name` сжата способом `method` (bzip2, LZMA), прочие — как были."""
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(source)) as original,
+        zipfile.ZipFile(buffer, "w") as archive,
+    ):
+        for info in original.infolist():
+            kind = method if info.filename == name else info.compress_type
+            archive.writestr(info.filename, original.read(info), compress_type=kind)
+    return buffer.getvalue()
+
+
 def zip_directory_claims(source: bytes, size: int, *, zip64: bool = False) -> bytes:
     """ZIP, запись конца которого заявляет одну запись и оглавление размером `size`.
 

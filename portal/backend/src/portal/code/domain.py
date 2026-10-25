@@ -202,6 +202,7 @@ class ImportResult:
     packages: list[str] = field(default_factory=list)
     ignored_files: int = 0
     skipped_files: list[dict[str, str]] = field(default_factory=list)
+    skipped_total: int = 0
     unmatched_packages: list[dict[str, str | None]] = field(default_factory=list)
 
     def report(self) -> dict[str, Any]:
@@ -209,6 +210,7 @@ class ImportResult:
         return {
             "ignored_files": self.ignored_files,
             "skipped_files": self.skipped_files,
+            "skipped_total": self.skipped_total,
             "unmatched_packages": self.unmatched_packages,
         }
 

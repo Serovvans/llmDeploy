@@ -13,6 +13,7 @@ import { exportDocx } from '../chat/exportDocx';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { Notice } from '../components/Notice';
 import { TitleHint } from '../components/TitleHint';
+import { useFocusReturn } from '../hooks/useFocusReturn';
 import { useMemoryUi } from '../memory/useMemoryUi';
 import { formatDate, texts } from '../texts';
 import { useCode } from './CodeContext';
@@ -34,6 +35,7 @@ function OldDialogs() {
   const [open, setOpen] = useState(() => window.location.pathname.startsWith('/code/dialogs/'));
   const [removing, setRemoving] = useState<Dialog | null>(null);
   const [pending, setPending] = useState(false);
+  const rememberOpener = useFocusReturn(removing !== null);
   const listId = useId();
   const labels = texts.dialogs.cogis;
   // Окно переноса — то же, что у диалога; «Куда» по умолчанию — «Код» (§4.9).
@@ -109,7 +111,14 @@ function OldDialogs() {
                             {texts.memory.transfer.menu}
                           </MenuItem>
                         )}
-                        <MenuItem onClick={() => setRemoving(dialog)}>{texts.chat.menu.remove}</MenuItem>
+                        <MenuItem
+                          onClick={() => {
+                            rememberOpener(`[data-opener="old-${dialog.id}"] [tabindex="0"]`);
+                            setRemoving(dialog);
+                          }}
+                        >
+                          {texts.chat.menu.remove}
+                        </MenuItem>
                       </Kebab>
                     </Hint>
                   </span>
@@ -175,7 +184,7 @@ export function ProjectList() {
                   {projects.items.map((project) => {
                     const badge = listBadge(project.build);
                     return (
-                      <li key={project.id} className={styles.item}>
+                      <li key={project.id} className={styles.item} data-opener={`project-${project.id}`}>
                         <TitleHint text={project.name} pos="right">
                           <NavLink to={`/code/${project.id}`} className={rowClass}>
                             <span className={styles.name}>{project.name}</span>
@@ -196,7 +205,9 @@ export function ProjectList() {
                             <Kebab aria-label={`${texts.users.actions}: ${project.name}`}>
                               <MenuItem onClick={() => actions.exportProject(project.id, project.name)}>{w.exportVs}</MenuItem>
                               <MenuSeparator />
-                              <MenuItem onClick={() => actions.askRemove(project)}>{w.removeProject}</MenuItem>
+                              <MenuItem onClick={() => actions.askRemove(project, `[data-opener="project-${project.id}"] [tabindex="0"]`)}>
+                                {w.removeProject}
+                              </MenuItem>
                             </Kebab>
                           </Hint>
                         </span>

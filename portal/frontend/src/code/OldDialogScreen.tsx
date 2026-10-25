@@ -27,7 +27,8 @@ export function OldDialogScreen() {
   const { openDialog } = cogis;
   const view = cogis.state.dialogs[id];
   const dialog = cogis.history.items.find((item) => item.id === id);
-  const title = dialog?.title ?? labels.newLabel;
+  // Until the dialog is known its title is unknown too: no header instead of a placeholder name.
+  const title = dialog || view?.status === 'ready' ? (dialog?.title ?? labels.newLabel) : undefined;
   const [removing, setRemoving] = useState(false);
   const [pending, setPending] = useState(false);
   const viewer = useDocumentViewer();
@@ -42,7 +43,7 @@ export function OldDialogScreen() {
     params: { action: 'write' },
     busy: false,
   });
-  usePageTitle(view?.status === 'not_found' ? w.old.notFound.title : title);
+  usePageTitle(view?.status === 'not_found' ? w.old.notFound.title : (title ?? w.title));
 
   useEffect(() => {
     openDialog(id);
@@ -90,8 +91,8 @@ export function OldDialogScreen() {
 
   if (view?.status === 'not_found') {
     return (
-      <SectionLayout title={w.old.notFound.title} bare>
-        <EmptyState title={w.old.notFound.title} text={w.old.notFound.text} action={{ label: w.allProjects, onClick: () => navigate('/code') }} />
+      <SectionLayout bare>
+        <EmptyState headingLevel="h1" title={w.old.notFound.title} text={w.old.notFound.text} action={{ label: w.allProjects, onClick: () => navigate('/code') }} />
       </SectionLayout>
     );
   }
@@ -153,7 +154,7 @@ export function OldDialogScreen() {
       </div>
       {viewer.element}
       {memory.dialogs}
-      {removing && (
+      {removing && title !== undefined && (
         <ConfirmModal
           title={labels.removeTitle(title)}
           body={labels.removeBody}

@@ -8,6 +8,7 @@ import { api, ApiError, isApiError } from '../api/client';
 import type { CodeParameterType } from '../api/types';
 import { Field } from '../components/Field';
 import { Notice } from '../components/Notice';
+import { TitleHint } from '../components/TitleHint';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useSession } from '../session/SessionContext';
 import { errorText, texts } from '../texts';
@@ -65,13 +66,25 @@ interface ParamRowProps {
   onRemove: () => void;
 }
 
+/** Column heading with a hint: reachable from the keyboard, its text is read out with the heading (§9). */
+function HeadHint({ label, hint }: { label: string; hint: string }) {
+  return (
+    <TitleHint text={hint} always>
+      <span tabIndex={0} className={styles.headHint}>
+        {label}
+        <span className="p-visually-hidden">. {hint}</span>
+      </span>
+    </TitleHint>
+  );
+}
+
 function ParamRow({ param, at, index, input, types, errors, disabled, onChange, onRemove }: ParamRowProps) {
   const error = (key: string) => errors[`${at}.${key}`] ?? null;
   const items = types.map((type) => [type.id, type.title, type.csharp] as [string, string, string]);
   const label = tw.removeParam(param.name || String(index + 1));
   return (
     <div className={styles.paramRow} role="group" aria-label={`${input ? tw.inputs : tw.outputs}: ${index + 1}`}>
-      <div data-field={`${at}.name`}>
+      <div data-field={`${at}.name`} data-param={param.key}>
         <Field label={tw.paramName} hideLabel error={error('name')}>
           {(control) => (
             <Input
@@ -164,6 +177,16 @@ function ToolCard(props: ToolCardProps) {
   const at = `tools.${index}`;
   const titleId = useId();
   const [limitFor, setLimitFor] = useState<'inputs' | 'outputs' | null>(null);
+  // Фокус после добавления и удаления параметра: имя строки или кнопка добавления группы (§9).
+  const [focusTarget, setFocusTarget] = useState<{ param: number } | { add: 'inputs' | 'outputs' } | null>(null);
+  const card = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!focusTarget) {
+      return;
+    }
+    const selector = 'param' in focusTarget ? `[data-param="${focusTarget.param}"] input` : `[data-add="${focusTarget.add}"] button`;
+    card.current?.querySelector<HTMLElement>(selector)?.focus();
+  }, [focusTarget]);
   const error = (key: string) => errors[`${at}.${key}`] ?? null;
   const set = (patch: Partial<DraftTool>) => props.onChange({ ...tool, ...patch });
   const iconItems = [
@@ -178,7 +201,9 @@ function ToolCard(props: ToolCardProps) {
     }
     setLimitFor(null);
     const allowed = types.filter((type) => (group === 'inputs' ? type.input : type.output));
-    set({ [group]: [...tool[group], emptyParam(allowed[0]?.id ?? 'string', group === 'inputs')] });
+    const fresh = emptyParam(allowed[0]?.id ?? 'string', group === 'inputs');
+    set({ [group]: [...tool[group], fresh] });
+    setFocusTarget({ param: fresh.key });
   };
 
   const group = (key: 'inputs' | 'outputs') => {
@@ -187,18 +212,10 @@ function ToolCard(props: ToolCardProps) {
       <div className={styles.params}>
         <h4 className={styles.paramsTitle}>{key === 'inputs' ? tw.inputs : tw.outputs}</h4>
         {tool[key].length > 0 && (
-          <div className={styles.paramHead} aria-hidden="true">
-            <Hint text={tw.paramNameHint}>
-              <span>{tw.paramName}</span>
-            </Hint>
+          <div className={styles.paramHead}>
+            <HeadHint label={tw.paramName} hint={tw.paramNameHint} />
             <span>{tw.paramType}</span>
-            <span>
-              {key === 'inputs' && (
-                <Hint text={tw.requiredHint}>
-                  <span>{tw.required}</span>
-                </Hint>
-              )}
-            </span>
+            <span>{key === 'inputs' && <HeadHint label={tw.required} hint={tw.requiredHint} />}</span>
             <span>{tw.labelRu}</span>
             <span>{tw.labelEn}</span>
             <span />
@@ -217,11 +234,13 @@ function ToolCard(props: ToolCardProps) {
             onChange={(next) => set({ [key]: tool[key].map((item) => (item.key === param.key ? next : item)) })}
             onRemove={() => {
               setLimitFor(null);
+              const neighbor = tool[key][p + 1] ?? tool[key][p - 1];
               set({ [key]: tool[key].filter((item) => item.key !== param.key) });
+              setFocusTarget(neighbor ? { param: neighbor.key } : { add: key });
             }}
           />
         ))}
-        <div>
+        <div data-add={key}>
           <Button size="small" icon={<IconPlusRegular16 />} disabled={disabled} onClick={() => addParam(key)}>
             {key === 'inputs' ? tw.addInput : tw.addOutput}
           </Button>
@@ -237,7 +256,7 @@ function ToolCard(props: ToolCardProps) {
 
   const counterShown = tool.description.length >= props.maxDescription * COUNTER_FROM;
   return (
-    <section className={styles.tool} aria-labelledby={titleId}>
+    <section ref={card} className={styles.tool} aria-labelledby={titleId}>
       <div className={styles.toolHead}>
         <h3 id={titleId} className={styles.toolTitle}>
           {tw.tool(index + 1)}

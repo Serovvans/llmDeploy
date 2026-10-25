@@ -67,10 +67,13 @@ def _check_project(project: dict[str, Any]) -> None:
         assert set(project) == {"wizard"}
         _check_wizard(project["wizard"])
     elif "example" in project:
-        assert set(project) == {"example"} and project_name_error(project["example"]) is None
+        assert (
+            set(project) == {"example"}
+            and project_name_error(project["example"], [p.id for p in CODE.packages]) is None
+        )
     else:
         assert set(project) == {"files", "name", "packages"}
-        assert project_name_error(project["name"]) is None
+        assert project_name_error(project["name"], [p.id for p in CODE.packages]) is None
         assert {p.lower() for p in project["packages"]} <= {p.id.lower() for p in CODE.packages}
         for path, content in project["files"].items():
             assert path_error(path, CODE.file_extensions) is None, path
@@ -83,7 +86,14 @@ def _check_wizard(form: dict[str, Any]) -> None:
         assert set(tool) == TOOL_FIELDS
         assert tool["description"].strip(), "описание — это задача для помощника"
     limit = SETTINGS.dialogs.message_max_chars
-    check_form(form, TEMPLATES, CODE.wizard.max_tools, CODE.wizard.max_parameters, limit)
+    check_form(
+        form,
+        TEMPLATES,
+        CODE.wizard.max_tools,
+        CODE.wizard.max_parameters,
+        limit,
+        [p.id for p in CODE.packages],
+    )
     request = scaffold(
         form, TEMPLATES, CODE.prompts.wizard_request, [p.id for p in CODE.packages]
     ).assistant_request

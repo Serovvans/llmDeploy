@@ -116,8 +116,16 @@ export function CodeProvider({ children }: { children: React.ReactNode }) {
     };
   }, [loadProjects, sectionOff]);
 
+  // The list is ordered by change time (§5.13.3): the row takes its place by `updated_at`, so merely opening
+  // a project or a new build result leaves it where it was.
   const touchProject = useCallback((project: CodeProject) => {
-    setProjects((state) => ({ ...state, items: [itemOf(project), ...state.items.filter((item) => item.id !== project.id)] }));
+    setProjects((state) => {
+      const item = itemOf(project);
+      const rest = state.items.filter((known) => known.id !== project.id);
+      const time = Date.parse(item.updated_at);
+      const at = rest.findIndex((known) => Date.parse(known.updated_at) < time);
+      return { ...state, items: at === -1 ? [...rest, item] : [...rest.slice(0, at), item, ...rest.slice(at)] };
+    });
   }, []);
 
   const forgetProject = useCallback((id: string) => {

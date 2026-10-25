@@ -128,6 +128,7 @@ def parse_tasks(
                     settings.wizard.max_tools,
                     settings.wizard.max_parameters,
                     message_max_chars,
+                    order,
                 )
                 built = scaffold(form, templates, settings.prompts.wizard_request, order)
                 name, files, packages = form["name"], built.files, built.packages

@@ -275,7 +275,7 @@ export function ProjectFiles(props: ProjectFilesProps) {
           {files.length === 0 && editing !== 'new' ? (
             <div className={styles.empty}>
               <p>{t.empty}</p>
-              <Link onClick={() => setEditing('new')}>{t.addFirst}</Link>
+              <Link component="button" onClick={() => setEditing('new')}>{t.addFirst}</Link>
             </div>
           ) : (
             <ul ref={treeRef} role="tree" aria-label={t.title} className={styles.tree}>

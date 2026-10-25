@@ -1,5 +1,5 @@
 import { Button, Checkbox, Link, Loader } from '@skbkontur/react-ui';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { CodeEditFull } from '../api/types';
 import { Notice } from '../components/Notice';
@@ -26,18 +26,22 @@ interface Props {
   projectId: string;
   messageId: string;
   decide: (accept: { path: string; revision: number | null }[], total: number) => Promise<Decision>;
+  /** Вкладку открыли «Посмотреть и принять»: фокус — на первый `Checkbox` файла (§9). */
+  focusFirst: boolean;
+  onFocused: () => void;
 }
 
 type Loaded = { status: 'loading' } | { status: 'failed' } | { status: 'ready'; edit: CodeEditFull };
 
 /** Вкладка «Правка помощника» (концепция §5.13.11): разница по файлам, выбор файлов, решение. */
-export function EditTab({ setup, theme, projectId, messageId, decide }: Props) {
+export function EditTab({ setup, theme, projectId, messageId, decide, focusFirst, onFocused }: Props) {
   const [loaded, setLoaded] = useState<Loaded>({ status: 'loading' });
   const [selected, setSelected] = useState<string | null>(null);
   const [unchecked, setUnchecked] = useState<ReadonlySet<string>>(new Set());
   const [chooseError, setChooseError] = useState(false);
   const [pending, setPending] = useState<'accept' | 'reject' | null>(null);
   const [notice, setNotice] = useState<{ kind: 'warning' | 'error'; text: string } | null>(null);
+  const root = useRef<HTMLDivElement>(null);
 
   const load = useCallback(
     (fresh: boolean) =>
@@ -58,6 +62,13 @@ export function EditTab({ setup, theme, projectId, messageId, decide }: Props) {
   useEffect(() => {
     void load(true);
   }, [load]);
+
+  useEffect(() => {
+    if (focusFirst && loaded.status === 'ready') {
+      root.current?.querySelector<HTMLElement>('input[type="checkbox"]')?.focus();
+      onFocused();
+    }
+  }, [focusFirst, loaded.status, onFocused]);
 
   if (loaded.status === 'loading') {
     return (
@@ -104,7 +115,7 @@ export function EditTab({ setup, theme, projectId, messageId, decide }: Props) {
   const acceptLabel = checked.length === files.length ? e.acceptAll : e.acceptSome(checked.length, files.length);
 
   return (
-    <div className={styles.tab}>
+    <div ref={root} className={styles.tab}>
       <div className={styles.head}>
         <h2 className={styles.title}>{e.tabTitle(files.length)}</h2>
         {open && (
@@ -119,7 +130,7 @@ export function EditTab({ setup, theme, projectId, messageId, decide }: Props) {
                 </span>
               )}
             </div>
-            <Link disabled={pending !== null} onClick={() => void run('reject')}>
+            <Link component="button" disabled={pending !== null} onClick={() => void run('reject')}>
               {e.reject}
             </Link>
           </div>

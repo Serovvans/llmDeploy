@@ -40,6 +40,9 @@ interface Props {
   build: CodeBuild | null;
   readOnly: boolean;
   jump: Jump | null;
+  /** Перевести фокус в редактор (после решения по правке, §9); `onFocused` — запрос выполнен. */
+  focus: boolean;
+  onFocused: () => void;
   onExplain: (fragment: Fragment | null) => void;
   onChangeSelection: (fragment: Fragment) => void;
 }
@@ -84,7 +87,7 @@ function markersFor(monaco: Monaco, build: CodeBuild | null, path: string, model
  * сообщения последней сборки, поставленные при её приходе и дальше движущиеся вместе с текстом.
  */
 export function CodeEditor(props: Props) {
-  const { setup, theme, sdk, files, fileId, build, readOnly, jump } = props;
+  const { setup, theme, sdk, files, fileId, build, readOnly, jump, focus, onFocused } = props;
   const monaco = setup.monaco;
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<Editor | null>(null);
@@ -277,5 +280,26 @@ export function CodeEditor(props: Props) {
     current.focus();
   }, [fileId, jump, monaco]);
 
-  return <div ref={host} className={styles.editor} data-testid="code-editor" />;
+  useEffect(() => {
+    if (focus && editor.current) {
+      editor.current.focus();
+      onFocused();
+    }
+  }, [focus, onFocused]);
+
+  // The host is the skip link's target (§9): focusing it hands focus over to Monaco.
+  return (
+    <div
+      ref={host}
+      className={styles.editor}
+      data-testid="code-editor"
+      data-skip-target=""
+      tabIndex={-1}
+      onFocus={(event) => {
+        if (event.target === event.currentTarget) {
+          editor.current?.focus();
+        }
+      }}
+    />
+  );
 }

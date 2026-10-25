@@ -19,7 +19,7 @@ function CopyValue({ label, value }: { label: string; value: string }) {
     <div className={styles.value}>
       <span className={styles.valueLabel}>{label}</span>
       <code className={styles.mono}>{value}</code>
-      <Link onClick={() => void copy(value)}>{copyLabel}</Link>
+      <Link component="button" onClick={() => void copy(value)}>{copyLabel}</Link>
     </div>
   );
 }

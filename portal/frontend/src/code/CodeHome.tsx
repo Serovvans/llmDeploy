@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, ApiError, isApiError } from '../api/client';
 import type { CodeConfig, CodeCreated } from '../api/types';
 import { Notice } from '../components/Notice';
+import { useFocusReturn } from '../hooks/useFocusReturn';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useSession } from '../session/SessionContext';
 import { errorText, formatSize, texts } from '../texts';
@@ -203,6 +204,11 @@ export function CodeHome() {
   const navigate = useNavigate();
   const { touchProject } = useCode();
   const [modal, setModal] = useState<'example' | 'zip' | null>(null);
+  const rememberOpener = useFocusReturn(modal !== null);
+  const openModal = (kind: 'example' | 'zip') => {
+    rememberOpener(`[data-opener="${kind}"] button`);
+    setModal(kind);
+  };
   usePageTitle(w.title);
 
   const opened = (created: CodeCreated) => {
@@ -212,9 +218,9 @@ export function CodeHome() {
   };
 
   const blocks = [
-    { ...w.home.wizard, primary: true, onClick: () => navigate('/code/new') },
-    { ...w.home.example, primary: false, onClick: () => setModal('example') },
-    { ...w.home.zip, primary: false, onClick: () => setModal('zip') },
+    { ...w.home.wizard, opener: 'wizard', primary: true, onClick: () => navigate('/code/new') },
+    { ...w.home.example, opener: 'example', primary: false, onClick: () => openModal('example') },
+    { ...w.home.zip, opener: 'zip', primary: false, onClick: () => openModal('zip') },
   ];
 
   return (
@@ -226,7 +232,7 @@ export function CodeHome() {
             <section key={block.title} className={styles.block}>
               <h2 className={styles.blockTitle}>{block.title}</h2>
               <p className={styles.blockText}>{block.text}</p>
-              <div>
+              <div data-opener={block.opener}>
                 <Button use={block.primary ? 'primary' : 'default'} onClick={block.onClick}>
                   {block.action}
                 </Button>

@@ -7,6 +7,7 @@
 import type { Page, TestInfo } from '@playwright/test';
 
 import { adoptSession, createUser, nextCode, uniqueSuffix } from '../support/accounts';
+import { askCode, simpleProject } from '../support/code';
 import { pngImage, textFile } from '../support/files';
 import { expect, test, type Member } from '../support/fixtures';
 import { must } from '../support/must';
@@ -325,9 +326,23 @@ for (const theme of ['light', 'dark'] as const) {
     await page.getByRole('dialog').getByRole('button', { name: 'Добавить схему' }).click();
     await checkScreen(page, theme, 'sql-схемы', testInfo, [...dataWords, ...sqlWords, 'CREATE TABLE']);
 
-    await page.goto('/cogis');
-    await expect(page.getByRole('heading', { name: 'Плагины CoGIS на C#' })).toBeVisible();
-    await checkScreen(page, theme, 'cogis', testInfo);
+    // С 0.9 вместо помощника CoGIS — раздел «Код»: начало раздела и проект со сборкой и правкой.
+    await page.goto('/code');
+    await expect(page.getByRole('heading', { name: 'Пример из инструкции' })).toBeVisible();
+    const productWords = ['GPTool', 'DLL', 'ZIP', 'Visual Studio', '.NET'];
+    await checkScreen(page, theme, 'код-начало', testInfo, productWords);
+    const project = await simpleProject(member.api, `Theme${theme}`);
+    // Источники ответа — документация CoGIS общей базы, которую добавили другие тесты: тоже данные.
+    const sourceWords = eventsOf(await askCode(member.api, project.dialog_id, 'Добавь комментарий'), 'sources')
+      .flatMap((event) => event.data.sources as { document_title: string; quote: string }[])
+      .flatMap((source) => `${source.document_title} ${source.quote}`.match(/[A-Za-z0-9_.-]+/g) ?? []);
+    await page.goto(`/code/${project.id}`);
+    await page.getByRole('region', { name: 'Сборка' }).getByRole('button', { name: 'Собрать', exact: true }).click();
+    await expect(page.getByRole('region', { name: 'Сборка' }).getByText('Собрано', { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole('button', { name: 'Посмотреть и принять' })).toBeVisible();
+    // Код, имена файлов и классов — данные проекта, а не тексты интерфейса.
+    const codeWords = project.files.flatMap((file) => [file.path, ...(file.content.match(/[A-Za-z_][A-Za-z0-9_.]*/g) ?? [])]);
+    await checkScreen(page, theme, 'код-проект', testInfo, [...productWords, ...codeWords, ...sourceWords, project.name, 'stub']);
 
     await page.goto('/documents');
     await expect(page.getByRole('button', { name: 'Разобрать' })).toBeVisible();

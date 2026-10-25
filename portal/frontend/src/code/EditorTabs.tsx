@@ -12,6 +12,9 @@ import type { SaveState } from './useProject';
 const t = texts.workshop.editor;
 /** Особая вкладка правки помощника — всегда первая (§5.13.6). */
 export const EDIT_TAB = 'edit';
+/** The editor area under the tabs is their common tab panel (ARIA tabs pattern). */
+export const TAB_PANEL_ID = 'editor-tabpanel';
+export const tabElementId = (id: string) => `editor-tab-${id}`;
 /** «Сохраняю…» появляется не сразу: короткое сохранение не мигает (§5.13.6). */
 const SAVING_DELAY_MS = 300;
 
@@ -58,6 +61,8 @@ function SaveLine({ state }: { state: SaveState }) {
       );
     case 'error':
       return <span className={`${styles.save} ${styles.failed}`}>{state.text}</span>;
+    case 'conflict':
+      return null;
     default:
       return <span className={styles.save}>{t.saved}</span>;
   }
@@ -98,12 +103,14 @@ export function EditorTabs({ tabs, edit, active, saveState, tabHint, onSelect, o
           const { name, folder } = label(id);
           const selected = id === active;
           return (
-            <div key={id} className={selected ? `${styles.tab} ${styles.selected}` : styles.tab}>
+            <div key={id} role="presentation" className={selected ? `${styles.tab} ${styles.selected}` : styles.tab}>
               <button
                 type="button"
                 role="tab"
+                id={tabElementId(id)}
                 data-tab={id}
                 aria-selected={selected}
+                aria-controls={TAB_PANEL_ID}
                 tabIndex={selected || (active === null && index === 0) ? 0 : -1}
                 className={id === EDIT_TAB ? `${styles.tabButton} ${styles.editTab}` : styles.tabButton}
                 onClick={() => onSelect(id)}

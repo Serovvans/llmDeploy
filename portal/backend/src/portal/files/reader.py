@@ -83,6 +83,8 @@ _ZIP_ERRORS = (
     RuntimeError,
     ValueError,
 )
+# Способы сжатия, которые `zipfile` распаковывает с пределом выхода на вызов.
+_ZIP_BOUNDED_METHODS = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _IMAGE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG"}
 # Режимы растра, которые Pillow записывает в PNG без приведения.
 _PNG_MODES = frozenset({"1", "L", "LA", "P", "RGB", "RGBA", "I;16"})
@@ -694,7 +696,9 @@ class ContentDocumentReader:
         """Архив DOCX, прошедший пределы §1.5 по оглавлению, — до чтения любой части.
 
         Разметка — части `.xml` и `.rels`, где бы они ни лежали; картинки — части под
-        `word/media/`, кроме разметки; остальное — всё, кроме картинок.
+        `word/media/`, кроме разметки; остальное — всё, кроме картинок. Части сжаты только
+        без сжатия или Deflate: `zipfile` распаковывает bzip2 и LZMA без предела выхода
+        за один вызов, так что подделанный в оглавлении размер их не сдерживает.
         """
         if not self._zip_checked(path):
             raise UnreadableDocumentError
@@ -705,6 +709,8 @@ class ContentDocumentReader:
         with archive:
             markup = media = rest = 0
             for item in archive.infolist():
+                if item.compress_type not in _ZIP_BOUNDED_METHODS:
+                    raise UnreadableDocumentError
                 is_markup = item.filename.endswith(_XML_SUFFIXES)
                 markup += item.file_size if is_markup else 0
                 if item.filename.startswith(_DOCX_MEDIA) and not is_markup:
@@ -724,14 +730,20 @@ class ContentDocumentReader:
         """Разобранная часть разметки; вызывается под блокировкой разметки.
 
         Часть не `.xml` и не `.rels` не разбирается: её размер не вошёл в предел
-        разметки. `ZipFile.read` читает не больше заявленного размера и сверяет
-        контрольную сумму; парсер `_parse_markup` (настройки python-docx) не
-        разворачивает сущности и не ходит в сеть.
+        разметки. Часть читается с пределом `docx_max_xml_bytes`: `ZipFile.read` без
+        предела распаковывает Deflate за один вызов до 2 ГиБ, сколько бы ни было
+        заявлено в оглавлении. Контрольная сумма сверяется; парсер `_parse_markup`
+        (настройки python-docx) не разворачивает сущности и не ходит в сеть.
         """
         if not name.endswith(_XML_SUFFIXES):
             raise UnreadableDocumentError
+        limit = self._settings.docx_max_xml_bytes
         try:
-            return _parse_markup(archive.read(name))
+            with archive.open(name) as part:
+                data = part.read(limit + 1)
+            if len(data) > limit:
+                raise UnreadableDocumentError
+            return _parse_markup(data)
         except (*_ZIP_ERRORS, SyntaxError) as error:
             raise UnreadableDocumentError from error
 

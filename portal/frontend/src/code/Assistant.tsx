@@ -73,8 +73,9 @@ interface Options {
   show: () => void;
   reloadProject: () => void;
   decisionPending: string | null;
-  onOpenSettings: () => void;
-  onOpenVersions: () => void;
+  /** `opener` — значение `data-opener` у обёртки ссылки: на неё вернётся фокус. */
+  onOpenSettings: (opener: string) => void;
+  onOpenVersions: (opener: string) => void;
   onReview: (messageId: string) => void;
   onRejectEdit: (messageId: string) => void;
   onOpenFragment: (target: CodeTarget) => void;
@@ -422,7 +423,9 @@ export function useAssistant(options: Options) {
         {project.schema_id && schemaName && (
           <>
             <span aria-hidden="true">·</span>
-            <Link onClick={options.onOpenSettings}>{texts.workshop.scope.schema(schemaName)}</Link>
+            <span data-opener="scope-schema">
+              <Link component="button" onClick={() => options.onOpenSettings('scope-schema')}>{texts.workshop.scope.schema(schemaName)}</Link>
+            </span>
           </>
         )}
         {options.sdkAvailable && (
@@ -449,8 +452,11 @@ export function useAssistant(options: Options) {
               </div>
             )}
             {tooLong && (
-              <div className={styles.notice}>
-                <Notice kind="warning" action={project.schema_id ? { label: a.settingsLink, onClick: options.onOpenSettings } : undefined}>
+              <div className={styles.notice} data-opener="too-long">
+                <Notice
+                  kind="warning"
+                  action={project.schema_id ? { label: a.settingsLink, onClick: () => options.onOpenSettings('too-long') } : undefined}
+                >
                   {a.tooLong}
                 </Notice>
               </div>
@@ -460,7 +466,7 @@ export function useAssistant(options: Options) {
               draft={draft}
               narrow
               answer={view?.generation ? 'generating' : formingElsewhere ? 'waiting' : 'idle'}
-              placeholder={fragment ? a.placeholders.fragment : a.placeholders[action]}
+              placeholder={fragment && action === 'write' ? a.placeholders.fragment : a.placeholders[action]}
               mono={action === 'explain'}
               waitText={a.busy}
               meter={memory.meter}

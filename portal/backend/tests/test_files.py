@@ -5,6 +5,7 @@ import io
 import shutil
 import threading
 import time
+import tracemalloc
 import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -224,6 +225,49 @@ def test_docx_with_oversized_markup_is_unreadable(tmp_path: Path) -> None:
     assert _reader(tmp_path).page_count(path, DOCX) is None
     with pytest.raises(UnreadableDocumentError):
         _reader(tmp_path, docx_max_xml_bytes=40_000).page_count(path, DOCX)
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2])
+def test_docx_part_lying_about_its_size_is_not_unpacked(tmp_path: Path, method: int) -> None:
+    """Размер в оглавлении подделан: часть распаковывается не дальше предела разметки.
+
+    Deflate читается с пределом, bzip2 и LZMA отклоняются целиком: `zipfile` распаковывает
+    их без предела выхода за один вызов (находка приёмки 0.9).
+    """
+    with zipfile.ZipFile(io.BytesIO(samples.docx_package(samples.paragraph("x")))) as package:
+        entries = {name: package.read(name) for name in package.namelist()}
+    entries["_rels/.rels"] = bytes(30_000_000)
+    path = tmp_path / "doc"
+    path.write_bytes(samples.zip_claiming_size(entries, method, "_rels/.rels", 100))
+    assert path.stat().st_size < 100_000
+    reader = _reader(tmp_path)
+    tracemalloc.start()
+    try:
+        with pytest.raises(UnreadableDocumentError):
+            reader.page_text(path, DOCX, 1)
+        with pytest.raises(UnreadableDocumentError):
+            reader.embedded_images(path, DOCX, 1, min_side_px=1, min_area_px=1)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 5_000_000  # предел разметки 1 МБ, а не 30 МБ распакованного
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_docx_with_image_not_stored_or_deflated_is_unreadable(tmp_path: Path, method: int) -> None:
+    """Картинка, сжатая bzip2 или LZMA, — DOCX нечитаем уже у `page_count` (§1.5, А-120)."""
+    source = samples.docx_package(
+        samples.paragraph("x"),
+        relations={"rId5": "media/a.png"},
+        parts={"word/media/a.png": samples.png()},
+    )
+    path = tmp_path / "doc"
+    path.write_bytes(source)
+    reader = _reader(tmp_path)
+    assert reader.page_count(path, DOCX) is None
+    path.write_bytes(samples.zip_with_method(source, "word/media/a.png", method))
+    with pytest.raises(UnreadableDocumentError):
+        reader.page_count(path, DOCX)
 
 
 def test_rasters_are_unpacked_one_at_a_time_per_process(

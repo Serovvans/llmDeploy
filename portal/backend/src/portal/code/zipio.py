@@ -24,6 +24,8 @@ from portal.files.zipdir import zip_directory_bytes
 _SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06")
 _SKIPPED_DIRS = frozenset({"bin", "obj"})
 _REPORT_PATH_CHARS = 300
+# Записей в `skipped_files` и `unmatched_packages` — не больше (§7.5.5, А-121).
+_REPORT_MAX_ITEMS = 100
 _UTF8_BOM = "\ufeff"
 # Папка рядом с файлом проекта, куда сотрудник кладёт DLL с сервера CoGIS (Прочтите.txt).
 _HINT_DIR = "cogis\\"
@@ -51,7 +53,14 @@ def _common_folder(paths: Sequence[str]) -> int:
 
 
 def _read(archive: zipfile.ZipFile, info: zipfile.ZipInfo, limit: int) -> bytes | None:
-    """Содержимое записи не длиннее `limit` байт; `None` — длиннее (оглавление солгало)."""
+    """Содержимое записи не длиннее `limit` байт; `None` — длиннее (оглавление солгало).
+
+    Принимаются только записи без сжатия и Deflate, прочие — `NotImplementedError`, как
+    у `zipfile` на неизвестный способ: bzip2 и LZMA он распаковывает без предела выхода
+    за один вызов, и `limit` их не сдерживает.
+    """
+    if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        raise NotImplementedError
     with archive.open(info) as entry:
         data = entry.read(limit + 1)
     return None if len(data) > limit else data
@@ -130,16 +139,21 @@ def _read_entries(
     depth = _common_folder([path for path, _ in sources])
     taken: set[str] = set()
     count = size = 0
+    full = False
     for path, info in sorted(
         (("/".join(path.split("/")[depth:]), info) for path, info in sources),
         key=lambda item: item[0].lower(),
     ):
-        reason = _source(archive, info, path, limits, taken, count, size, result)
+        # Проект заполнен: остальные записи не читаются и не проверяются (А-121).
+        reason = (
+            "project_limit"
+            if full
+            else _source(archive, info, path, limits, taken, count, size, result)
+        )
         if reason is not None:
+            full = reason == "project_limit"
             # В отчёте — имя записи архива, как его видит сотрудник (§7.5.5).
-            result.skipped_files.append(
-                {"path": info.filename[:_REPORT_PATH_CHARS], "reason": reason}
-            )
+            _skip(result, info.filename, reason)
             continue
         taken.add(path.lower())
         count += 1
@@ -148,6 +162,13 @@ def _read_entries(
         raise errors.import_no_files()
     _match_packages(archive, projects, limits, packages, result)
     return result
+
+
+def _skip(result: ImportResult, name: str, reason: str) -> None:
+    """Пропущенный файл: в отчёт — первые `_REPORT_MAX_ITEMS`, в счёт — все (А-121)."""
+    result.skipped_total += 1
+    if len(result.skipped_files) < _REPORT_MAX_ITEMS:
+        result.skipped_files.append({"path": name[:_REPORT_PATH_CHARS], "reason": reason})
 
 
 def _source(
@@ -199,6 +220,7 @@ def _match_packages(
     """Пакеты из `.csproj`: совпавшие с набором — в проект, прочие — в отчёт (шаг 6)."""
     known = {item.id.lower(): item for item in packages}
     chosen: set[str] = set()
+    named: set[tuple[str, str | None, str | None]] = set()
     for name, info in projects:
         try:
             data = (
@@ -210,20 +232,24 @@ def _match_packages(
         except (*_READ_ERRORS, etree.XMLSyntaxError, ValueError):
             data, references = None, []
         if data is None:
-            result.skipped_files.append({"path": name[:_REPORT_PATH_CHARS], "reason": "unreadable"})
+            _skip(result, name, "unreadable")
             continue
         for package_id, version in references:
             offline = known.get(package_id.lower())
             if offline is not None:
                 chosen.add(offline.id.lower())
             if offline is None or version != offline.version:
-                entry = {
-                    "id": package_id[:_REPORT_PATH_CHARS],
-                    "version": None if version is None else version[:_REPORT_PATH_CHARS],
-                    "offline_version": None if offline is None else offline.version,
-                }
-                if entry not in result.unmatched_packages:
-                    result.unmatched_packages.append(entry)
+                entry = (
+                    package_id[:_REPORT_PATH_CHARS],
+                    None if version is None else version[:_REPORT_PATH_CHARS],
+                    None if offline is None else offline.version,
+                )
+                if entry in named or len(named) >= _REPORT_MAX_ITEMS:
+                    continue
+                named.add(entry)
+                result.unmatched_packages.append(
+                    {"id": entry[0], "version": entry[1], "offline_version": entry[2]}
+                )
     result.packages = [item.id for item in packages if item.id.lower() in chosen]
 
 

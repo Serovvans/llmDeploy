@@ -12,6 +12,7 @@
 import type { APIRequestContext, Page } from '@playwright/test';
 
 import { newApi, uniqueSuffix } from '../support/accounts';
+import { askCode, simpleProject } from '../support/code';
 import { pngImage, textFile, textPdf } from '../support/files';
 import { expect, test, type Member } from '../support/fixtures';
 import { must } from '../support/must';
@@ -187,8 +188,9 @@ test.describe('критерий 29: индикатор и панель памя�
     await member.api.post(`/api/dialogs/${sqlId}/messages`, {
       data: { content: `Участки ${mark}`, action: 'write', dialect: 'postgres', schema_id: null, test_run: false },
     });
-    const cogisId = await createDialog(member.api, 'cogis');
-    await member.api.post(`/api/dialogs/${cogisId}/messages`, { data: { content: `Слои ${mark}`, action: 'write' } });
+    // С 0.9 четвёртый вид — помощник проекта раздела «Код» вместо помощника CoGIS.
+    const codeProject = await simpleProject(member.api, 'MemoryPanel');
+    await askCode(member.api, codeProject.dialog_id, `Слои ${mark}`);
     const docparseId = await docparseDialog(member.api, mark);
 
     // Первый вход: панель открыта.
@@ -215,12 +217,23 @@ test.describe('критерий 29: индикатор и панель памя�
     await page.reload();
     await expect(panel(page)).toBeVisible();
 
-    for (const path of [`/cogis/${cogisId}`, `/documents/${docparseId}`]) {
-      await page.goto(path);
-      await expect(meter(page), path).toBeVisible();
-      await expect(panel(page), path).toBeVisible();
-      await expect(panel(page).locator('[data-memory-select]'), path).toHaveCount(1);
-    }
+    // В разделе «Код» панель встаёт на место ленты помощника: при открытии проекта скрыта, положение
+    // не запоминается (docs/portal-ui.md §5.13.12).
+    await page.goto(`/code/${codeProject.id}`);
+    await expect(meter(page)).toBeVisible();
+    await expect(panel(page)).toHaveCount(0);
+    await meter(page).click();
+    await expect(panel(page)).toBeVisible();
+    await expect(panel(page).locator('[data-memory-select]')).toHaveCount(1);
+    await page.reload();
+    await expect(meter(page)).toBeVisible();
+    await expect(panel(page)).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem('portal.memoryPanel'))).not.toBe('hidden');
+
+    await page.goto(`/documents/${docparseId}`);
+    await expect(meter(page)).toBeVisible();
+    await expect(panel(page)).toBeVisible();
+    await expect(panel(page).locator('[data-memory-select]')).toHaveCount(1);
 
     // Закрытие крестиком в панели разбора — и снова после перезагрузки скрыта.
     await panel(page).getByRole('button', { name: 'Скрыть панель памяти' }).click();

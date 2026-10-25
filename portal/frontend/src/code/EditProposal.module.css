@@ -12,6 +12,11 @@
   line-height: 20px;
 }
 
+.card:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
 .title {
   margin: 0;
   font-size: 14px;

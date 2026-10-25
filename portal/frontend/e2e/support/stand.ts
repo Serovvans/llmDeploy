@@ -111,6 +111,33 @@ export function restartWorkerWith(extraYaml: string): () => void {
   };
 }
 
+/**
+ * Перезапускает `portal-api` с накладкой стенда, в которой раздел `code:` заменён на `codeYaml`
+ * (флаги и пределы раздела «Код», docs/portal-api.md §7.5.15). Возвращает функцию, которая
+ * перезапускает `portal-api` с прежней накладкой. Файлы стенда не меняются: как у `restartWorkerWith`.
+ */
+export function restartApiWith(codeYaml: string): () => void {
+  if (!/^code:\n/.test(codeYaml)) {
+    throw new Error('Замена накладки portal-api начинается с раздела code:');
+  }
+  const base = readFileSync(STAND_OVERRIDE_FILE, 'utf8');
+  // Раздел верхнего уровня — от строки `code:` до следующей строки без отступа (или до конца файла).
+  const withoutCode = base.replace(/^code:\n(?:(?:[ #].*)?\n)*/m, '');
+  mkdirSync(STATE_DIR, { recursive: true });
+  const override = path.join(STATE_DIR, 'api-override.yaml');
+  const composeFile = path.join(STATE_DIR, 'api-override.compose.yml');
+  writeFileSync(override, `${withoutCode}\n${codeYaml}`);
+  writeFileSync(
+    composeFile,
+    `services:\n  portal-api:\n    volumes:\n      - ${JSON.stringify(`${override}:/etc/portal/config.override.yaml:ro`)}\n`,
+  );
+  const up = ['up', '-d', '--no-build', '--no-deps', '--force-recreate', '--wait', 'portal-api'];
+  standCompose('-f', composeFile, ...up);
+  return () => {
+    standCompose(...up);
+  };
+}
+
 /** Сколько запросов `chat/completions` получила заглушка модели с момента `since` (ISO 8601). */
 export function stubCompletions(since: string): number {
   return standCompose('logs', '--no-color', '--no-log-prefix', '--since', since, 'bifrost')

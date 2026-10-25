@@ -200,7 +200,7 @@ function Stations({ state, onToggle, onFix, onDownload, fixPrimary }: Pick<Props
       <li aria-hidden="true" className={styles.sep}>
         ›
       </li>
-      <li>{archive}</li>
+      <li data-opener="archive">{archive}</li>
     </ol>
   );
 }
@@ -345,7 +345,7 @@ export function BuildPanel(props: Props) {
       <section aria-label={b.region} className={styles.panel}>
         <div className={styles.route}>
           <span className={styles.disabled}>{b.disabled}</span>
-          <Link onClick={props.onExportVs}>{texts.workshop.exportVs}</Link>
+          <Link component="button" onClick={props.onExportVs}>{texts.workshop.exportVs}</Link>
         </div>
       </section>
     );

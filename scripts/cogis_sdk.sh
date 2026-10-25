@@ -11,10 +11,13 @@
 #   другие *.dll из /usr/elitegis/server/ и /usr/elitegis/plugins/ — только в корень
 #                папки, подпапки не читаются;
 #   plugins.txt  обязателен: список файлов папки plugins, вывод
-#                ls /usr/elitegis/plugins/ > plugins.txt на сервере CoGIS.
+#                ls /usr/elitegis/plugins/ > plugins.txt на сервере CoGIS;
+#   <id>.dll     каждого пакета офлайн-набора, чья DLL названа в plugins.txt, — копия
+#                из /usr/elitegis/plugins/ (portal-api.md §7.5.14, «Пакеты на сервере»).
 #
 # Что делает:
-#   1. проверяет набор файлов папки SDK;
+#   1. проверяет набор файлов папки SDK и копии DLL пакетов, стоящих на сервере (список
+#      пакетов — portal code-packages разовым запуском образа portal-api без сети);
 #   2. разовым запуском образа песочницы без сети (code-sandbox index) пишет в том
 #      llm_cogis-sdk-index manifest.json (файлы, вид, версии, SHA-256) и reference.json
 #      (справочник API) и печатает таблицу файлов; при ошибке ничего не записывается;
@@ -34,7 +37,6 @@ readonly SDK_REQUIRED=(eLiteGIS.Server.dll Atemiko.eLiteMap.dll plugins.txt)
 # Имя проекта — строка name: в docker-compose.yml; с него начинаются имена томов и образов.
 readonly COMPOSE_PROJECT="llm"
 readonly SERVICE="code-sandbox"
-readonly IMAGE_NAME="${COMPOSE_PROJECT}-${SERVICE}"
 readonly INDEX_VOLUME_KEY="cogis-sdk-index"
 readonly INDEX_VOLUME="${COMPOSE_PROJECT}_${INDEX_VOLUME_KEY}"
 readonly HEALTH_URL="http://${SERVICE}:8080/health"
@@ -91,12 +93,58 @@ check_sdk_dir() {
     log "ВНИМАНИЕ: в plugins.txt нет ни одного .dll — все DLL пакетов попадут в архив для CoGIS; проверить: ls /usr/elitegis/plugins/ на сервере CoGIS"
 }
 
+# Образ сервиса $1 с тегом установки портала.
 image_ref() {
   local image
-  image="${IMAGE_NAME}:$(env_file_value PORTAL_IMAGE_TAG)"
+  image="${COMPOSE_PROJECT}-$1:$(env_file_value PORTAL_IMAGE_TAG)"
   docker image inspect "$image" >/dev/null 2>&1 ||
     die "нет образа ${image}" "образ собирает установка портала: make portal"
   printf '%s' "$image"
+}
+
+lower() {
+  tr '[:upper:]' '[:lower:]'
+}
+
+# Офлайн-набор code.packages из образа portal-api (как у make code-packages): строка
+# «id<TAB>version<TAB>sha512» на пакет. Пароль нужен загрузке настроек портала, к базе
+# команда не обращается; docker берёт его из окружения, в argv его нет.
+list_packages() {
+  local image="$1" err out
+  err="$(mktemp)"
+  if ! out="$(PORTAL_DB_PASSWORD="$(env_file_value PORTAL_DB_PASSWORD)" \
+    docker run --rm --network none -e PORTAL_DB_PASSWORD \
+    -v "${DEPLOY_DIR}/portal:/etc/portal:ro" "$image" portal code-packages 2>"$err")"; then
+    local reason
+    reason="$(cat "$err")"
+    rm -f "$err"
+    die "portal code-packages не выдал офлайн-набор: ${reason}" \
+      "проверить code.packages в ${DEPLOY_DIR}/portal/config.override.yaml и PORTAL_DB_PASSWORD в ${ENV_FILE}; повторить make cogis-sdk"
+  fi
+  rm -f "$err"
+  printf '%s\n' "$out"
+}
+
+# Пакет набора, чья <id>.dll названа в plugins.txt, требует копии этой DLL в корне папки
+# SDK: иначе .csproj выгрузки для Visual Studio на неё не ссылается (А-119). Имена — без
+# учёта регистра, строки plugins.txt — без пробелов по краям.
+check_server_packages() {
+  local ids files name lname id missing=()
+  ids="$(list_packages "$1" | cut -f1 | lower)"
+  files="$(for name in "$SDK_DIR"/*; do
+    if [[ -f "$name" ]]; then printf '%s\n' "${name##*/}"; fi
+  done | lower)"
+  while IFS= read -r name; do
+    lname="$(printf '%s' "$name" | lower)"
+    id="${lname%.dll}"
+    if [[ -n "$id" ]] && grep -qxF -- "$id" <<<"$ids" && ! grep -qxF -- "$lname" <<<"$files"; then
+      missing+=("$name")
+    fi
+  done < <(awk '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "") } tolower($0) ~ /\.dll$/' \
+    "${SDK_DIR}/plugins.txt")
+  [[ "${#missing[@]}" -eq 0 ]] ||
+    die "DLL пакетов, которые уже стоят на сервере CoGIS (есть в plugins.txt), нет в ${SDK_DIR}: ${missing[*]}" \
+      "скопировать эти файлы с сервера CoGIS из /usr/elitegis/plugins/ в ${SDK_DIR}/ и повторить make cogis-sdk"
 }
 
 # Том создаётся раньше compose, если песочница ещё не запускалась; метки — чтобы compose
@@ -156,8 +204,10 @@ main() {
   check_root
   check_portal_deployed
   check_sdk_dir
-  local image
-  image="$(image_ref)"
+  local image api_image
+  image="$(image_ref "$SERVICE")"
+  api_image="$(image_ref portal-api)"
+  check_server_packages "$api_image"
   ensure_index_volume
   build_index "$image"
   restart_sandbox

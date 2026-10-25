@@ -10,6 +10,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
@@ -28,6 +29,7 @@ from portal.code.ports import (
     RuleFinding,
     RuleTool,
 )
+from portal.code.zipio import MEMO_NAME
 from portal.core.settings import CodeBuildSettings
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,9 @@ logger = logging.getLogger(__name__)
 _STATUSES = frozenset({"succeeded", "failed", "timeout"})
 _SEVERITIES = frozenset({"error", "warning"})
 _TIMEOUT_RESULT = CompileResult("timeout", None, (), False, None, None, (), ())
+# Простое имя DLL (§7.5.7, «Имена DLL от песочницы»): без `/`, `\`, пробелов и управляющих.
+_DLL_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\.[Dd][Ll][Ll]")
+_DLL_NAME_MAX_CHARS = 255
 
 
 class _ProtocolError(Exception):
@@ -111,12 +116,31 @@ def _dicts(value: Any) -> list[dict[str, Any]]:
     return value
 
 
-def parse_result(body: Any) -> CompileResult:
-    """Ответ `200` песочницы → `CompileResult`; не по протоколу — `_ProtocolError`."""
+def _dll_name(value: Any) -> str:
+    """Имя DLL из ответа песочницы — простое имя файла; иначе `_ProtocolError`."""
+    name: str = _text(value)
+    if len(name) > _DLL_NAME_MAX_CHARS or ".." in name or not _DLL_NAME.fullmatch(name):
+        raise _ProtocolError
+    return name
+
+
+def parse_result(body: Any, assembly_name: str) -> CompileResult:
+    """Ответ `200` песочницы → `CompileResult`; не по протоколу — `_ProtocolError`.
+
+    Имена DLL станут записями архива для CoGIS и строками памятки: записи архива
+    (`<assembly_name>.dll`, `bundle`, памятка) не повторяются без учёта регистра (А-122).
+    """
     if not isinstance(body, dict) or body.get("status") not in _STATUSES:
         raise _ProtocolError
     on_server = body.get("on_server")
     if not isinstance(on_server, list) or not isinstance(body.get("diagnostics_truncated"), bool):
+        raise _ProtocolError
+    bundle = [
+        (_dll_name(item.get("file_name")), _bytes(item.get("content")))
+        for item in _dicts(body.get("bundle"))
+    ]
+    entries = [f"{assembly_name}.dll", *(name for name, _ in bundle), MEMO_NAME]
+    if len({entry.lower() for entry in entries}) != len(entries):
         raise _ProtocolError
     succeeded = body["status"] == "succeeded"
     return CompileResult(
@@ -126,11 +150,8 @@ def parse_result(body: Any) -> CompileResult:
         diagnostics_truncated=body["diagnostics_truncated"],
         rules=_rules(body.get("rules")) if succeeded else None,
         dll=_bytes(body.get("dll")) if succeeded else None,
-        bundle=[
-            (_text(item.get("file_name")), _bytes(item.get("content")))
-            for item in _dicts(body.get("bundle"))
-        ],
-        on_server=[_text(item) for item in on_server],
+        bundle=bundle,
+        on_server=[_dll_name(item) for item in on_server],
     )
 
 
@@ -158,11 +179,11 @@ class _HttpSlot:
         url = f"{self._settings.url.rstrip('/')}/compile"
         try:
             async with asyncio.timeout(self._settings.timeout_seconds):
-                return await self._send(url, payload)
+                return await self._send(url, payload, assembly_name)
         except (TimeoutError, httpx.TimeoutException):
             return _TIMEOUT_RESULT
 
-    async def _send(self, url: str, payload: dict[str, Any]) -> CompileResult:
+    async def _send(self, url: str, payload: dict[str, Any], assembly_name: str) -> CompileResult:
         limit = self._settings.response_max_bytes
         try:
             async with self._client.stream(
@@ -192,7 +213,7 @@ class _HttpSlot:
             )
             raise BuildUnavailableError
         try:
-            return parse_result(json.loads(body))
+            return parse_result(json.loads(body), assembly_name)
         except (ValueError, _ProtocolError) as error:
             logger.warning("code sandbox refused", extra={"reason": "protocol"})
             raise BuildUnavailableError from error

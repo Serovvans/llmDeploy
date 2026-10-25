@@ -123,7 +123,7 @@ export interface ZipPart {
 }
 
 /** ZIP-архив в памяти: части хранятся как есть или сжимаются Deflate. */
-function zip(parts: ZipPart[]): Buffer {
+export function zip(parts: ZipPart[]): Buffer {
   const locals: Buffer[] = [];
   const central: Buffer[] = [];
   let offset = 0;

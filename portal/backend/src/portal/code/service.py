@@ -83,9 +83,9 @@ def check_path(path: str, extensions: Sequence[str], field: str = "path") -> Non
         raise validation_error([_field(field, code)])
 
 
-def check_name(name: str) -> None:
-    """Имя проекта по §7.5.3."""
-    if project_name_error(name) is not None:
+def check_name(name: str, packages: Sequence[str]) -> None:
+    """Имя проекта по §7.5.3; `packages` — `id` пакетов набора."""
+    if project_name_error(name, packages) is not None:
         raise validation_error([field_error("name", "invalid_format")])
 
 
@@ -289,6 +289,11 @@ class CodeService:
         files.sort(key=lambda file: file.path.lower())
         return ProjectDetails(project, files, None, dialog.id, False)
 
+    @property
+    def _package_ids(self) -> list[str]:
+        """`id` пакетов набора в порядке `code.packages`."""
+        return [item.id for item in self._settings.packages]
+
     def _limit_value(self, limit: Literal["files", "bytes"]) -> int:
         return self.limits.max_files if limit == "files" else self.limits.project_max_bytes
 
@@ -302,12 +307,13 @@ class CodeService:
             self._settings.wizard.max_tools,
             self._settings.wizard.max_parameters,
             self._message_max_chars,
+            self._package_ids,
         )
         built = scaffold(
             form,
             self._templates,
             self._settings.prompts.wizard_request,
-            [item.id for item in self._settings.packages],
+            self._package_ids,
         )
         if built.assistant_request is not None and (
             len(built.assistant_request) > self._message_max_chars
@@ -318,13 +324,13 @@ class CodeService:
 
     async def create_example(self, owner_id: UUID, name: str) -> Created:
         """Проект-пример по инструкции заказчика (§7.5.4)."""
-        check_name(name)
-        built = example(name, self._templates, [item.id for item in self._settings.packages])
+        check_name(name, self._package_ids)
+        built = example(name, self._templates, self._package_ids)
         return Created(await self._create(owner_id, name, built, built.packages), None, None)
 
     async def import_zip(self, owner_id: UUID, name: str, data: bytes) -> Created:
         """Проект из архива ZIP: только файлы `.cs` и пакеты набора (§7.5.5)."""
-        check_name(name)
+        check_name(name, self._package_ids)
         result = await asyncio.to_thread(
             self._archives.read_import,
             data,

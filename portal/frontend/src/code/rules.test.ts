@@ -176,7 +176,7 @@ describe('путь до CoGIS', () => {
 });
 
 describe('заметка после загрузки ZIP', () => {
-  it('разделяет совпавшие, взятые в версии набора и отсутствующие пакеты', () => {
+  it('разделяет совпавшие, взятые в версии набора и отсутствующие пакеты; пропущенные — по skipped_total', () => {
     const project = { files: [file('A.cs'), file('B.cs')], packages: ['Npgsql', 'Dapper'] } as CodeProject;
     const sdk = { packages: [{ id: 'Npgsql', version: '9.0.3', on_server: true }, { id: 'Dapper', version: '2.1.35', on_server: false }] };
     const report = {
@@ -185,6 +185,8 @@ describe('заметка после загрузки ZIP', () => {
         { path: 'Old.cs', reason: 'file_too_large' },
         { path: 'App.csproj', reason: 'unreadable' },
       ],
+      // The list is capped by the server (А-121): the count and «и ещё ‹N›» come from the total.
+      skipped_total: 150,
       unmatched_packages: [
         { id: 'Npgsql', version: '8.0.3', offline_version: '9.0.3' },
         { id: 'Serilog', version: null, offline_version: null },
@@ -196,10 +198,11 @@ describe('заметка после загрузки ZIP', () => {
       w.imported.matched('Dapper 2.1.35'),
       w.imported.replaced('Npgsql 9.0.3 вместо 8.0.3'),
       w.imported.missing('Serilog'),
-      w.imported.skipped(2),
+      w.imported.skipped(150),
       w.imported.ignored(12),
     ]);
     expect(result.skipped).toEqual(['Old.cs — файл больше 16 КБ', 'App.csproj — не удалось прочитать — пакеты из него не взяты']);
+    expect(result.more).toBe(148);
   });
 });
 

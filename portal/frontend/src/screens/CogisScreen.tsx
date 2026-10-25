@@ -1,11 +1,13 @@
-import { Switcher } from '@skbkontur/react-ui';
+import { SingleToast, Switcher } from '@skbkontur/react-ui';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { api } from '../api/client';
+import { api, isApiError } from '../api/client';
 import type { CogisAction } from '../api/types';
+import { useDialogs } from '../chat/ChatProvider';
 import { DialogScreen } from '../components/chat/DialogScreen';
 import { Notice } from '../components/Notice';
+import { useSession } from '../session/SessionContext';
 import { texts } from '../texts';
 import styles from './ToolScreen.module.css';
 
@@ -17,6 +19,19 @@ export function CogisScreen() {
   const navigate = useNavigate();
   const [action, setAction] = useState<CogisAction>('write');
   const [documentationMissing, setDocumentationMissing] = useState(false);
+  const { reloadConfig } = useSession();
+  const { regenerate } = useDialogs('cogis');
+
+  // Раздел «Код» включили, пока экран открыт: прежний диалог только для чтения (§5.13.15). С новыми
+  // настройками маршрут `/cogis/:id` сам откроет диалог на `/code/dialogs/:id` (§5.13.14).
+  const readOnly = (error: unknown) => {
+    if (!isApiError(error, 'dialog_read_only')) {
+      return false;
+    }
+    SingleToast.push(texts.workshop.old.readOnly);
+    reloadConfig();
+    return true;
+  };
 
   // Признак запрашивается при каждом открытии раздела; сбой запроса — предупреждения нет.
   useEffect(() => {
@@ -47,6 +62,8 @@ export function CogisScreen() {
       mono={action !== 'write'}
       note={t.note}
       nothingFoundText={t.nothingFound}
+      onSendRefused={readOnly}
+      onRegenerate={(id) => regenerate(id, { onRefused: readOnly })}
       toolbar={
         <div className={styles.toolbar}>
           <Switcher items={ACTIONS} value={action} onValueChange={(value) => setAction(value as CogisAction)} />

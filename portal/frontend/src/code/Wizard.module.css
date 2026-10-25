@@ -81,7 +81,8 @@
 .paramHead,
 .paramRow {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.1fr) 40px minmax(0, 1fr) minmax(0, 1fr) 32px;
+  /* The type column fits its longest value «Дата и время — DateTime» in the closed Select. */
+  grid-template-columns: minmax(0, 1fr) minmax(216px, 1.2fr) 40px minmax(0, 1fr) minmax(0, 1fr) 32px;
   gap: 8px;
   align-items: start;
 }
@@ -90,6 +91,12 @@
   color: var(--p-text-muted);
   font-size: 13px;
   line-height: 18px;
+}
+
+.headHint:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
 }
 
 .required {

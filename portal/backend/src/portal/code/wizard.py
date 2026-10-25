@@ -136,10 +136,14 @@ def check_form(
     max_tools: int,
     max_parameters: int,
     description_max_chars: int,
+    packages: Sequence[str],
 ) -> None:
-    """Проверить форму мастера; нарушения — `validation_error` по полям (§7.5.4)."""
+    """Проверить форму мастера; нарушения — `validation_error` по полям (§7.5.4).
+
+    `packages` — `id` пакетов набора: имя проекта не совпадает с ними (§7.5.3).
+    """
     problems: list[FieldError] = []
-    if project_name_error(form["name"]) is not None:
+    if project_name_error(form["name"], packages) is not None:
         problems.append(field_error("name", "invalid_format"))
     tools = form["tools"]
     if not tools:
