@@ -52,7 +52,10 @@
 #       хранятся отдельно, вне ВМ: без первого второй фактор всем придётся настраивать
 #       заново, без второго база ключей Bifrost не читается;
 #   volume caddy-data — приватный ключ корня CA (TLS_MODE=internal), docs/runbook.md §4.4;
-#   volume hf-cache и volume asr-models — веса моделей скачиваются заново (make portal).
+#   volume hf-cache и volume asr-models — веса моделей скачиваются заново (make portal);
+#   volume code-packages, volume cogis-sdk-index и deploy/cogis-sdk/ — офлайн-набор
+#       загружается заново (make code-packages), DLL CoGIS копируются с сервера
+#       заказчика, индекс строит make cogis-sdk.
 # В самой копии — личные данные и переписка сотрудников: хранить как секрет.
 set -euo pipefail
 

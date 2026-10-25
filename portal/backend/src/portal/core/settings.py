@@ -29,6 +29,7 @@ CONFIG_DIR = Path("config")
 OVERRIDE_PATH = Path("/etc/portal/config.override.yaml")
 
 _SECRET_KEY_BYTES = 32
+_SHA512_BYTES = 64
 # Слова «Документ: », «Раздел: » и переводы строк в тексте для поиска (docs/portal-api.md §10.1).
 _SEARCH_TEXT_LABELS_CHARS = 22
 
@@ -571,6 +572,140 @@ class MemorySettings(_Section):
     head_rules_prompt: str = Field(min_length=1)
 
 
+class CodePackage(_Section):
+    """Пакет офлайн-набора (docs/portal-api.md §7.5.14); `sha512` — SHA-512 `.nupkg` в base64."""
+
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    version: str = Field(pattern=r"^[0-9][0-9A-Za-z.+-]*$")
+    sha512: str
+    depends_on: tuple[str, ...] = ()
+
+    @field_validator("sha512")
+    @classmethod
+    def _check_sha512(cls, value: str) -> str:
+        try:
+            digest = base64.b64decode(value, validate=True)
+        except ValueError as error:
+            raise ValueError("code.packages: sha512 — не base64") from error
+        if len(digest) != _SHA512_BYTES:
+            raise ValueError("code.packages: sha512 — не 64 байта")
+        return value
+
+
+class CodeWizardSettings(_Section):
+    """Пределы мастера «Новый GPTool» (§7.5.4)."""
+
+    max_tools: int = Field(ge=1)
+    max_parameters: int = Field(ge=0)
+
+
+class CodeBuildSettings(_Section):
+    """Сборка в песочнице `code-sandbox` (§7.5.7, §7.5.12)."""
+
+    enabled: bool
+    url: str = Field(min_length=1)
+    max_parallel: int = Field(ge=1)
+    wait_seconds: float = Field(gt=0)
+    timeout_seconds: float = Field(gt=0)
+    response_max_bytes: int = Field(ge=1)
+
+
+class CodeFixSettings(_Section):
+    """Цикл исправления (§7.5.11): не больше двух дополнительных попыток (ПД §5.4)."""
+
+    attempts: int = Field(ge=0, le=2)
+    timeout_seconds: float = Field(gt=0)
+
+
+class CodeSystemPrompts(_Section):
+    """Системные сообщения помощника проекта по действиям (§7.5.9)."""
+
+    write: str = Field(min_length=1)
+    explain: str = Field(min_length=1)
+    fix: str = Field(min_length=1)
+
+
+class CodePrompts(_Section):
+    """Промпты раздела «Код» (`code_prompts.yaml`, тексты — `codegen-evaluator`, §13.6)."""
+
+    system: CodeSystemPrompts
+    gptool_rules: str = Field(min_length=1)
+    edit_format: str = Field(min_length=1)
+    fix_attempt: str = Field(min_length=1)
+    no_sdk_notice: str = Field(min_length=1)
+    no_documentation_notice: str = Field(min_length=1)
+    wizard_request: str = Field(min_length=1)
+
+
+class CodeSettings(_Section):
+    """Раздел «Код» (docs/portal-api.md §7.5, §13.6)."""
+
+    enabled: bool
+    max_projects: int = Field(ge=1)
+    max_files: int = Field(ge=1)
+    file_max_bytes: int = Field(ge=1)
+    project_max_bytes: int = Field(ge=1)
+    file_extensions: tuple[str, ...] = Field(min_length=1)
+    import_max_bytes: int = Field(ge=1)
+    max_snapshots: int = Field(ge=1)
+    wizard: CodeWizardSettings
+    templates_dir: Path
+    reasoning_effort: ReasoningEffort
+    max_output_tokens: int = Field(ge=1)
+    reference_max_tokens: int = Field(ge=0)
+    reference_always: tuple[str, ...]
+    build_messages_max: int = Field(ge=1)
+    editor_dotnet_types: tuple[str, ...]
+    sdk_index_dir: Path
+    build: CodeBuildSettings
+    fix: CodeFixSettings
+    packages: tuple[CodePackage, ...]
+    export_memo: str = Field(min_length=1)
+    archive_memo: str = Field(min_length=1)
+    prompts: CodePrompts
+
+    def package(self, package_id: str) -> CodePackage | None:
+        """Пакет набора по `id` без учёта регистра."""
+        wanted = package_id.lower()
+        return next((item for item in self.packages if item.id.lower() == wanted), None)
+
+    @model_validator(mode="after")
+    def _check_limits(self) -> Self:
+        if self.file_max_bytes > self.project_max_bytes:
+            raise ValueError("code.file_max_bytes не должен превышать code.project_max_bytes")
+        return self
+
+    @model_validator(mode="after")
+    def _check_packages(self) -> Self:
+        """`id` без повторов без учёта регистра, зависимости — из набора и без циклов."""
+        ids = [item.id.lower() for item in self.packages]
+        if len(ids) != len(set(ids)):
+            raise ValueError("code.packages: id повторяются")
+        depends = {
+            item.id.lower(): [name.lower() for name in item.depends_on] for item in self.packages
+        }
+        for name, needed in depends.items():
+            if any(item not in depends for item in needed):
+                raise ValueError(f"code.packages: у {name} зависимость не из набора")
+        visiting: set[str] = set()
+        done: set[str] = set()
+
+        def visit(name: str) -> None:
+            if name in done:
+                return
+            if name in visiting:
+                raise ValueError("code.packages: зависимости образуют цикл")
+            visiting.add(name)
+            for item in depends[name]:
+                visit(item)
+            visiting.discard(name)
+            done.add(name)
+
+        for name in depends:
+            visit(name)
+        return self
+
+
 class MediaFfmpegSettings(_Section):
     """Пределы одного запуска ffmpeg и ffprobe (docs/portal-api.md §8.7)."""
 
@@ -637,6 +772,7 @@ class Settings(_Section):
     cogis: CogisSettings
     memory: MemorySettings
     media: MediaSettings
+    code: CodeSettings
 
     common_passwords: frozenset[str] = Field(repr=False)
     db_password: SecretStr
@@ -708,6 +844,16 @@ class Settings(_Section):
             raise ValueError(
                 "memory.max_chars / llm.chars_per_token не должно превышать "
                 "docparse.dialog_reserve_tokens / 2"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_code_file_fits_answer(self) -> Self:
+        """Файл наибольшего размера модель вернёт целиком в половине ответа (§13.6, А-117)."""
+        if self.code.file_max_bytes / self.llm.chars_per_token > self.code.max_output_tokens / 2:
+            raise ValueError(
+                "code.file_max_bytes / llm.chars_per_token не должно превышать "
+                "code.max_output_tokens / 2"
             )
         return self
 

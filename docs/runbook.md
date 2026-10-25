@@ -35,11 +35,11 @@ Caddy слушает три порта хоста, все ведут на оди
 Compose-профили: базовый (только vllm), `gateway` (caddy, bifrost — второй этап
 развёртывания, `design.md` §3.7), `embeddings` (vllm-embed), `monitoring` (dcgm-exporter,
 Prometheus, Grafana), `portal` (portal-web, portal-api, portal-worker, portal-db, qdrant,
-sql-sandbox — третий этап, `design.md` §3.8), `rerank` (vllm-rerank — реранкер поиска
+sql-sandbox, code-sandbox — третий этап, `design.md` §3.8), `rerank` (vllm-rerank — реранкер поиска
 портала, только вместе с `embeddings`; 3.7), `cert` (lego — разовый запуск из
 `make cert`, в старт стека не входит). Имя проекта фиксировано — `llm`, поэтому volumes
 называются `llm_hf-cache`, `llm_bifrost-data`, `llm_caddy-data`, `llm_prometheus-data`,
-`llm_portal-db-data`, `llm_qdrant-data`, `llm_portal-files`, `llm_asr-models`.
+`llm_portal-db-data`, `llm_qdrant-data`, `llm_portal-files`, `llm_asr-models`, `llm_code-packages`, `llm_cogis-sdk-index`.
 
 ## 1. Перед установкой
 
@@ -599,7 +599,7 @@ make portal-audit EVENT=login_unlocked      # кто и кому снимал б
 ### 3.6 Портал: параметры конфигурации
 
 Параметры портала — YAML в `portal/backend/config/` (`app.yaml`, `kb.yaml`,
-`docparse.yaml`), вшиты в образ. На ВМ их меняют, не пересобирая образ, накладкой
+`docparse.yaml`, с 0.9 — `code.yaml`), вшиты в образ. На ВМ их меняют, не пересобирая образ, накладкой
 `deploy/portal/config.override.yaml`: каталог `deploy/portal/` смонтирован в
 `portal-api` и `portal-worker` как `/etc/portal` (только чтение) и в репозиторий не
 попадает. В накладке указываются только изменяемые ключи: словари объединяются, списки
@@ -747,6 +747,8 @@ files:
 | `kb.rewrite.enabled` | `true` | Поиск идёт по тексту последнего сообщения |
 | `kb.images.enabled` | `true` | Картинки из документов не извлекаются; уже извлечённые показываются и находятся |
 | `memory.enabled` | `true` | Нет кнопки «Память диалога», индикатора, панели, сжатия и переноса; маршруты памяти отвечают 403 `feature_disabled`; запрос к модели собирается как в 0.6, `stream_options` не шлётся; уже сохранённые выборы пар, применённый пересказ и перенесённые сведения действуют (это содержимое диалога) |
+| `code.enabled` | `true` | Раздел «Код» скрыт, возвращается экран помощника CoGIS как в 0.8; `/api/code/*` отвечает 403 `feature_disabled`; проекты сохраняются (3.11) |
+| `code.build.enabled` | `false` | Нет «Собрать», «Исправить с помощником» и архива для CoGIS; строка «Сборка на портале выключена…»; редактор, помощник, версии и «Скачать для Visual Studio» работают (3.11) |
 | `media.enabled` | `true` | Аудио и видео не принимаются ни в базу знаний, ни в чат; уже расшифрованные доступны |
 
 ```yaml
@@ -861,6 +863,69 @@ make portal-reprocess-resume         # возобновить
   на описание) / `background_llm_parallel`. Ориентир до замера: 100 документов по 100
   страниц — около 13 часов (`portal-design.md` §8.2).
 
+### 3.11 Портал: раздел «Код» (песочница сборки C#)
+
+С 0.9 (`portal-design.md` §3.3, §7, §8.5). Раздел «Код» заменяет помощника CoGIS; сборка идёт в
+сервисе `code-sandbox` (Roslyn): код проекта не исполняется, сети и секретов портала нет,
+портов на хост нет, сеть `code-sandbox` — только `portal-api` и песочница. Раздельные флаги:
+`code.enabled` (раздел) и `code.build.enabled` (сборка, по умолчанию `false`) — 3.8.
+
+**SDK CoGIS** — DLL заказчика, лежат только в `deploy/cogis-sdk/` на ВМ (вне git и образов).
+Состав — в заголовке `scripts/cogis_sdk.sh`: `eLiteGIS.Server.dll` и `Atemiko.eLiteMap.dll`
+из `/usr/elitegis/server/`, `plugins.txt` (`ls /usr/elitegis/plugins/` на сервере CoGIS) и
+копии DLL пакетов набора, уже стоящих на сервере (стартовый набор — `Npgsql.dll`,
+`Microsoft.Extensions.Logging.Abstractions.dll`,
+`Microsoft.Extensions.DependencyInjection.Abstractions.dll`; нужны те, что названы в
+`plugins.txt`). Подробный порядок первого подключения — `release-0.9.md`, шаги 4 и 8.
+
+```bash
+make cogis-sdk       # проверка файлов, индекс с версиями и SHA-256, справочник API, пересоздание code-sandbox
+make code-packages   # офлайн-набор NuGet (code.packages) с проверкой SHA-512
+```
+
+- `make cogis-sdk` повторяют после обновления CoGIS (заменить файлы в `deploy/cogis-sdk/`).
+  Ошибка «DLL пакетов, которые уже стоят на сервере CoGIS …» — скопировать названные файлы
+  из `/usr/elitegis/plugins/` в `deploy/cogis-sdk/` и повторить. Флаг сборки цель не меняет.
+- `make code-packages` нужен `api.nuget.org:443` (`devops-request.md` §1.4) — только при
+  подготовке релиза и после правки `code.packages` в накладке; в работе сети не нужно.
+  После правки списка: `make code-packages`, затем `make cogis-sdk`. Уже загруженные пакеты
+  с верной суммой заново не качаются.
+- Включить сборку — после `make cogis-sdk` и проверки на настоящих DLL: накладка (3.6)
+
+  ```yaml
+  code:
+    build:
+      enabled: true
+  ```
+
+  и `sudo docker compose -f deploy/docker-compose.yml restart portal-api`.
+
+**Состояние.** `make ps` — `code-sandbox` healthy; `make smoke-portal` — строка
+`code_sandbox`: «SDK CoGIS ‹версия›» либо «SDK CoGIS не подключён — сборка недоступна до
+make cogis-sdk». Журнал песочницы — только числа и коды, без кода и сообщений компилятора:
+
+```bash
+make logs SERVICE=code-sandbox
+sudo docker compose -f deploy/docker-compose.yml logs --no-color --since 1h portal-api 2>&1 | grep -E '"code (build|sandbox refused)"' | tail -n 20
+```
+
+| Запись | Что значит |
+|---|---|
+| `code-sandbox`: `sdk load status=… files=…` | Результат чтения SDK при старте; не `ok` — SDK не подключён или файлы разошлись с индексом: `make cogis-sdk` |
+| `code-sandbox`: `compile status=worker_failed` / `internal_error` / `aborted` | Процесс сборки упал, ошибка песочницы или сборка снята по сроку; единичные — норма для тяжёлого кода, подряд — проверить память (`mem_limit` 2 ГБ) |
+| `portal-api`: `code sandbox refused` (`reason`: `connection`, `protocol`, `too_large`, либо `status`, `error`) | Портал не получил итог сборки — сотрудник видит «Сборка недоступна» |
+| `portal-api`: `code build` (`project_id`, `status`, `errors`, `warnings`, `findings`, `duration_ms`) | Итог каждой сборки — числа без текста |
+
+**«Сборка недоступна» у сотрудников** — по порядку: `make ps` (`code-sandbox` healthy, число
+перезапусков); `make smoke-portal` (SDK подключён?); `make logs SERVICE=code-sandbox` (запись
+`sdk load`); нет SDK — `make cogis-sdk`; нет образа или тома набора — `make portal`;
+упёрлась в память — ждёт вторая сборка (`code.build.max_parallel` = 2; ожидание
+`wait_seconds` 60, срок сборки `timeout_seconds` 90, затем «Не уложилась во время»). Пока
+сборка недоступна, редактор, помощник, версии и «Скачать для Visual Studio» работают.
+
+**Флаг раздела.** `code.enabled: false` возвращает экран помощника CoGIS; проекты не
+удаляются. Откат кода после миграции `0010` — только восстановлением копии (`release-0.9.md`).
+
 ## 4. Изменения и обслуживание
 
 ### 4.1 Смена модели
@@ -948,7 +1013,10 @@ make restore FROM=/var/backups/llm/llm-backup-ГГГГММДД-ЧЧММСС   # 
   отдельно, как секрет (`domain-setup.md`, шаг 3);
 - volume `llm_hf-cache` и volume `llm_asr-models` — веса моделей скачиваются заново
   (`make portal`);
-- песочница SQL — данных не хранит.
+- песочница SQL — данных не хранит;
+- volume `llm_code-packages`, volume `llm_cogis-sdk-index` и `deploy/cogis-sdk/` — офлайн-набор
+  загружается заново (`make code-packages`), DLL копируются с сервера CoGIS, индекс строит
+  `make cogis-sdk` (3.11). Проекты раздела «Код» и их версии лежат в базе и входят в копию.
 
 **Копию храните как секрет**, на другой машине: в ней переписка и личные данные
 сотрудников.
@@ -1447,6 +1515,7 @@ docker-compose.yml коммита …» значит, что `git checkout` пр
 | `portal-worker` перезапускается сразу после старта | Нет весов модели речи в volume `llm_asr-models` или пуст `PORTAL_LLM_API_KEY`: `make logs SERVICE=portal-worker`, повторить `make portal` |
 | `make smoke-portal`: реранкер — 400 «could not auto resolve a provider» | Ключу портала не выдан доступ к `rerank`: `make keys`, `make key-rerank ID=<id ключа portal>`. Портал при таком ответе ищет без переранжирования |
 | SQL-помощник: «Проверка на тестовых данных сейчас недоступна…» | `make ps` — `sql-sandbox` healthy?; `sandbox slot retired` в `make logs SERVICE=portal-api` — перезапустить песочницу и `portal-api` (3.7) |
+| Раздел «Код»: «Сборка недоступна» | 3.11 |
 | Портал: «На портале закончилось место для записей. Сообщите администратору» | Выбрана квота записей или свободного места меньше порога (3.9) |
 | `make release-backup`: «каталог … лежит на диске /» | Указать каталог на другом диске или сетевом ресурсе (4.6) |
 | `make release-rollback`: «в …/deploy/rollback нет копии .env до релиза для коммита …» | Рабочий клон не возвращён на прежний коммит — `git checkout <прежний коммит>` и повторить; если каталога `deploy/rollback/` нет, установка релиза не дошла до записи `.env`: после `git checkout` — `make up` (4.6) |

@@ -354,7 +354,7 @@ export function AddDocumentsModal(props: AddDocumentsModalProps) {
               <Checkbox checked={isCogis} onValueChange={setIsCogis} disabled={busy}>
                 {t.cogis}
               </Checkbox>
-              <p className={styles.checkboxHint}>{t.cogisHint}</p>
+              <p className={styles.checkboxHint}>{config?.code.enabled ? t.cogisHintCode : t.cogisHint}</p>
               {hasRecording && <p className={styles.checkboxHint}>{t.cogisNotForRecordings}</p>}
             </div>
           )}

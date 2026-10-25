@@ -15,8 +15,8 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import aclosing
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from portal.core.errors import field_error, not_found, validation_error
@@ -47,6 +47,7 @@ from portal.dialogs.files import AttachmentFiles
 from portal.dialogs.footnotes import cited_numbers
 from portal.dialogs.memory import MemoryEstimate, estimate_memory
 from portal.dialogs.ports import (
+    AnswerEditor,
     AnswerPlan,
     DialogTool,
     DialogUnitOfWork,
@@ -163,6 +164,7 @@ class _Job:
     plan: AnswerPlan
     answer_id: UUID
     tool: DialogTool | None = None
+    kind: DialogKind = "chat"
     needs_title: bool = False
     # Опасные операции в только что отправленном вопросе: событие `sql_question_check`.
     announce_dangers: Sequence[str] = ()
@@ -173,6 +175,18 @@ class _Job:
 
 # Проверки и сохранение вопроса под блокировкой диалога; получает последнее сообщение.
 type _Save = Callable[[DialogUnitOfWork, Message | None], Awaitable[_Job]]
+# Текст ответа для истории своего вида: у `code` блоки правки заменены строкой (§7.5.9).
+type HistoryView = Callable[[str], str]
+
+
+def viewed(messages: Sequence[Message], view: HistoryView | None) -> list[Message]:
+    """Сообщения с текстом ответов для истории; сохранённые сообщения не меняются."""
+    if view is None:
+        return list(messages)
+    return [
+        replace(message, content=view(message.content)) if message.role == "assistant" else message
+        for message in messages
+    ]
 
 
 def search_history(
@@ -219,16 +233,22 @@ class GenerationService:
         clock: Clock,
         settings: Settings,
         max_model_len: int,
+        editors: Mapping[DialogKind, AnswerEditor] | None = None,
+        history_views: Mapping[DialogKind, HistoryView] | None = None,
     ) -> None:
         """Получить зависимости явно.
 
-        `tools` — правила видов `sql`, `cogis`, `docparse`; `summary_forming` отвечает,
+        `tools` — правила видов `sql`, `cogis`, `docparse`, `code`; `editors` — правка по
+        сохранённому ответу (`code`); `history_views` — текст ответов в истории своего вида
+        (§7.5.9). `summary_forming` отвечает,
         пишется ли сейчас краткое содержание разбора; `max_model_len` — контекст модели;
         `document_executor` — потоки чтения документов, отдельные от общего пула.
         """
         self._knowledge = knowledge
         self._knowledge_reserve = settings.kb.context_max_tokens
         self._tools = tools
+        self._editors = editors or {}
+        self._history_views = history_views or {}
         self._summary_forming = summary_forming
         self._uow_factory = uow_factory
         self._model = model
@@ -543,11 +563,13 @@ class GenerationService:
                 if not idle:
                     return None
                 job = await save(uow, last)
+                job.kind = kind
                 # Пересказ и перенесённое входят в каждый запрос: с ними вопрос тоже
                 # обязан поместиться (§5.10.2).
                 self._check_fits(job.plan, head_turn(dialog))
-                # У разбора название — имя файла, модель его не предлагает (§5.7).
-                job.needs_title = dialog.title is None and kind != "docparse"
+                # У разбора название — имя файла, у помощника проекта — имя проекта: модель
+                # его не предлагает (§5.7, §7.5.8).
+                job.needs_title = dialog.title is None and kind not in ("docparse", "code")
                 answer = self._message(
                     dialog_id, job.question.position + 1, "assistant", "streaming", {}
                 )
@@ -600,6 +622,7 @@ class GenerationService:
             files = await uow.dialogs.message_attachments(
                 owner_id, [message.id for message in messages if message.role == "user"]
             )
+        messages = viewed(messages, self._history_views.get(kind))
         head = head_turn(dialog)
         return estimate_memory(
             messages,
@@ -759,6 +782,9 @@ class GenerationService:
             channel.emit("sql_check", outcome.sql_check)
             if job.tool is not None and job.plan.sql_test_schema is not None:
                 interrupted = await self._test_run(job, job.tool)
+        editor = self._editors.get(job.kind)
+        if finished and editor is not None and outcome.error_code != "dialog_deleted":
+            interrupted = await self._edit(job, editor)
         if title_task is not None:
             if finished and interrupted is None:
                 await asyncio.wait({title_task}, timeout=self._dialogs.title_wait_seconds)
@@ -810,6 +836,45 @@ class GenerationService:
                 "sql run not saved",
                 lambda uow: uow.dialogs.set_sql_run(job.owner_id, job.answer_id, latest[0]),
             )
+        return reason
+
+    async def _edit(self, job: _Job, editor: AnswerEditor) -> Interruption | None:
+        """Правка по сохранённому ответу и цикл исправления (§5.5, шаг 6; §7.5.10–7.5.11).
+
+        Как проверка SQL: срок ответа не действует, наблюдение за соединением, сессией и
+        диалогом продолжается; обрыв — правки нет, ответ остаётся как сохранён. Сбой самой
+        правки ответу не мешает. Событие `code_edit` — перед `done`.
+        """
+        status: Literal["complete", "length_limit"] = (
+            "length_limit" if job.outcome.status == "length_limit" else "complete"
+        )
+        watch = StreamWatch(
+            job.channel,
+            self._sessions,
+            job.session_id,
+            lambda: self._answer_exists(job),
+            math.inf,
+            self._recheck_seconds,
+        )
+        try:
+            edit, reason = await watch.result(
+                editor.propose(
+                    job.owner_id,
+                    job.dialog_id,
+                    job.answer_id,
+                    job.question.params,
+                    job.outcome.content,
+                    status,
+                    lambda state: job.channel.emit("code_fix", state),
+                )
+            )
+        except Exception as error:
+            self._log_failure("code edit failed", error)
+            return None
+        finally:
+            watch.close()
+        if reason is None and edit is not None:
+            job.channel.emit("code_edit", edit)
         return reason
 
     async def _drop_leftovers(self, job: _Job) -> None:
@@ -905,6 +970,7 @@ class GenerationService:
         if dialog is None:
             self._interrupted(job, "dialog_deleted")
             return
+        earlier = viewed(earlier, self._history_views.get(job.kind))
         # Сохранённые режимы пар, пересказ и перенесённое учитываются при любом значении
         # флага: это содержимое диалога (§5.10.9). Пересказанные сообщения в запрос не идут.
         summarized_until = dialog.summary_until_position

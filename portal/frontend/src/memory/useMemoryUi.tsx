@@ -55,6 +55,13 @@ interface Options {
   /** «Новый чат» в заметке о длинном диалоге; у разбора документа действия нет. */
   onNewDialog?: () => void;
   onSchemaMissing?: () => void;
+  /**
+   * `feed` — помощник проекта (концепция §5.13.12, Д-42): панель встаёт на место ленты, при открытии
+   * экрана скрыта, положение не запоминается. По умолчанию — колонка справа с запоминанием.
+   */
+  placement?: 'side' | 'feed';
+  /** Помощник проекта: меняется после сохранённого изменения файлов — оценка повторяется. */
+  revision?: string;
 }
 
 export interface MemoryUi {
@@ -96,6 +103,8 @@ export function useMemoryUi({
   viewer,
   onNewDialog,
   onSchemaMissing,
+  placement = 'side',
+  revision,
 }: Options): MemoryUi {
   const { config } = useSession();
   const { loadOlderUntil, showSummary, addDialog, forgetDialog } = useChat();
@@ -110,8 +119,11 @@ export function useMemoryUi({
     params,
     busy,
     onSchemaMissing,
+    revision,
   });
-  const [open, setOpen] = useState(readPanelOpen);
+  const inFeed = placement === 'feed';
+  // На месте ленты положение не запоминается: иначе после первого входа вместо ленты всегда стояла бы опись.
+  const [open, setOpen] = useState(() => !inFeed && readPanelOpen());
   const [focus, setFocus] = useState<PanelFocus | null>(null);
   const opener = useRef<Element | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
@@ -132,7 +144,9 @@ export function useMemoryUi({
 
   const remember = (next: boolean) => {
     setOpen(next);
-    storePanelOpen(next);
+    if (!inFeed) {
+      storePanelOpen(next);
+    }
   };
 
   /** Открыть панель (или только перевести в неё фокус); просмотр источника сначала закрывается. */
@@ -141,11 +155,13 @@ export function useMemoryUi({
       opener.current = document.activeElement;
       closeViewer?.();
       setOpen(true);
-      storePanelOpen(true);
+      if (!inFeed) {
+        storePanelOpen(true);
+      }
       requests.current += 1;
       setFocus({ target, n: requests.current });
     },
-    [closeViewer],
+    [closeViewer, inFeed],
   );
 
   const hide = () => {
@@ -207,6 +223,10 @@ export function useMemoryUi({
       return;
     }
     setFlash(questionId);
+    // Лента под панелью не видна: «Показать в ленте» сначала закрывает панель (концепция §5.13.12).
+    if (inFeed) {
+      setOpen(false);
+    }
     const go = () => {
       requests.current += 1;
       setReveal({ questionId, n: requests.current });
@@ -349,6 +369,10 @@ export function useMemoryUi({
             closeModal(false);
             navigate(dialogPath(created.kind, created.id));
           }}
+          onProjectCreated={(project) => {
+            closeModal(false);
+            navigate(`/code/${project.id}`);
+          }}
           onExit={(exit) => exitModal(exit, source)}
           onClose={() => closeModal()}
         />
@@ -418,7 +442,7 @@ export function useMemoryUi({
         memory={memory}
         busy={busy}
         onClose={hide}
-        onHover={setHovered}
+        onHover={inFeed ? () => undefined : setHovered}
         onReveal={revealPair}
         summary={summary}
         carried={view?.carried ?? null}

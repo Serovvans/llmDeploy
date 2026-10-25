@@ -558,3 +558,41 @@ async def test_summary_protocol_streams_a_digest_and_obeys_marks(
     assert json.loads(cut[-2])["choices"][0]["finish_reason"] == "length"
     busy = await client.post(CHAT, json=_chat(text.replace("Ещё", "[[stub:overloaded]]")))
     assert busy.status_code == 429
+
+
+_PROJECT = (
+    '<проект имя="AddressTool">\n<файл имя="GpToolFactory.cs">\nnamespace AddressTool {}\n</файл>'
+    '\n\n<файл имя="Tool.cs">\nclass Tool {}\n</файл>\n</проект>'
+)
+
+
+async def test_project_question_gets_an_edit_of_the_first_file(client: httpx.AsyncClient) -> None:
+    answer = await _answer(client, _chat(f"{_PROJECT}\n\n<вопрос>\nДобавь\n</вопрос>"))
+    assert answer == (
+        "Правка-заглушка.\n\n```csharp path=GpToolFactory.cs\nnamespace AddressTool {}\n"
+        "// Правка заглушки.\n```"
+    )
+    with_source = await _answer(client, _chat(f"[1] Документация\n\n{_PROJECT}"))
+    assert with_source.startswith("Правка-заглушка. [1]\n")
+    empty = '<проект имя="Empty">\n(в проекте нет файлов)\n</проект>'
+    assert await _answer(client, _chat(empty)) == (
+        "Правка-заглушка.\n\n```csharp path=StubFile.cs\n// Файл заглушки.\n```"
+    )
+    # Без блока проекта — обычный ответ; пометка `reply` сильнее правила 2а.
+    assert (await _answer(client, _chat("Привет"))).startswith("Заглушка.")
+    marked = f"{_PROJECT}\n[[stub:reply]]свой[[/stub:reply]]"
+    assert await _answer(client, _chat(marked)) == "свой"
+
+
+async def test_build_fix_protocol(client: httpx.AsyncClient) -> None:
+    fix = f"Исправь ошибки сборки.\n\n{_PROJECT}\n\n<сборка>\nCS0103\n</сборка>"
+    assert await _answer(client, _chat(fix)) == (
+        "```csharp path=GpToolFactory.cs\nnamespace AddressTool {}\n```"
+    )
+    block = "```csharp path=Tool.cs\nclass Tool { }\n```"
+    marked = fix.replace("class Tool {}", f"// [[stub:code-fix]]{block}[[/stub:code-fix]]")
+    assert await _answer(client, _chat(marked)) == block
+    events = await _events(client, _chat(marked))
+    assert events[-1] == "[DONE]"
+    overloaded = await client.post(CHAT, json=_chat(f"{fix}\n[[stub:overloaded]]"))
+    assert overloaded.status_code == 429

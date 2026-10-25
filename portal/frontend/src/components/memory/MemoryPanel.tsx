@@ -209,6 +209,7 @@ export function MemoryPanel(props: MemoryPanelProps) {
               <p className={styles.muted}>{t.estimateNote}</p>
               {kind === 'chat' && <p className={styles.muted}>{t.chatNote}</p>}
               {kind === 'docparse' && <p className={styles.muted}>{t.docparseNote}</p>}
+              {kind === 'code' && <p className={styles.muted}>{texts.workshop.assistant.memoryNote}</p>}
             </div>
             {/* Блоки 0.8 отделены линиями от пояснения и от описи, как на схеме панели (§4.9). */}
             <div className={styles.blocks}>

@@ -1,0 +1,115 @@
+/* Вкладка «Правка помощника» (концепция §5.13.11). */
+.tab {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.loading {
+  height: 100%;
+  min-height: 200px;
+}
+
+.failed {
+  padding: 16px;
+}
+
+.head {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 16px;
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  line-height: 28px;
+}
+
+.accept {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.error {
+  color: var(--p-error-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.files {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 16px 8px;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.file {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px 0 8px;
+  border-radius: 8px;
+  background: var(--p-surface-2);
+}
+
+.current {
+  background: var(--p-surface-3);
+}
+
+.fileButton {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: var(--p-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.fileButton:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}
+
+.mono {
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+}
+
+.notice {
+  flex: none;
+  padding: 8px 16px 0;
+}
+
+.newFile {
+  flex: none;
+  padding: 8px 16px 0;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}

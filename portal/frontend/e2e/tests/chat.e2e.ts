@@ -234,7 +234,8 @@ test('ответ с разметкой: таблица, список, блок �
 
   await expect(page.getByRole('heading', { name: 'Итог', exact: true })).toBeVisible();
   await expect(page.getByRole('cell', { name: '47:14:1203001:814' })).toBeVisible();
-  await expect(page.getByRole('listitem').filter({ hasText: 'второй пункт' })).toBeVisible();
+  // Строка панели памяти тоже содержит текст ответа: пункт списка ищется по точному тексту.
+  await expect(page.getByRole('listitem').filter({ hasText: /^второй пункт$/ })).toBeVisible();
   await expect(page.locator('pre').filter({ hasText: 'SELECT 1;' })).toBeVisible();
   // «Скопировать» есть и у блока кода, и у ответа целиком.
   await expect(page.getByRole('button', { name: 'Скопировать' })).toHaveCount(2);

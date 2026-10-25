@@ -57,6 +57,10 @@ interface ComposerProps {
   controls?: React.ReactNode;
   /** Индикатор памяти диалога — справа в строке подсказки, под кнопкой «Отправить» (концепция §4.1, Д-28). */
   meter?: React.ReactNode;
+  /** Узкая колонка помощника проекта: индикатор — отдельной строкой под подсказкой (§5.13.10). */
+  narrow?: boolean;
+  /** Свои значки в строке вложений — фрагмент кода помощника проекта (`FragmentChip`). */
+  chips?: React.ReactNode;
   onTextChange: (text: string) => void;
   onSend: () => void;
   onStop: () => void;
@@ -110,8 +114,9 @@ export function Composer(props: ComposerProps) {
   };
 
   return (
-    <div className={styles.composer} data-composer="">
+    <div className={props.narrow ? `${styles.composer} ${styles.narrow}` : styles.composer} data-composer="">
       <div className={styles.box}>
+        {props.chips && <div className={styles.attachments}>{props.chips}</div>}
         {draft.attachments.length > 0 && (
           <div className={styles.attachments}>
             {draft.attachments.map((item) =>

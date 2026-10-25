@@ -13,10 +13,27 @@ import styles from './MemoryBlocks.module.css';
 
 const t = texts.memory;
 
-const SECTION_PATHS: Record<DialogKind, string> = { chat: '/chat', sql: '/sql', cogis: '/cogis', docparse: '/documents' };
+const SECTION_PATHS: Record<DialogKind, string> = {
+  chat: '/chat',
+  sql: '/sql',
+  cogis: '/cogis',
+  docparse: '/documents',
+  code: '/code',
+};
 
 export function dialogPath(kind: DialogKind, id: string): string {
   return `${SECTION_PATHS[kind]}/${id}`;
+}
+
+/** Ссылка на источник перенесённого: у помощника проекта — на проект (контракт §5.1, 0.9). */
+function carriedPath(carried: DialogCarried): string | null {
+  if (!carried.source_dialog_id || !carried.source_kind) {
+    return null;
+  }
+  if (carried.source_kind === 'code') {
+    return carried.source_project_id ? `/code/${carried.source_project_id}` : null;
+  }
+  return dialogPath(carried.source_kind, carried.source_dialog_id);
 }
 
 /** Номера первой и последней пересказанной пары (концепция §4.9); `null` — пересказанных нет. */
@@ -49,10 +66,10 @@ function ToggleLink(props: { open: boolean; controls: string; show: string; hide
 function SourceTitle({ carried }: { carried: DialogCarried }) {
   const navigate = useNavigate();
   const title = carried.source_title ?? texts.dialogs[carried.source_kind ?? 'chat'].newLabel;
-  if (!carried.source_dialog_id || !carried.source_kind) {
+  const href = carriedPath(carried);
+  if (!href) {
     return <>«{title}»</>;
   }
-  const href = dialogPath(carried.source_kind, carried.source_dialog_id);
   return (
     <>
       «

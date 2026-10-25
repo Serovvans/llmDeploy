@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- xUnit test classes are public; XML comments are not required for them. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="[17.14.1]" />
+    <PackageReference Include="xunit" Version="[2.9.3]" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="[3.1.5]" />
+    <!-- In-memory server for the HTTP protocol tests, no network. -->
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="[8.0.32]" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The offline set of portal-api.md §7.5.14 lands in the NuGet folder in the nuget.org layout. -->
+    <PackageDownload Include="Npgsql" Version="[9.0.3]" />
+    <PackageDownload Include="Microsoft.Extensions.Logging.Abstractions" Version="[8.0.2]" />
+    <PackageDownload Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="[8.0.2]" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/CodeSandbox/CodeSandbox.csproj" />
+    <!-- Stub SDK DLLs are copied next to the tests as files, never referenced or loaded. -->
+    <ProjectReference Include="../../stub-sdk/eLiteGIS.Server/eLiteGIS.Server.csproj" ReferenceOutputAssembly="false" OutputItemType="Content" CopyToOutputDirectory="PreserveNewest" />
+    <ProjectReference Include="../../stub-sdk/Atemiko.eLiteMap/Atemiko.eLiteMap.csproj" ReferenceOutputAssembly="false" OutputItemType="Content" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>NuGetPackageRoot</_Parameter1>
+      <_Parameter2>$(NuGetPackageRoot)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>TemplatesDir</_Parameter1>
+      <_Parameter2>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)../../../backend/config/code_templates'))</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>

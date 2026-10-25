@@ -1,0 +1,134 @@
+# Раздел «Код» (docs/portal-api.md §7.5, §13.6). Промпты помощника — code_prompts.yaml
+# (`code.prompts`, тексты — codegen-evaluator); шаблоны мастера — каталог code_templates/.
+
+code:
+  # Флаг раздела: при false — /api/code/* и диалоги `code` отвечают 403, помощник CoGIS
+  # работает как в 0.8 (§7.5.15).
+  enabled: true
+  max_projects: 50
+  max_files: 50
+  # Предел файла — под длину ответа модели: правка присылает файл целиком (А-117).
+  file_max_bytes: 16384
+  project_max_bytes: 262144
+  file_extensions: [".cs"]
+  import_max_bytes: 10485760
+  max_snapshots: 30
+  wizard:
+    max_tools: 10
+    max_parameters: 20
+  templates_dir: config/code_templates
+  reasoning_effort: medium
+  max_output_tokens: 16384
+  reference_max_tokens: 6000
+  reference_always:
+    - eLiteGIS.Geoprocessing.GpTool
+    - eLiteGIS.Geoprocessing.IGpToolFactory
+    - eLiteGIS.Utilities.UserException
+    - Atemiko.eLiteMap.Geodatabase.Workspace
+    - Atemiko.eLiteMap.Geodatabase.WorkspaceName
+  build_messages_max: 50
+  editor_dotnet_types:
+    - System.String
+    - System.Int32
+    - System.Int64
+    - System.Double
+    - System.Decimal
+    - System.Boolean
+    - System.DateTime
+    - System.TimeSpan
+    - System.Guid
+    - System.Math
+    - System.Convert
+    - System.Exception
+    - System.ArgumentException
+    - System.InvalidOperationException
+    - System.Collections.Generic.List
+    - System.Collections.Generic.Dictionary
+    - System.Collections.Generic.HashSet
+    - System.Collections.Generic.IEnumerable
+    - System.Collections.Generic.KeyValuePair
+    - System.IO.File
+    - System.IO.Path
+    - System.IO.Directory
+    - System.Linq.Enumerable
+    - System.Text.StringBuilder
+    - System.Text.Encoding
+    - System.Threading.Tasks.Task
+  # Индекс SDK (`make cogis-sdk`) монтируется сюда только для чтения (§7.5.14).
+  sdk_index_dir: /data/cogis-sdk-index
+  build:
+    # Включается после `make cogis-sdk` и проверки сборки на настоящих DLL (решение 24).
+    enabled: false
+    url: http://code-sandbox:8080
+    max_parallel: 2
+    wait_seconds: 60
+    timeout_seconds: 90
+    response_max_bytes: 33554432
+  fix:
+    attempts: 2
+    timeout_seconds: 900
+  # Офлайн-набор (§7.5.14): суммы сняты с каталога nuget.org 2026-10-24.
+  packages:
+    - id: Npgsql
+      version: "9.0.3"
+      sha512: "nOuOWgxLAM+FR5cjROLgOaxY9P/FifQTYY8/yEc/CSd+Bppg1hAjVR959uZCjXRjAz2tM0uy6D8oFXdJqUxW+A=="
+      depends_on: [Microsoft.Extensions.Logging.Abstractions]
+    - id: Microsoft.Extensions.Logging.Abstractions
+      version: "8.0.2"
+      sha512: "+LnfP6e4N8tfL6U6hr/Ucnn4G8My21W4u36hT1Xf4hWPNR01GZwMwOAcc185Te0qOo8chcP/bqHDq3hb+/Ni/Q=="
+      depends_on: [Microsoft.Extensions.DependencyInjection.Abstractions]
+    - id: Microsoft.Extensions.DependencyInjection.Abstractions
+      version: "8.0.2"
+      sha512: "uhlg7xEKxzh6Kgbu/ALFnOV7D+WLPgzMt5scjyFQEFxdH0tl4O2V/1DXDygUKRfGpzW4P05UBrsdj53R+WNdfQ=="
+      depends_on: []
+  # Тексты — из docs/portal-ui.md §5.13.9 и §5.13.13 дословно; подстановки заполняет сервер.
+  export_memo: |
+    ПРОЕКТ ДЛЯ VISUAL STUDIO
+
+    Это проект инструмента геообработки CoGIS, скачанный с портала. Как открыть и
+    собрать его в Visual Studio 2022:
+
+    1. Рядом с файлом .csproj создайте папку cogis.
+
+    2. Скопируйте в неё с сервера CoGIS эти библиотеки — они лежат в папках
+       /usr/elitegis/server/ и /usr/elitegis/plugins/:
+    {files}
+
+    3. Откройте файл .csproj в Visual Studio. Пакеты NuGet она загрузит сама —
+       для этого нужен доступ к nuget.org.
+
+    4. Соберите проект: «Сборка → Собрать решение».
+
+    Библиотек CoGIS в архиве нет: они уже есть на сервере CoGIS и с портала не
+    раздаются. Чтобы получить готовый архив с памяткой по установке, загрузите
+    проект на портал («Код» → «Загрузить ZIP»), соберите его и нажмите
+    «Скачать для CoGIS».
+  archive_memo: |
+    ПАМЯТКА: УСТАНОВКА ИНСТРУМЕНТА В COGIS
+
+    Внимание. Инструмент будет работать на сервере CoGIS с доступом к его базам данных.
+    Перед установкой прочитайте код инструмента и проверьте его на тестовой базе CoGIS.
+    Портал собрал этот код, но не запускал его и ничего не выкладывал на сервер CoGIS.
+
+    В архиве:
+    {files}
+
+    Уже есть на сервере CoGIS, поэтому в архив не положены:
+    {on_server}
+
+    Как установить
+
+    1. Скопируйте все файлы .dll из архива на сервер CoGIS в папку /usr/elitegis/plugins/
+
+    2. В CoGIS Server откройте «Настройки → Сервисы геообработки → Подключаемые .NET
+       библиотеки» и нажмите «+». Укажите:
+       Путь к DLL-файлу:  {dll_path}
+       Имя класса:        {factory}
+       Нажмите «Проверить», затем «ОК».
+
+    3. Проверьте инструмент в геосервисе: «Создание инструмента геообработки» →
+       найдите его по названию и категории:
+    {tools}
+
+    Собрано с библиотеками CoGIS версии {sdk_version}. Если инструмент не загружается
+    на вашем сервере CoGIS, сообщите администратору портала версию CoGIS на сервере.

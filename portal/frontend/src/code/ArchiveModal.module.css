@@ -1,0 +1,60 @@
+/* Окно «Скачать для CoGIS» 640 px (концепция §5.13.9). */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.heading {
+  margin-bottom: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.files,
+.tools {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.steps h2 + ol h2,
+.stepText {
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 24px;
+}
+
+.values {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.value {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr) max-content;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.valueLabel {
+  color: var(--p-text-muted);
+}
+
+.mono {
+  overflow-wrap: anywhere;
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}

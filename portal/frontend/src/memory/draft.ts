@@ -106,6 +106,8 @@ export interface DraftContext {
   keepRecent: number;
   /** В окне переноса есть «Один ответ дословно»: тексты отказов предлагают его. */
   verbatim: boolean;
+  /** Прежний диалог помощника CoGIS при включённом разделе «Код» (0.9): панели памяти у него нет. */
+  readOnly?: boolean;
 }
 
 /** `action`: `restart` — «Подготовить заново», `retry` — «Повторить» (тот же новый черновик). */
@@ -138,7 +140,9 @@ export function draftNotice(failure: DraftFailure, hasText: boolean, context: Dr
       case 'nothing_to_summarize':
         return context.purpose === 'compress'
           ? { text: t.summary.nothing(context.keepRecent), action: null }
-          : { text: t.transfer.nothing + (context.verbatim ? t.transfer.orVerbatim : ''), action: null };
+          : context.readOnly
+            ? { text: context.verbatim ? t.transfer.nothingReadOnly : t.transfer.nothingReadOnlyShort, action: null }
+            : { text: t.transfer.nothing + (context.verbatim ? t.transfer.orVerbatim : ''), action: null };
       case 'message_too_long':
         return { text: tooLong, action: null };
       case 'draft_in_progress':

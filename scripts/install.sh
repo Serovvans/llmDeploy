@@ -61,11 +61,14 @@
 #   3. (gateway + corp) проверка сертификата в deploy/certs/: срок, имя хоста,
 #      соответствие ключу. Сам сертификат скрипт не выпускает;
 #   4. docker compose config и pull; (portal) сборка образов portal-api, portal-worker,
-#      portal-web и sql-sandbox из этого клона с тегом PORTAL_IMAGE_TAG. Сборка
+#      portal-web, sql-sandbox и code-sandbox из этого клона с тегом PORTAL_IMAGE_TAG. Сборка
 #      пропускается, только если образы с тегом этого коммита уже есть и в коде
 #      портала нет незакоммиченных правок;
 #   5. предзагрузка весов моделей в volume hf-cache (основная, эмбеддинги, реранкер) и
-#      весов модели речи в volume asr-models;
+#      весов модели речи в volume asr-models; (portal) загрузка офлайн-набора пакетов
+#      NuGet с проверкой SHA-512 в volume code-packages (scripts/code_packages.py).
+#      Флаг сборки C# (code.build.enabled) не меняется: до make cogis-sdk и проверки на
+#      настоящих DLL CoGIS сборка выключена (docs/portal-design.md §8.5);
 #   6. systemd-юнит llm-stack с путём к этому клону; запуск: сначала модели, затем
 #      остальные сервисы, ожидание healthy; (gateway) Bifrost и Caddy пересоздаются,
 #      чтобы применить config.json и Caddyfile этого клона;
@@ -113,7 +116,7 @@ readonly GATEWAY_PROFILE="gateway"
 readonly PORTAL_PROFILE="portal"
 # Образы этих сервисов собираются из клона: сами после git pull они не пересоберутся.
 # portal-api и portal-worker — один код в двух образах, поэтому собираются одной командой.
-readonly PORTAL_BUILD_SERVICES=(portal-api portal-worker portal-web sql-sandbox)
+readonly PORTAL_BUILD_SERVICES=(portal-api portal-worker portal-web sql-sandbox code-sandbox)
 # Имя проекта — строка name: в docker-compose.yml; с него начинаются имена томов и
 # образов (llm_asr-models, llm-portal-api:<тег>).
 readonly COMPOSE_PROJECT="llm"
@@ -599,6 +602,21 @@ preload_speech_models() {
   done
 }
 
+# Офлайн-набор пакетов NuGet для песочницы сборки C# (docs/portal-api.md §7.5.14) — как
+# веса моделей: загружается при установке и подготовке релиза, в работе сети не нужно.
+# Список — из конфигурации портала с накладкой ВМ: при подготовке релиза — накладкой
+# рабочего клона. Нужен собранный образ portal-api.
+preload_code_packages() {
+  [[ "$portal_enabled" -eq 1 ]] || return 0
+  command -v uv >/dev/null 2>&1 ||
+    die "не найден uv: им загружается офлайн-набор пакетов" "sudo bash scripts/install_host.sh"
+  log "офлайн-набор пакетов NuGet (уже загруженные с верной суммой не загружаются заново)"
+  bash "${SCRIPT_DIR}/with_env.sh" uv run code_packages.py \
+    ${live_dir:+--config-dir "${live_dir}/deploy/portal"} ||
+    die "офлайн-набор пакетов не загружен" \
+      "проверить доступ к api.nuget.org (docs/devops-request.md) и суммы code.packages в deploy/portal/config.override.yaml; повторить: make code-packages"
+}
+
 preload_models() {
   preload_model "$(env_file_value MODEL_ID)"
   if [[ ",${profiles}," == *",embeddings,"* ]]; then
@@ -608,6 +626,7 @@ preload_models() {
     preload_model "$(env_file_value RERANK_MODEL_ID)"
   fi
   preload_speech_models
+  preload_code_packages
 }
 
 start_stack() {
@@ -844,6 +863,9 @@ EOF
        make smoke-portal${ca_arg}
   3. Резервная копия (база, файлы, векторы, ключи Bifrost):
        make backup DIR=<каталог вне репозитория>
+  4. Сборка C# в разделе «Код» выключена. Подключить SDK: DLL с сервера CoGIS и
+     plugins.txt — в ${DEPLOY_DIR}/cogis-sdk/ (состав — в заголовке scripts/cogis_sdk.sh),
+     затем make cogis-sdk
 EOF
 }
 

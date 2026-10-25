@@ -200,3 +200,37 @@
   flex-wrap: wrap;
   gap: 12px;
 }
+
+/* Узкая колонка помощника проекта (концепция §5.13.10, Д-57): подписи над блоком, без полей 64 px. */
+.narrow .column {
+  padding: 16px;
+}
+
+.narrow .row {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.narrow .who {
+  width: auto;
+  padding-top: 0;
+  font-size: 12px;
+  line-height: 16px;
+  text-align: left;
+}
+
+.narrow .answer {
+  padding-top: 0;
+}
+
+.narrow .earlier {
+  padding-left: 0;
+}
+
+.narrow .marked .who {
+  box-shadow: none;
+}
+
+.narrow .marked {
+  box-shadow: -3px 0 0 var(--p-accent);
+}

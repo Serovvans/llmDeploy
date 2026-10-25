@@ -3,6 +3,7 @@
 import asyncio
 import io
 import threading
+import zipfile
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -175,6 +176,22 @@ async def test_docx_limits_and_zip_directory_have_their_codes(settings: Settings
         assert (await upload(client, dialog_id, "документ.docx", fitting)).status_code == 201
     finally:
         await close_portal(portal)
+
+
+async def test_docx_with_lzma_image_is_unreadable_attachment(portal: Portal) -> None:
+    """Часть DOCX, сжатая не STORED и не Deflate, — `422 file_unreadable` (§1.5, А-120)."""
+    client = await portal.employee()
+    dialog_id = await new_dialog(client)
+    picture = "word/media/a.png"
+    source = samples.docx_package(
+        samples.paragraph("Текст"),
+        relations={"rId5": "media/a.png"},
+        parts={picture: samples.png()},
+    )
+    assert (await upload(client, dialog_id, "документ.docx", source)).status_code == 201
+    packed = samples.zip_with_method(source, picture, zipfile.ZIP_LZMA)
+    refused = await upload(client, dialog_id, "документ.docx", packed)
+    assert (refused.status_code, refused.json()["error"]["code"]) == (422, "file_unreadable")
 
 
 async def test_scan_longer_than_eight_pages_is_refused_at_upload(portal: Portal) -> None:

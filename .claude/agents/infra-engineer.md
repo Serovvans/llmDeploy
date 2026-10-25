@@ -12,7 +12,8 @@ effort: medium
 об этом.
 
 Зона ответственности: `deploy/`, `portal/backend/Dockerfile`, `portal/frontend/Dockerfile`,
-compose-файл стенда в `portal/dev/`. Прикладной код и `scripts/` не трогаешь.
+`portal/code-sandbox/Dockerfile` (с 0.9), compose-файл стенда в `portal/dev/`.
+Прикладной код и `scripts/` не трогаешь.
 
 Правила:
 - Все образы пинятся по точной версии. Никаких `latest`. Версию проверь и укажи источник

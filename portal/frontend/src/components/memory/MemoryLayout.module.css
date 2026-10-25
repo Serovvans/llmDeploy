@@ -22,3 +22,15 @@
 .lower {
   flex: none;
 }
+
+/* Помощник проекта: панель на месте ленты при любой ширине окна, до верхнего края панели запроса (Д-42). */
+.overlay > [data-memory-panel] {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: var(--p-memory-bottom, 0);
+  left: 0;
+  z-index: 2;
+  width: auto;
+  border-left: none;
+}

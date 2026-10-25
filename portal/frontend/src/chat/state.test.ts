@@ -122,6 +122,64 @@ describe('проверка SQL на тестовых данных', () => {
   });
 });
 
+describe('помощник проекта: правка и цикл исправления', () => {
+  const ANSWERED: ChatAction[] = [
+    QUESTION,
+    ...events(
+      1000,
+      [{ type: 'start', user_message_id: 'u-1', assistant_message_id: 'a-1' }, 10],
+      [{ type: 'delta', text: 'Не хватало «;».' }, 20],
+    ),
+  ];
+  const FIX: StreamEvent = { type: 'code_fix', stage: 'building', attempt: 0, max_attempts: 2 };
+  const EDIT: StreamEvent = {
+    type: 'code_edit',
+    status: 'proposed',
+    files: [{ path: 'A.cs', change: 'modified', decision: null }],
+    rejected_files: [],
+    incomplete: false,
+    verification: null,
+    decided_at: null,
+  };
+
+  it('code_fix: ответ дописан, диалог занят шагом цикла; code_edit кладёт правку в ответ; done завершает', () => {
+    let state = run([...ANSWERED, ...events(1000, [FIX, 30])]);
+    expect(state.dialogs[ID]?.generation).toMatchObject({ phase: 'fixing', fix: { stage: 'building', attempt: 0, maxAttempts: 2 } });
+    expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ status: 'complete', content: 'Не хватало «;».' });
+
+    state = run(
+      events(1000, [{ type: 'code_fix', stage: 'fixing', attempt: 1, max_attempts: 2 }, 40], [EDIT, 50], [{ type: 'done', status: 'complete' }, 60]),
+      state,
+    );
+    expect(state.dialogs[ID]?.generation).toBeNull();
+    expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({
+      status: 'complete',
+      code_edit: { status: 'proposed', files: [{ path: 'A.cs' }] },
+    });
+  });
+
+  it('правка без цикла («Написать или изменить»): code_edit перед done', () => {
+    const state = run([...ANSWERED, ...events(1000, [EDIT, 30], [{ type: 'done', status: 'complete' }, 40])]);
+    expect(state.dialogs[ID]?.messages.at(-1)).toMatchObject({ status: 'complete', code_edit: { status: 'proposed' } });
+  });
+
+  it.each<[string, ChatAction]>([
+    ['остановка', { type: 'generationStopped', id: ID }],
+    ['ошибка', { type: 'streamEvent', id: ID, event: { type: 'error', code: 'model_error', message: '' }, now: 2000 }],
+  ])('%s во время цикла: ответ остаётся готовым, без пометки об остановке и без правки', (_name, action) => {
+    const state = run([...ANSWERED, ...events(1000, [FIX, 30]), action]);
+    expect(state.dialogs[ID]?.generation).toBeNull();
+    const answer = state.dialogs[ID]?.messages.at(-1);
+    expect(answer).toMatchObject({ status: 'complete', error_code: null, content: 'Не хватало «;».' });
+    expect(answer?.code_edit ?? null).toBeNull();
+  });
+
+  it('остановка до цикла — обычная остановка ответа', () => {
+    const state = run([...ANSWERED, { type: 'generationStopped', id: ID }]);
+    expect(state.dialogs[ID]?.messages.at(-1)?.status).toBe('stopped');
+  });
+});
+
 describe('состояние чата', () => {
   it('порядок событий: start → размышления → текст → done', () => {
     const state = run([

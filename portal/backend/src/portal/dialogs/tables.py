@@ -19,6 +19,8 @@ dialogs = sa.Table(
     sa.Column("carried_text", sa.Text),
     sa.Column("carried_source_id", sa.Uuid, sa.ForeignKey("dialogs.id", ondelete="SET NULL")),
     sa.Column("carried_source_title", sa.Text),
+    # С 0.9: проект диалога помощника `code` (§9.6); таблица — модуль `portal/code`.
+    sa.Column("project_id", sa.Uuid, sa.ForeignKey("code_projects.id", ondelete="CASCADE")),
 )
 
 messages = sa.Table(
@@ -44,6 +46,7 @@ messages = sa.Table(
     sa.Column("dropped_messages", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("memory_mode", sa.Text, nullable=False, server_default="full"),
+    sa.Column("code_edit", postgresql.JSONB(none_as_null=True)),
 )
 
 attachments = sa.Table(

@@ -13,9 +13,13 @@ export const REESTIMATE_DELAY_MS = 300;
 
 /**
  * Строка запроса оценки — то, с чем уйдёт следующий вопрос (контракт §5.10.3): в чате режим и есть ли
- * база знаний, в SQL действие, диалект и схема (проверка на тестовых данных место не меняет), в CoGIS действие.
+ * база знаний, в SQL действие, диалект и схема (проверка на тестовых данных место не меняет), в CoGIS действие,
+ * у помощника проекта — действие и видимые файлы (контракт §7.5.8: нет — все, пустая строка — ни одного).
  */
 export function memoryQuery(params: QuestionParams): Record<string, string> {
+  if ('file_ids' in params) {
+    return { action: params.action, ...(params.file_ids ? { files: params.file_ids.join(',') } : {}) };
+  }
   if ('mode' in params) {
     return { mode: params.mode, search: String(params.collections.length > 0) };
   }
@@ -39,6 +43,7 @@ export function defaultMemoryQuery(kind: DialogKind, config: PortalConfig): Reco
     case 'sql':
       return { action: 'write', dialect: config.sql.default_dialect };
     case 'cogis':
+    case 'code':
       return { action: 'write' };
     case 'docparse':
       return {};
@@ -97,6 +102,8 @@ interface Options {
   busy: boolean;
   /** Схема из строки запроса удалена в другой вкладке (`422 schema_not_found`). */
   onSchemaMissing?: () => void;
+  /** Помощник проекта: меняется после каждого сохранённого изменения файлов — оценка повторяется через 300 мс. */
+  revision?: string;
 }
 
 interface Estimate {
@@ -110,7 +117,16 @@ interface Estimate {
  * из ответа сервера целиком. Обновляется при открытии диалога, по завершении ответа, после выбора
  * в описи и через 300 мс после смены настроек следующего вопроса.
  */
-export function useDialogMemory({ kind, dialogId, ready, enabled, params, busy, onSchemaMissing }: Options): DialogMemory {
+export function useDialogMemory({
+  kind,
+  dialogId,
+  ready,
+  enabled,
+  params,
+  busy,
+  onSchemaMissing,
+  revision = '',
+}: Options): DialogMemory {
   const chat = useChat();
   const { reloadConfig } = useSession();
   const { forgetDialog, showMemoryMode } = chat;
@@ -135,7 +151,7 @@ export function useDialogMemory({ kind, dialogId, ready, enabled, params, busy, 
   const toastShown = useRef(false);
   const active = enabled && !disabled;
   const query = memoryQuery(params);
-  const queryKey = JSON.stringify(query);
+  const queryKey = JSON.stringify([query, revision]);
 
   useEffect(() => {
     current.current = { dialogId, query, onSchemaMissing };

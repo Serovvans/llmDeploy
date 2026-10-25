@@ -21,8 +21,8 @@ from portal.core.ports import SessionAuthenticator
 from portal.core.settings import Settings
 from portal.dialogs import errors
 from portal.dialogs.context import CARRIED_TAG, SUMMARY_TAG, data_block, fields_block
-from portal.dialogs.domain import Attachment, Dialog, Docparse, Message
-from portal.dialogs.generation import ERROR_MESSAGES
+from portal.dialogs.domain import Attachment, Dialog, DialogKind, Docparse, Message
+from portal.dialogs.generation import ERROR_MESSAGES, HistoryView, viewed
 from portal.dialogs.memory import compress_range, dialog_pairs
 from portal.dialogs.ports import DialogUnitOfWorkFactory
 from portal.dialogs.watch import StreamWatch, watched_stream
@@ -202,12 +202,15 @@ class SummaryDrafts:
         wait_idle: Callable[[UUID, UUID], Awaitable[None]],
         settings: Settings,
         max_model_len: int,
+        history_views: Mapping[DialogKind, HistoryView] | None = None,
     ) -> None:
         """Получить зависимости явно.
 
         `wait_idle` ждёт, что в диалоге не формируется ответ, иначе отвечает `409` — та же
-        проверка, что у смены режима пары (§5.10.4).
+        проверка, что у смены режима пары (§5.10.4). `history_views` — текст ответов в
+        пересказе своего вида, как в запросе ответа (§7.5.9).
         """
+        self._history_views = history_views or {}
         self._uow_factory = uow_factory
         self._model = model
         self._estimator = estimator
@@ -249,7 +252,10 @@ class SummaryDrafts:
             dialog = await uow.dialogs.get_dialog(owner_id, dialog_id)
             if dialog is None:
                 raise not_found()
-            messages = await uow.dialogs.history(owner_id, dialog_id, _ALL_POSITIONS)
+            messages = viewed(
+                await uow.dialogs.history(owner_id, dialog_id, _ALL_POSITIONS),
+                self._history_views.get(dialog.kind),
+            )
             until = None
             if until_message_id is not None:
                 until = next((item for item in messages if item.id == until_message_id), None)

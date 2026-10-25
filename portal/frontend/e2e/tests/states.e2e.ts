@@ -240,7 +240,7 @@ test.describe('Связь и сеанс', () => {
 });
 
 test.describe('Не найдено и нет доступа', () => {
-  test('несуществующие чат, запрос, вопрос и разбор — понятные экраны', async ({ newMember, pageAs }) => {
+  test('несуществующие чат, запрос, проект, прежний диалог CoGIS и разбор — понятные экраны', async ({ newMember, pageAs }) => {
     const member = await newMember();
     const page = await pageAs(member, `/chat/${MISSING}`);
     await expect(page.getByRole('heading', { name: 'Чат не найден' })).toBeVisible();
@@ -248,11 +248,13 @@ test.describe('Не найдено и нет доступа', () => {
 
     for (const [path, title] of [
       [`/sql/${MISSING}`, 'Запрос не найден'],
-      [`/cogis/${MISSING}`, 'Вопрос не найден'],
+      [`/code/${MISSING}`, 'Проект не найден'],
+      [`/code/dialogs/${MISSING}`, 'Диалог не найден'],
       [`/documents/${MISSING}`, 'Разбор не найден'],
     ] as const) {
       await page.goto(path);
-      await expect(page.getByRole('heading', { name: title })).toBeVisible();
+      // У прежнего диалога CoGIS название — и в заголовке экрана, и в пустом состоянии.
+      await expect(page.getByRole('heading', { name: title }).first()).toBeVisible();
     }
   });
 
@@ -303,8 +305,10 @@ test.describe('Пустые состояния и проверки ввода', 
 
     await page.goto('/sql');
     await expect(page.getByRole('heading', { name: 'Опишите задачу — получите запрос' })).toBeVisible();
+    // С 0.9 адрес помощника CoGIS ведёт в раздел «Код».
     await page.goto('/cogis');
-    await expect(page.getByRole('heading', { name: 'Плагины CoGIS на C#' })).toBeVisible();
+    await expect(page).toHaveURL(/\/code$/);
+    await expect(page.getByRole('heading', { name: 'Пример из инструкции' })).toBeVisible();
     await page.goto('/documents');
     await expect(page.getByText('Выберите файл или перетащите его сюда').first()).toBeVisible();
 

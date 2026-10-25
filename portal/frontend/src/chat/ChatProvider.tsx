@@ -6,6 +6,7 @@ import type { StreamEvent } from '../api/stream';
 import type {
   AnswerMode,
   Attachment,
+  CodeTarget,
   Dialog,
   DialogKind,
   DialogSummary,
@@ -81,6 +82,15 @@ type OnCreated = (id: string) => void;
 /** Отказ до открытия потока. Вернуть `true` — экран обработал его сам, текст под панелью запроса не нужен. */
 type OnRefused = (error: unknown) => boolean;
 
+/**
+ * Вопрос, текст которого строит интерфейс (помощник проекта, концепция §5.13.10): `content` уходит вместо
+ * текста поля, поле не трогается; `codeTarget` — фрагмент для показа у вопроса в ленте.
+ */
+export interface SendOptions {
+  content?: string;
+  codeTarget?: CodeTarget | null;
+}
+
 const NEW_PREFIX = 'new:';
 
 function kindOfNewKey(key: string): DialogKind | null {
@@ -113,7 +123,14 @@ interface ChatApi {
   retryFile: (key: string, fileKey: string) => void;
   removeFile: (key: string, fileKey: string) => void;
   /** `params` — параметры вопроса своего вида диалога (контракт §5.3). */
-  send: (kind: DialogKind, key: string, params: QuestionParams, onCreated: OnCreated, onRefused?: OnRefused) => void;
+  send: (
+    kind: DialogKind,
+    key: string,
+    params: QuestionParams,
+    onCreated: OnCreated,
+    onRefused?: OnRefused,
+    options?: SendOptions,
+  ) => void;
   /** `body` — только для `sql`: схема взамен удалённой. */
   regenerate: (
     kind: DialogKind,
@@ -145,8 +162,8 @@ export function useDialogs(kind: DialogKind) {
   const { loadHistory, send, regenerate, openDialog } = chat;
   const loadKindHistory = useCallback((more: boolean) => loadHistory(kind, more), [kind, loadHistory]);
   const sendOfKind = useCallback(
-    (key: string, params: QuestionParams, onCreated: OnCreated, onRefused?: OnRefused) =>
-      send(kind, key, params, onCreated, onRefused),
+    (key: string, params: QuestionParams, onCreated: OnCreated, onRefused?: OnRefused, options?: SendOptions) =>
+      send(kind, key, params, onCreated, onRefused, options),
     [kind, send],
   );
   const regenerateOfKind = useCallback(
@@ -614,6 +631,10 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
         }
       } catch (error) {
         if (isAbort(error)) {
+          // Остановка цикла исправления: ответ цел, правки нет — об этом говорит уведомление (концепция §5.13.10).
+          if (stateRef.current.dialogs[id]?.generation?.phase === 'fixing') {
+            SingleToast.push(texts.workshop.assistant.fixStopped);
+          }
           dispatch({ type: 'generationStopped', id });
         } else if (error instanceof StreamBrokenError) {
           // Вопрос сохранён: показываем его и ответ в сохранённом виде.
@@ -654,8 +675,18 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
   );
 
   const send = useCallback(
-    (kind: DialogKind, key: string, params: QuestionParams, onCreated: OnCreated, onRefused?: OnRefused) => {
-      const draft = stateRef.current.drafts[key] ?? EMPTY_DRAFT;
+    (
+      kind: DialogKind,
+      key: string,
+      params: QuestionParams,
+      onCreated: OnCreated,
+      onRefused?: OnRefused,
+      options?: SendOptions,
+    ) => {
+      const fieldDraft = stateRef.current.drafts[key] ?? EMPTY_DRAFT;
+      // Текст, построенный интерфейсом, уходит вместо поля: поле и его вложения остаются как были.
+      const built = options?.content !== undefined;
+      const draft = built ? { ...EMPTY_DRAFT, text: options.content ?? '' } : fieldDraft;
       // Вложения, режим ответа и база знаний — только у чата (контракт §5.3).
       const isChat = 'mode' in params;
       const composer = texts.chat.composer;
@@ -704,9 +735,16 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
           // С тегами ли задан вопрос: от этого зависит строка под ответом, если поиск ничего не найдёт.
           const withTags = isChat && params.collections.length > 0 && (params.tags?.length ?? 0) > 0;
           const testRun = 'test_run' in params && params.test_run;
-          dispatch({ type: 'generationStarted', id, question: { content, attachments: ready, withTags, testRun }, now });
+          dispatch({
+            type: 'generationStarted',
+            id,
+            question: { content, attachments: ready, withTags, testRun, codeTarget: options?.codeTarget },
+            now,
+          });
           dispatch({ type: 'dialogTouched', id, now: new Date(now).toISOString() });
-          updateDraft(id, () => EMPTY_DRAFT);
+          if (!built) {
+            updateDraft(id, () => EMPTY_DRAFT);
+          }
           const body = { content, ...params, ...(isChat ? { attachment_ids: ready.map((a) => a.id) } : {}) };
           void runStream(
             kind,
@@ -714,8 +752,11 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
             (signal) => api.sendMessage(id, body, signal),
             content,
             () => {
-              // Вопрос и вложения возвращаются в панель запроса.
+              // Вопрос и вложения возвращаются в панель запроса; построенный интерфейсом — нет: его не набирали.
               dispatch({ type: 'generationRejected', id, messages: before });
+              if (built) {
+                return;
+              }
               // Набранное за время ожидания не теряется: возвращаемый текст встаёт перед ним.
               updateDraft(id, (current) => ({
                 ...draft,

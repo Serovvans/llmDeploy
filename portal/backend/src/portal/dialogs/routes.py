@@ -12,6 +12,7 @@ from starlette.datastructures import UploadFile
 from starlette.responses import FileResponse, StreamingResponse
 
 from portal.core.access import ContainerDep, Employee, ReadySession
+from portal.core.container import Container
 from portal.core.errors import feature_disabled, field_error, not_found, validation_error
 from portal.core.sse import event_stream_response
 from portal.core.uploads import receive_recording
@@ -22,6 +23,8 @@ from portal.dialogs.schemas import (
     AttachmentOut,
     ChatMemoryQuery,
     ChatMessageRequest,
+    CodeMemoryQuery,
+    CodeMessageRequest,
     CogisMemoryQuery,
     CogisMessageRequest,
     CreateDialogRequest,
@@ -62,9 +65,17 @@ def _uuid(value: str) -> UUID:
         raise not_found() from None
 
 
-def dialog_id(id: str, _: Employee) -> UUID:
-    """Идентификатор диалога из пути; сессия и роль проверяются раньше ресурса (§1.2)."""
-    return _uuid(id)
+async def dialog_id(id: str, user: Employee, container: ContainerDep) -> UUID:
+    """Идентификатор диалога из пути; сессия и роль проверяются раньше ресурса (§1.2).
+
+    При выключенном разделе «Код» диалоги `code` закрыты всеми маршрутами (§7.5.15).
+    """
+    target = _uuid(id)
+    if not container.settings.code.enabled:
+        dialog = await container.dialogs.find(user.id, target)
+        if dialog is not None and dialog.kind == "code":
+            raise feature_disabled()
+    return target
 
 
 def attachment_id(attachment_id: str, _: Employee) -> UUID:
@@ -91,7 +102,9 @@ async def list_dialogs(
     limit: Limit = None,
     cursor: str | None = None,
 ) -> DialogListOut:
-    """Диалоги одного вида, от недавно обновлённых."""
+    """Диалоги одного вида, от недавно обновлённых; диалоги `code` — только через проект."""
+    if kind == "code":
+        raise validation_error([field_error("kind", "unknown_value")])
     page = await container.dialogs.list(user.id, kind, limit or 30, cursor)
     return DialogListOut(
         items=[DialogOut.of(dialog) for dialog in page.items], next_cursor=page.next_cursor
@@ -103,6 +116,9 @@ async def create_dialog(
     body: CreateDialogRequest, user: Employee, container: ContainerDep
 ) -> DialogOut:
     """Создать диалог; с `carried` — перенос из своего диалога (§5.10.7)."""
+    if body.kind == "cogis" and container.settings.code.enabled:
+        # Прежний помощник CoGIS при разделе «Код» только для чтения (§7.5.15).
+        raise validation_error([field_error("kind", "unknown_value")])
     carried = None
     if body.carried is not None:
         if not container.settings.memory.enabled:
@@ -147,8 +163,20 @@ async def list_messages(
     )
 
 
-def _question(kind: DialogKind, body: dict[str, Any]) -> QuestionInput:
+async def _question(
+    container: Container, owner_id: UUID, dialog_id: UUID, kind: DialogKind, body: dict[str, Any]
+) -> QuestionInput:
     """Разобрать тело сообщения по виду диалога (§5.3); чужие виду поля — ошибка."""
+    if kind == "code":
+        try:
+            code = CodeMessageRequest.model_validate(body)
+        except ValidationError as error:
+            raise validation_failure(error.errors()) from None
+        target = None if code.target is None else code.target.model_dump()
+        params = await container.code_tool.question_params(
+            owner_id, dialog_id, code.action, code.file_ids, target
+        )
+        return QuestionInput(code.content, params)
     try:
         if kind == "chat":
             chat = ChatMessageRequest.model_validate(body)
@@ -190,9 +218,10 @@ async def send_message(
 
     Тело разбирается после поиска диалога: его состав зависит от вида диалога (§5.3).
     """
-    dialog = await container.dialogs.get(user.id, target)
+    dialog = await container.dialogs.writable(user.id, target)
+    question = await _question(container, user.id, target, dialog.kind, body)
     channel = await container.generation.send(
-        user, session.session_id, target, dialog.kind, _question(dialog.kind, body)
+        user, session.session_id, target, dialog.kind, question
     )
     return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
 
@@ -209,7 +238,7 @@ async def regenerate(
 
     Тело читается только в диалоге `sql`: там оно может заменить схему базы (§5.6).
     """
-    dialog = await container.dialogs.get(user.id, target)
+    dialog = await container.dialogs.writable(user.id, target)
     schema_id: UUID | _Unset | None = UNSET
     if dialog.kind == "sql" and (raw := await request.body()).strip():
         try:
@@ -222,8 +251,18 @@ async def regenerate(
     return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
 
 
-def _memory_query(kind: DialogKind, query: dict[str, str]) -> MemoryQuery:
+async def _memory_query(
+    container: Container, owner_id: UUID, dialog_id: UUID, kind: DialogKind, query: dict[str, str]
+) -> MemoryQuery:
     """Разобрать строку запроса оценки по виду диалога (§5.10.3); чужие параметры не читаются."""
+    if kind == "code":
+        try:
+            code = CodeMemoryQuery.model_validate(query)
+        except ValidationError as error:
+            raise validation_failure(error.errors()) from None
+        return MemoryQuery(
+            await container.code_tool.memory_params(owner_id, dialog_id, code.action, code.files)
+        )
     try:
         if kind == "chat":
             chat = ChatMemoryQuery.model_validate(query)
@@ -255,7 +294,7 @@ async def get_memory(
     if not container.settings.memory.enabled:
         raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
     dialog = await container.dialogs.get(user.id, target)
-    query = _memory_query(dialog.kind, dict(request.query_params))
+    query = await _memory_query(container, user.id, target, dialog.kind, dict(request.query_params))
     return MemoryOut.of(await container.generation.memory(user.id, target, dialog.kind, query))
 
 
@@ -270,7 +309,7 @@ async def set_memory_mode(
     """Сменить режим пары «вопрос + ответ»; `message_id` — вопрос (§5.10.4)."""
     if not container.settings.memory.enabled:
         raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
-    await container.dialogs.get(user.id, target)
+    await container.dialogs.writable(user.id, target)
     try:
         mode = MemoryModeRequest.model_validate(body).memory_mode
     except ValidationError as error:
@@ -290,11 +329,13 @@ async def memory_draft(
     """Черновик пересказа для сжатия или переноса; ответ — поток событий (§5.10.5, §6.5)."""
     if not container.settings.memory.enabled:
         raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
-    await container.dialogs.get(user.id, target)
+    dialog = await container.dialogs.get(user.id, target)
     try:
         draft = DraftRequest.model_validate(body)
     except ValidationError as error:
         raise validation_failure(error.errors()) from None
+    if draft.purpose == "compress":
+        container.dialogs.check_writable(dialog)  # перенос из диалога CoGIS работает (§7.5.15)
     if draft.purpose == "compress" and "until_message_id" in body:
         # Граница сжатия — не выбор сотрудника: её считает сервер (§5.10.5).
         raise validation_error([field_error("until_message_id", "invalid_format")])
@@ -311,7 +352,7 @@ async def put_summary(
     """Применить черновик или изменить применённый пересказ (§5.10.6)."""
     if not container.settings.memory.enabled:
         raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
-    await container.dialogs.get(user.id, target)
+    await container.dialogs.writable(user.id, target)
     try:
         summary = SummaryRequest.model_validate(body)
     except ValidationError as error:
@@ -327,7 +368,7 @@ async def delete_summary(target: DialogId, user: Employee, container: ContainerD
     """Отменить сжатие: пары снова идут модели в своих режимах (§5.10.6)."""
     if not container.settings.memory.enabled:
         raise feature_disabled()  # флаг «Память диалога» выключен (§5.10.9)
-    await container.dialogs.get(user.id, target)
+    await container.dialogs.writable(user.id, target)
     await container.generation.clear_summary(user.id, target)
     return Response(status_code=204)
 

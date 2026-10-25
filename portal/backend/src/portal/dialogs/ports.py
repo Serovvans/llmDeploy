@@ -49,6 +49,10 @@ class DialogRepository(Protocol):
         """Диалоги владельца с сообщениями, по убыванию `updated_at`, после курсора."""
         ...
 
+    async def project_name(self, owner_id: UUID, project_id: UUID) -> str | None:
+        """Имя проекта владельца — название диалога `code` для переноса и экспорта (§7.5.8)."""
+        ...
+
     async def stale_empty_dialogs(
         self, owner_id: UUID | None, created_before: datetime
     ) -> list[tuple[UUID, UUID]]:
@@ -323,6 +327,28 @@ class DialogTool(Protocol):
         Вызывается только при `plan.sql_test_schema`. `report` получает `SqlRun` целиком
         при каждой смене состояния; в последнем нет блоков `pending` и `running` — и
         тогда, когда задача отменена (остановка, потеря сессии).
+        """
+        ...
+
+
+class AnswerEditor(Protocol):
+    """Правка по сохранённому ответу — у вида `code` (§5.5, шаг 6; §7.5.10, §7.5.11)."""
+
+    async def propose(
+        self,
+        owner_id: UUID,
+        dialog_id: UUID,
+        answer_id: UUID,
+        params: Mapping[str, Any],
+        content: str,
+        status: Literal["complete", "length_limit"],
+        report: Callable[[Mapping[str, Any]], None],
+    ) -> Mapping[str, Any] | None:
+        """Разобрать ответ, при `fix` — провести цикл исправления, сохранить правку.
+
+        `params` — параметры вопроса; `report` получает события `code_fix`. Вернуть
+        сохранённый `CodeEdit`; `None` — правки нет. Отмена задачи (остановка, потеря
+        сессии) правку не сохраняет.
         """
         ...
 

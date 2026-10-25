@@ -9,6 +9,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from portal.code.tables import code_projects
 from portal.dialogs.domain import (
     Attachment,
     Dialog,
@@ -119,6 +120,15 @@ class SqlDialogRepository:
         query = query.order_by(dialogs.c.updated_at.desc(), dialogs.c.id.desc()).limit(limit)
         return [_dialog(row) for row in await self._connection.execute(query)]
 
+    async def project_name(self, owner_id: UUID, project_id: UUID) -> str | None:
+        """Имя проекта владельца."""
+        name: str | None = await self._connection.scalar(
+            sa.select(code_projects.c.name).where(
+                code_projects.c.id == project_id, code_projects.c.owner_id == owner_id
+            )
+        )
+        return name
+
     async def stale_empty_dialogs(
         self, owner_id: UUID | None, created_before: datetime
     ) -> list[tuple[UUID, UUID]]:
@@ -126,7 +136,8 @@ class SqlDialogRepository:
         # Разбор документа пустым диалогом не считается: он существует и без вопросов.
         query = sa.select(dialogs.c.owner_id, dialogs.c.id).where(
             dialogs.c.created_at < created_before,
-            dialogs.c.kind != "docparse",
+            # Диалог `code` живёт, пока жив его проект (§5.2).
+            dialogs.c.kind.not_in(("docparse", "code")),
             dialogs.c.carried_text.is_(None),
             sa.not_(_HAS_MESSAGES),
         )

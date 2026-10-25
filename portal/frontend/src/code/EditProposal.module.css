@@ -1,0 +1,92 @@
+/* Карточка правки (концепция §5.13.11): рамка `--p-line`, скругление 8 px, фон `--p-bg`, как карточка источника. */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: var(--p-bg);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.path,
+.mono {
+  overflow-wrap: anywhere;
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+}
+
+.stats {
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+}
+
+.line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.line svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+}
+
+.error {
+  color: var(--p-error-text);
+}
+
+.warning {
+  color: var(--p-warning-icon);
+}
+
+.verification {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.remaining {
+  margin: 0;
+  padding-left: 22px;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}

@@ -1,0 +1,139 @@
+/* Дерево файлов проекта (концепция §5.13.5): имена моноширинным 14 px, текущий файл — `--p-surface-3`. */
+.head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.tree {
+  margin: 0;
+  padding: 0 8px 12px;
+  list-style: none;
+}
+
+.item {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.row {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 32px;
+  padding-right: 36px;
+  border-radius: 8px;
+  color: var(--p-text);
+  cursor: pointer;
+  font-family: var(--p-font-mono);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.row:hover,
+.item:focus-within .row {
+  background: var(--p-surface-2);
+}
+
+.row.current {
+  background: var(--p-surface-3);
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}
+
+.row svg {
+  flex: none;
+  color: var(--p-text-muted);
+}
+
+.name {
+  flex: 1;
+  min-width: 0;
+}
+
+.nameText {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  position: absolute;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--p-error-text);
+  font-family: var(--p-font);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.badge svg {
+  color: var(--p-error-text);
+}
+
+/* Меню файла — при наведении и фокусе, на месте числа ошибок (§5.13.5). */
+.kebab {
+  position: absolute;
+  right: 4px;
+  opacity: 0;
+}
+
+.item:hover .kebab,
+.item:focus-within .kebab {
+  opacity: 1;
+}
+
+.item:hover .badge,
+.item:focus-within .badge {
+  opacity: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.input input {
+  font-family: var(--p-font-mono);
+}
+
+.error {
+  color: var(--p-error-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 16px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}

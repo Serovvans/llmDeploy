@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from portal.core.access import AnySession, ContainerDep
+from portal.core.container import Container
 
 # Лимит модели (docs/design.md §6), а не параметр портала.
 MAX_IMAGES_PER_REQUEST = 8
@@ -76,5 +77,37 @@ async def get_config(_: AnySession, container: ContainerDep) -> dict[str, Any]:
             "enabled": settings.memory.enabled,
             "keep_recent_pairs": settings.memory.keep_recent_pairs,
             "max_chars": settings.memory.max_chars,
+        },
+        "code": _code(container),
+    }
+
+
+def _code(container: Container) -> dict[str, Any]:
+    """Флаги и пределы раздела «Код» (§4, §7.5.3–7.5.6); типы мастера — из шаблонов."""
+    code = container.settings.code
+    return {
+        "enabled": code.enabled,
+        "build_enabled": code.build.enabled,
+        "file_extensions": list(code.file_extensions),
+        "max_projects": code.max_projects,
+        "max_files": code.max_files,
+        "file_max_bytes": code.file_max_bytes,
+        "project_max_bytes": code.project_max_bytes,
+        "import_max_bytes": code.import_max_bytes,
+        "max_snapshots": code.max_snapshots,
+        "fix_attempts": code.fix.attempts,
+        "wizard": {
+            "max_tools": code.wizard.max_tools,
+            "max_parameters": code.wizard.max_parameters,
+            "parameter_types": [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "csharp": item.csharp,
+                    "input": item.input,
+                    "output": item.output,
+                }
+                for item in container.code.templates.types
+            ],
         },
     }

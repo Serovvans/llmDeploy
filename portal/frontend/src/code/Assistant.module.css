@@ -1,0 +1,115 @@
+/* Колонка помощника проекта (концепция §5.13.10): 380 px, от 1600 px — 440 px. */
+.column {
+  grid-area: assistant;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--p-line);
+  background: var(--p-bg);
+}
+
+.head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 48px;
+  padding: 0 16px;
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.scope {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 0 16px 8px;
+  border-bottom: 1px solid var(--p-line);
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.sees {
+  border-bottom: 1px dashed var(--p-text-muted);
+  cursor: default;
+}
+
+.sees:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.notice {
+  flex: none;
+  padding: 8px 16px 0;
+}
+
+.feed {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.failed {
+  padding: 16px;
+}
+
+.bottom {
+  display: flex;
+  flex-direction: column;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border-radius: 8px;
+  background: var(--p-surface-2);
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.chipOpen,
+.chipText {
+  overflow: hidden;
+  padding: 4px 8px;
+  border: 0;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipOpen {
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.chipRemove {
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: var(--p-text-muted);
+  cursor: pointer;
+}
+
+.chipOpen:focus-visible,
+.chipRemove:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}

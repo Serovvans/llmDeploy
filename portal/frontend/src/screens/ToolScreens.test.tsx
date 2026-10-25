@@ -945,6 +945,42 @@ describe('помощник CoGIS', () => {
     expect(await screen.findByText('Ответ по общим знаниям.')).toBeInTheDocument();
   });
 
+  it('раздел «Код» включили, пока экран открыт: 409 dialog_read_only — уведомление и переход в раздел (§5.13.15)', async () => {
+    const { server, user } = setup('cogis', `/cogis/${ID}`, [QUESTION, message({ content: 'Ответ' })], {
+      [`POST /api/dialogs/${ID}/messages`]: () => fail(409, 'dialog_read_only'),
+    });
+
+    const input = await screen.findByPlaceholderText(t.placeholders.write);
+    await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(1));
+    server.on('GET /api/config', () => ok({ ...CONFIG, code: { ...CONFIG.code, enabled: true } }));
+    await user.type(input, 'Ещё вопрос{Enter}');
+    expect(await screen.findByText(texts.workshop.old.readOnly)).toBeInTheDocument();
+    await waitFor(() => expect(path()).toBe(`/code/dialogs/${ID}`));
+  });
+
+  it('пока настройки не пришли, прежний экран не открывается и ничего не запрашивает; раздел «Код» включён — сразу туда', async () => {
+    let release: (response: ReturnType<typeof ok>) => void = () => undefined;
+    const kinds: (string | null)[] = [];
+    const { server } = setup('cogis', '/cogis', [], {
+      'GET /api/config': () => new Promise((resolve) => (release = resolve)),
+      'GET /api/dialogs': (_body, url) => {
+        kinds.push(url.searchParams.get('kind'));
+        return ok({ items: [], next_cursor: null });
+      },
+      'GET /api/code/projects': () => ok({ items: [], next_cursor: null }),
+      'GET /api/code/sdk': () => fail(503, 'sdk_unavailable'),
+    });
+
+    await waitFor(() => expect(server.callsTo('GET /api/config')).toHaveLength(1));
+    expect(screen.queryByRole('heading', { level: 1, name: t.title })).not.toBeInTheDocument();
+    // Only requests made before the settings arrive count: in «Код» the old dialogs group lists them by right.
+    expect(kinds).not.toContain('cogis');
+    release(ok({ ...CONFIG, code: { ...CONFIG.code, enabled: true } }));
+    await waitFor(() => expect(path()).toBe('/code'));
+    // Only the old screen asks about CoGIS documentation.
+    expect(server.callsTo('GET /api/kb/cogis-documentation')).toHaveLength(0);
+  });
+
   it('ответ с источниками: кнопки-сноски и карточки', async () => {
     const source = { n: 1, document_id: 'k-1', document_title: 'Руководство CoGIS SDK.pdf', scope: 'shared' as const, page: 12, timecode_seconds: null, image_id: null, fragment_id: 'f-1', quote: 'Плагин реализует интерфейс IPlugin…' };
     setup('cogis', `/cogis/${ID}`, [QUESTION, message({ content: 'Реализуйте IPlugin [1].', sources_found: 3, sources: [source] })]);

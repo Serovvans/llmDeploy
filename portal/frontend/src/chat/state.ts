@@ -2,6 +2,8 @@
 import type { StreamEvent } from '../api/stream';
 import type {
   Attachment,
+  CodeEdit,
+  CodeTarget,
   Dialog,
   DialogCarried,
   DialogKind,
@@ -29,8 +31,9 @@ export interface Generation {
   /**
    * `preparing` — поиск закончен, текста ещё нет: к «Отправляю…» строка состояния не возвращается.
    * `checking` — ответ дописан и сохранён, идёт проверка SQL на тестовых данных (концепция §5.7).
+   * `fixing` — ответ помощника проекта дописан и сохранён, идёт цикл исправления (контракт §7.5.11).
    */
-  phase: 'sending' | 'searching' | 'preparing' | 'thinking' | 'answering' | 'checking';
+  phase: 'sending' | 'searching' | 'preparing' | 'thinking' | 'answering' | 'checking' | 'fixing';
   startedAt: number;
   reasoningStartedAt: number | null;
   /** Всё найденное в базе знаний (событие `sources`); под ответом остаются только упомянутые в тексте. */
@@ -40,6 +43,8 @@ export interface Generation {
    * У «Ответить заново» параметры вопроса неизвестны — там ответ дописан по первому `sql_run`.
    */
   testRun: boolean;
+  /** Шаг цикла исправления — последнее событие `code_fix`; `null` — цикла нет. */
+  fix: { stage: 'building' | 'fixing'; attempt: number; maxAttempts: number } | null;
 }
 
 export interface DialogView {
@@ -105,7 +110,7 @@ const EMPTY_HISTORY: History = { status: 'idle', items: [], nextCursor: null };
 export const EMPTY_DRAFT: Draft = { text: '', attachments: [], notice: null };
 
 export const INITIAL_STATE: ChatState = {
-  history: { chat: EMPTY_HISTORY, sql: EMPTY_HISTORY, cogis: EMPTY_HISTORY, docparse: EMPTY_HISTORY },
+  history: { chat: EMPTY_HISTORY, sql: EMPTY_HISTORY, cogis: EMPTY_HISTORY, docparse: EMPTY_HISTORY, code: EMPTY_HISTORY },
   dialogs: {},
   drafts: {},
 };
@@ -141,8 +146,17 @@ export type ChatAction =
   | {
       type: 'generationStarted';
       id: string;
-      /** `null` — повторная генерация: вопрос прежний. `withTags` — поиск сужен тегами, `testRun` — с проверкой SQL. */
-      question: { content: string; attachments: Attachment[]; withTags: boolean; testRun: boolean } | null;
+      /**
+       * `null` — повторная генерация: вопрос прежний. `withTags` — поиск сужен тегами, `testRun` — с проверкой SQL,
+       * `codeTarget` — фрагмент вопроса помощнику проекта.
+       */
+      question: {
+        content: string;
+        attachments: Attachment[];
+        withTags: boolean;
+        testRun: boolean;
+        codeTarget?: CodeTarget | null;
+      } | null;
       now: number;
     }
   | { type: 'streamEvent'; id: string; event: StreamEvent; now: number }
@@ -311,6 +325,10 @@ export function applyStreamEvent(view: DialogView, event: StreamEvent, now: numb
         generation: null,
       };
     case 'error':
+      if (generation.phase === 'fixing') {
+        // Ответ уже сохранён и остаётся им; правки нет (контракт §7.5.11).
+        return { ...view, generation: null };
+      }
       if (generation.phase === 'checking') {
         // Ответ уже сохранён со своим состоянием и остаётся им: обрывается только проверка (контракт §6.2).
         return { ...withLastAnswer(view, withRunStopped), generation: null };
@@ -324,6 +342,29 @@ export function applyStreamEvent(view: DialogView, event: StreamEvent, now: numb
         })),
         generation: null,
       };
+    case 'code_fix':
+      // Цикл исправления идёт после ответа: текст дописан и сохранён, итоговое состояние назовёт `done`.
+      return {
+        ...withLastAnswer(view, (answer) =>
+          generation.phase === 'fixing' ? answer : { ...withCitedSources(answer, generation), status: 'complete' },
+        ),
+        generation: {
+          ...generation,
+          phase: 'fixing',
+          fix: { stage: event.stage, attempt: event.attempt, maxAttempts: event.max_attempts },
+        },
+      };
+    case 'code_edit': {
+      const edit: CodeEdit = {
+        status: event.status,
+        files: event.files,
+        rejected_files: event.rejected_files,
+        incomplete: event.incomplete,
+        verification: event.verification,
+        decided_at: event.decided_at,
+      };
+      return withLastAnswer(view, (answer) => ({ ...answer, code_edit: edit }));
+    }
     case 'title':
       return view;
   }
@@ -411,7 +452,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ? view.messages
           : view.messages.filter((message, index) => index < view.messages.length - 1 || message.role === 'user');
         const question = action.question
-          ? [localMessage('user', action.now, { content: action.question.content, attachments: action.question.attachments })]
+          ? [
+              localMessage('user', action.now, {
+                content: action.question.content,
+                attachments: action.question.attachments,
+                code_target: action.question.codeTarget ?? null,
+              }),
+            ]
           : [];
         // «Ответить заново» ищет с теми же тегами, что исходный вопрос: признак переходит от прежнего ответа.
         const replaced = view.messages.at(-1);
@@ -436,6 +483,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             reasoningStartedAt: null,
             found: null,
             testRun: action.question?.testRun ?? false,
+            fix: null,
           },
         };
       });
@@ -453,6 +501,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         const generation = view.generation;
         if (!generation) {
           return view;
+        }
+        if (generation.phase === 'fixing') {
+          // Остановка цикла исправления: ответ дописан и сохранён, правки нет (концепция §5.13.10).
+          return { ...view, generation: null };
         }
         return {
           ...withLastAnswer(view, (answer) =>

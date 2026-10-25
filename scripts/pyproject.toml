@@ -29,7 +29,7 @@ ignore = ["D203", "D213", "RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["api_errors.py", "smoke_test.py", "keys.py", "tests"]
+files = ["api_errors.py", "smoke_test.py", "keys.py", "code_packages.py", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

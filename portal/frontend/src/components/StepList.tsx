@@ -1,7 +1,8 @@
 import styles from './StepList.module.css';
 
 interface Step {
-  title: string;
+  /** Без заголовка шаг состоит только из своего содержимого (окно архива, концепция §5.13.9, шаг 3). */
+  title?: string;
   children: React.ReactNode;
 }
 
@@ -9,9 +10,9 @@ interface Step {
 export function StepList({ steps }: { steps: Step[] }) {
   return (
     <ol className={styles.list}>
-      {steps.map((step) => (
-        <li key={step.title} className={styles.step}>
-          <h2 className={styles.title}>{step.title}</h2>
+      {steps.map((step, index) => (
+        <li key={index} className={styles.step}>
+          {step.title && <h2 className={styles.title}>{step.title}</h2>}
           {step.children}
         </li>
       ))}

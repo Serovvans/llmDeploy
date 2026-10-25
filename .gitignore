@@ -23,3 +23,6 @@ htmlcov/
 # ключ разработчика для прямого доступа к моделям
 scripts/.env.dev
 deploy/.env.deploy_copy
+# собственность заказчика: документация CoGIS и DLL SDK (раздел «Код», 0.9)
+.claude/notes/code-workshop/cogis-docs/
+deploy/cogis-sdk/

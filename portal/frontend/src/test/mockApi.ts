@@ -73,6 +73,28 @@ export const CONFIG = {
   },
   // Выключена: остальные тесты проверяют портал как до «Памяти диалога» (ПД §7); тесты памяти включают её сами.
   memory: { enabled: false, keep_recent_pairs: 2, max_chars: 8000 },
+  // Выключен: остальные тесты проверяют портал как до раздела «Код» (ПД §7); тесты раздела включают его сами.
+  code: {
+    enabled: false,
+    build_enabled: true,
+    file_extensions: ['.cs'],
+    max_projects: 50,
+    max_files: 50,
+    file_max_bytes: 16384,
+    project_max_bytes: 262144,
+    import_max_bytes: 10485760,
+    max_snapshots: 30,
+    fix_attempts: 2,
+    wizard: {
+      max_tools: 10,
+      max_parameters: 20,
+      parameter_types: [
+        { id: 'string', title: 'Строка', csharp: 'string?', input: true, output: true },
+        { id: 'int', title: 'Целое число', csharp: 'int', input: true, output: false },
+        { id: 'bool', title: 'Да или нет', csharp: 'bool', input: true, output: false },
+      ],
+    },
+  },
 } satisfies PortalConfig;
 
 export const EMPLOYEE: SessionUser = {

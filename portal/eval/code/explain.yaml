@@ -1,0 +1,35 @@
+# Задачи «Объяснить» (action: explain) — предложение к контракту (docs/portal-api.md
+# §13.4 знает только write и fix), см. отчёт codegen-evaluator. Сборки у них нет: итог —
+# ответ без блоков правки, где находятся все выражения `mentions` (регулярные, Python
+# `re`, без учёта регистра). Поля project, schema, request — как в tasks.yaml; `target` —
+# путь файла проекта и строки выделения с 1 включительно (`null` — без выделения).
+
+- id: explain-example-file
+  group: explain
+  project:
+    example: ContactBook
+  schema: null
+  action: explain
+  target: { path: AddContactTool.cs, start_line: 1, end_line: 87 }
+  request: Объяснить файл AddContactTool.cs
+  mentions: ['contacts', 'email|почт', 'организаци', 'ошибк']
+
+- id: explain-connection-fragment
+  group: explain
+  project:
+    example: ContactBook
+  schema: null
+  action: explain
+  target: { path: AddContactTool.cs, start_line: 58, end_line: 85 }
+  request: Объяснить выделенный фрагмент
+  mentions: ['подключени', 'сервер|host', 'парол']
+
+- id: explain-bad-email
+  group: explain
+  project:
+    example: ContactBook
+  schema: null
+  action: explain
+  target: null
+  request: Что увидит сотрудник в CoGIS, если введёт email без значка @? Запишется ли что-нибудь в базу?
+  mentions: ['не задан или неверен|сообщени', 'не запиш|не добав|не попад|ничего']

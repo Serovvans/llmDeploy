@@ -95,7 +95,7 @@ function setup(memory: () => ReturnType<typeof ok>, options: { kind?: DialogKind
     [`GET /api/dialogs/${ID}/messages`]: () => ok({ items: [...messages].reverse(), next_cursor: null }),
     [`GET /api/dialogs/${ID}/memory`]: memory,
   });
-  const base = { chat: '/chat', sql: '/sql', cogis: '/cogis', docparse: '/documents' }[kind];
+  const base = { chat: '/chat', sql: '/sql', cogis: '/cogis', docparse: '/documents', code: '/code' }[kind];
   renderApp(`${base}/${ID}`);
   return { server, user: userEvent.setup({ applyAccept: false }) };
 }
@@ -366,7 +366,8 @@ describe('память диалога в инструментах', () => {
   it('CoGIS: оценка с действием', async () => {
     setup(() => ok(estimate({ pairs: [pair(1)] })), { kind: 'cogis', messages: MESSAGES.slice(0, 2) });
     await screen.findByRole('complementary', { name: t.title });
-    expect(memoryQueries().at(-1)?.toString()).toBe('action=write');
+    // The screen mounts only after the portal settings arrive, together with the panel: the estimate follows it.
+    await waitFor(() => expect(memoryQueries().at(-1)?.toString()).toBe('action=write'));
   });
 
   it('разбор документа: панель на экране результата, без параметров; на форме её нет', async () => {

@@ -362,12 +362,21 @@ test.describe('Компоновка экрана SQL', () => {
     });
   }
 
-  test('экран помощника CoGIS не изменился: настроек SQL в заголовке нет, действия — отдельной строкой над лентой', async ({
+  test('экран помощника CoGIS (раздел «Код» выключен) не изменился: настроек SQL в заголовке нет, действия — отдельной строкой над лентой', async ({
     newMember,
     pageAs,
   }) => {
     const member = await newMember();
-    const page = await pageAs(member, '/cogis');
+    const page = await pageAs(member, '/chat');
+    // С 0.9 прежний экран открывается только при выключенном разделе «Код»: флаг подменяется на пути
+    // к браузеру (настоящий флаг портала проверяет code-stand.e2e.ts).
+    await page.route('**/api/config', async (route) => {
+      const response = await fetchPlain(route);
+      const config = await response.json();
+      config.code.enabled = false;
+      await route.fulfill({ response, json: config });
+    });
+    await page.goto('/cogis');
     await expect(page.getByRole('heading', { level: 1, name: 'Помощник CoGIS' })).toBeVisible();
     for (const name of ['Диалект', 'Схема базы', 'Мои схемы']) {
       await expect(page.getByRole('button', { name })).toHaveCount(0);

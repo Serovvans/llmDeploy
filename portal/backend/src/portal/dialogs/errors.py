@@ -70,3 +70,15 @@ def draft_in_progress() -> AppError:
 def nothing_to_summarize() -> AppError:
     """В диапазоне пересказа нечего пересказывать (§5.10.5)."""
     return AppError(409, "nothing_to_summarize", "Пересказывать пока нечего.")
+
+
+def dialog_read_only() -> AppError:
+    """Диалог прежнего помощника CoGIS при включённом разделе «Код» (§7.5.15)."""
+    return AppError(409, "dialog_read_only", "Этот диалог доступен только для чтения.")
+
+
+def project_dialog() -> AppError:
+    """Название и удаление диалога помощника проекта — у самого проекта (§7.5.8)."""
+    return AppError(
+        409, "wrong_dialog_kind", "Диалог помощника проекта меняется только вместе с проектом."
+    )

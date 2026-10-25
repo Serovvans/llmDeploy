@@ -886,17 +886,19 @@ def test_build_checks_portal_mode_replaces_closed_paths() -> None:
 def test_build_checks_site_only_makes_no_model_requests() -> None:
     assert _check_names(direct=False, site_only=True) == ["no_key", *API_CHECKS]
     names = _check_names(direct=False, site_only=True, site_mode="portal", compose_file="c.yml")
-    assert names == ["no_key", *PORTAL_CHECKS, "services", "sql_sandbox"]
+    assert names == ["no_key", *PORTAL_CHECKS, "services", "sql_sandbox", "code_sandbox"]
 
 
 def test_build_checks_portal_smoke_covers_services_of_release_05() -> None:
     access = st.RerankAccess("http://127.0.0.1:8081", "sk-bf-portal")
     portal: dict[str, Any] = {"site_only": True, "site_mode": "portal"}
     names = _check_names(direct=False, **portal, compose_file="c.yml", rerank=access)
-    assert names == ["no_key", *PORTAL_CHECKS, "services", "sql_sandbox", "rerank"]
+    assert names == [
+        "no_key", *PORTAL_CHECKS, "services", "sql_sandbox", "code_sandbox", "rerank",
+    ]  # fmt: skip
     # Реранкер выключен — шага нет; без compose-файла (не на ВМ) нет обоих.
     names = _check_names(direct=False, **portal, compose_file="c.yml")
-    assert names[-2:] == ["services", "sql_sandbox"]
+    assert names[-3:] == ["services", "sql_sandbox", "code_sandbox"]
     assert _check_names(direct=False, **portal, rerank=access) == ["no_key", *PORTAL_CHECKS]
     api = _check_names(direct=False, site_only=True, compose_file="c.yml", rerank=access)
     assert api == ["no_key", *API_CHECKS, "services"]
@@ -1097,3 +1099,26 @@ def test_check_service_healthy_reports_sandbox_state() -> None:
     for runner in (compose_ps("running", "unhealthy"), lambda compose_file, args: ""):
         with pytest.raises(st.SmokeTestError, match="sql-sandbox"):
             st.check_service_healthy("c.yml", "sql-sandbox", runner)
+
+
+def test_check_code_sandbox_asks_from_portal_api_and_reports_sdk_version() -> None:
+    calls: list[Sequence[str]] = []
+
+    def runner(compose_file: str, args: Sequence[str]) -> str:
+        calls.append(args)
+        return '{"sdk_version": "13.0.1234.0"}\n'
+
+    assert st.check_code_sandbox("c.yml", runner) == "SDK CoGIS 13.0.1234.0"
+    assert list(calls[0][:4]) == ["exec", "-T", "portal-api", "python"]
+    assert "http://code-sandbox:8080/health" in calls[0][-1]
+
+
+def test_check_code_sandbox_without_sdk_passes_with_notice() -> None:
+    result = st.check_code_sandbox("c.yml", lambda compose_file, args: '{"sdk_version": null}')
+    assert "make cogis-sdk" in result
+
+
+@pytest.mark.parametrize("output", ["", "<html>", "[]", '{"status": "ok"}'])
+def test_check_code_sandbox_rejects_unexpected_answer(output: str) -> None:
+    with pytest.raises(st.SmokeTestError, match="code-sandbox"):
+        st.check_code_sandbox("c.yml", lambda compose_file, args: output)

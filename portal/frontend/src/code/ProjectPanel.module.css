@@ -1,0 +1,172 @@
+/* Панель проекта 240 px (концепция §5.13.2, §5.13.3): как история — текущая строка `--p-surface-3`. */
+.panel {
+  grid-area: panel;
+  display: flex;
+  flex-direction: column;
+  width: 240px;
+  min-height: 0;
+  border-right: 1px solid var(--p-line);
+  background: var(--p-bg);
+}
+
+.new {
+  flex: none;
+  padding: 12px;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 120px;
+  padding: 0 8px 12px;
+}
+
+.group {
+  padding: 4px 8px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.muted {
+  padding: 4px 8px;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.item > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.link {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 36px 6px 8px;
+  border-radius: 8px;
+  color: var(--p-text);
+  font-size: 14px;
+  line-height: 20px;
+  text-decoration: none;
+}
+
+.link:hover,
+.item:focus-within .link {
+  background: var(--p-surface-2);
+}
+
+.link.current {
+  background: var(--p-surface-3);
+}
+
+.link:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}
+
+.name,
+.time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.time {
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.badge {
+  position: absolute;
+  right: 12px;
+  display: flex;
+  color: var(--p-text);
+  pointer-events: none;
+}
+
+.badgeError {
+  color: var(--p-error-text);
+}
+
+/* Меню строки — при наведении и фокусе, на месте значка итога (концепция §5.13.3, §9). */
+.kebab {
+  position: absolute;
+  right: 4px;
+  opacity: 0;
+}
+
+.item:hover .kebab,
+.item:focus-within .kebab {
+  opacity: 1;
+}
+
+.item:hover .badge,
+.item:focus-within .badge {
+  opacity: 0;
+}
+
+.more {
+  padding: 0 8px;
+  font-size: 14px;
+}
+
+.old {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.old > div {
+  align-self: stretch;
+}
+
+.oldTitle {
+  color: var(--p-text-muted);
+  white-space: normal;
+  text-align: left;
+}
+
+/* Режим проекта: «← Все проекты», «Файлы» и дерево (§5.13.5). */
+.back {
+  flex: none;
+  padding: 12px 16px 4px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.filesHead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+}
+
+.filesTitle {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
