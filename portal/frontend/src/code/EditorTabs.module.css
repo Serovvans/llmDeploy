@@ -1,0 +1,120 @@
+/* Вкладки редактора 36 px (концепция §5.13.6): текущая — `--p-bg` с полосой `--p-accent`, прочие — `--p-surface-2`. */
+.bar {
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  border-bottom: 1px solid var(--p-line);
+  background: var(--p-surface-2);
+}
+
+.tabs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  max-width: 280px;
+  border-right: 1px solid var(--p-line);
+  background: var(--p-surface-2);
+}
+
+.tab:hover {
+  background: var(--p-surface-3);
+}
+
+.tab.selected {
+  background: var(--p-bg);
+  box-shadow: inset 0 -2px 0 var(--p-accent);
+}
+
+.tabButton {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 12px;
+  border: 0;
+  background: none;
+  color: var(--p-text);
+  cursor: pointer;
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.editTab {
+  font-family: var(--p-font);
+}
+
+.tabButton:focus-visible,
+.close:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}
+
+.tabName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder {
+  flex: none;
+  color: var(--p-text-muted);
+}
+
+.close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--p-text-muted);
+  cursor: pointer;
+}
+
+.close:hover {
+  color: var(--p-text);
+}
+
+.side {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  max-width: 50%;
+  padding: 0 4px 0 12px;
+}
+
+.save {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warning {
+  flex: none;
+  color: var(--p-warning-icon);
+}
+
+.failed {
+  color: var(--p-error-text);
+  white-space: normal;
+}

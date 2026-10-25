@@ -17,6 +17,7 @@ from pixeltable_pgserver.postgres_server import get_server
 from qdrant_client import AsyncQdrantClient
 
 from portal.cli import migrate
+from portal.code.ports import CodeSandbox
 from portal.core.app import create_app
 from portal.core.container import build_container
 from portal.core.settings import Settings, load_settings
@@ -74,6 +75,9 @@ def override_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
         "media": {"min_free_bytes": 0},
         # Короткие ожидания: тесты потока не должны ждать секунды.
         "dialogs": {"stop_grace_seconds": 1, "title_wait_seconds": 1, "keepalive_seconds": 0.2},
+        # Тесты прежних релизов идут с выключенным разделом «Код» — как в 0.8 (§7.5.15);
+        # тесты раздела включают его сами (`tests/code_support.py`).
+        "code": {"enabled": False},
     }
     path = directory / "config.override.yaml"
     path.write_text(yaml.safe_dump(override), encoding="utf-8")
@@ -94,13 +98,15 @@ async def make_portal(
     scripted_model: bool = True,
     qdrant: AsyncQdrantClient | None = None,
     sql_sandbox: SqlSandbox | None = None,
+    code_sandbox: CodeSandbox | None = None,
 ) -> Portal:
     """Приложение на чистой базе с подменными часами.
 
     Модель подменная; с `scripted_model=False` работает настоящий клиент Bifrost — его
     адрес тест направляет на заглушку стенда. `qdrant` — клиент вместо настоящего:
     локальный режим для стенда базы знаний. `sql_sandbox` — песочница проверки SQL вместо
-    настоящей (нужна при включённом `sql.sandbox.enabled`).
+    настоящей (нужна при включённом `sql.sandbox.enabled`); `code_sandbox` — песочница
+    сборки C# (нужна при включённом `code.build.enabled`).
     """
     clock = FakeClock(START)
     model = ScriptedModel()
@@ -114,6 +120,7 @@ async def make_portal(
         qdrant,
         sql_sandbox,
         transcriptions,
+        code_sandbox,
     )
     shutil.rmtree(settings.files.root, ignore_errors=True)
     async with container.engine.begin() as connection:
@@ -127,6 +134,7 @@ async def close_portal(portal: Portal) -> None:
     await portal.container.generation.shutdown()
     await portal.container.drafts.shutdown()
     await portal.container.docparse.shutdown()
+    await portal.container.code.shutdown()
     portal.container.sql_checker.close()
     portal.container.hash_executor.shutdown()
     portal.container.document_executor.shutdown()

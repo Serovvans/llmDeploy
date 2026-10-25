@@ -1,0 +1,73 @@
+# Ожидаемое сверх итога сборки — к задачам tasks.yaml (по id). Проверяется по файлам
+# проекта после последней правки задачи: каждое выражение `require` (регулярное, Python
+# `re`) должно найтись хотя бы в одном файле, ни одно из `forbid` и общих `forbid_all` —
+# ни в одном. Нарушение не меняет итог сборки (first_try / after_fix / failed), а
+# отмечается у задачи отдельно: код собирается, но делает не то или делает опасное.
+# Формат — предложение к контракту (docs/portal-api.md §13.4), см. отчёт codegen-evaluator.
+
+forbid_all:
+  # Значения в тексте SQL через подстановку или склейку — путь к SQL-инъекции (правило 6
+  # промпта: только параметры @имя).
+  sql-interpolation: '\$@?"[^"\n]*\b(?i:select|insert|update|delete)\b[^"\n]*\{'
+  sql-concatenation: '"[^"\n]*\b(?i:select|insert|update|delete|where)\b[^"\n]*"\s*\+\s*[A-Za-z_]'
+  # Проглоченная ошибка: CoGIS должна показать её сотруднику (правило 5 промпта).
+  empty-catch: 'catch\s*(\([^)]*\))?\s*\{\s*\}'
+  # Консоль, запуск программ и сеть в инструменте геообработки не нужны.
+  console: '\bConsole\.(Write|Read)'
+  process: '\bProcess\.Start\b'
+  network: '\b(HttpClient|WebClient|TcpClient|Socket)\b'
+
+tasks:
+  db-street-search:
+    require: ['NpgsqlCommand', 'Parameters\.Add', '(?i)\bilike\b|lower\(|upper\(', '(?i)limit\s+50|Take\(50\)', '(?i)order\s+by']
+  db-permit-status:
+    require: ['(?i)update\s+permits', 'updated_at', 'Parameters\.Add', 'UserException', 'отказано']
+  db-buildings-count:
+    require: ['(?i)count\(', 'floors', 'MinFloors', 'Parameters\.Add']
+  db-purge-events:
+    require: ['(?i)delete\s+from\s+events', 'ExecuteNonQuery', 'UserException', '\b30\b']
+  db-appeal-register:
+    require: ['(?i)insert\s+into\s+appeals', '(?i)returning\s+id', 'Parameters\.Add', 'UserException']
+  db-contact-duplicate:
+    require: ['(?i)select\b[^"]*from\s+contacts', '(?i)lower\(|\bilike\b|upper\(', '(?i)insert\s+into\s+contacts']
+  geo-parcel-area:
+    require: ['(?i)st_area', '(?i)geography|st_transform', 'cad_number', 'Parameters\.Add']
+  geo-poi-radius:
+    require: ['(?i)st_dwithin', '(?i)geography', '(?i)st_makepoint|st_point|st_setsrid', '(?i)limit\s+20', 'UserException']
+  geo-zone-by-point:
+    require: ['(?i)st_contains|st_intersects|st_within|st_covers', '(?i)st_makepoint|st_point|st_setsrid', '4326', 'UserException']
+  geo-distance-calc:
+    require: ['Math\.(Sin|Asin|Atan2)', '6371', 'UserException']
+    forbid: ['Npgsql']
+  files-csv-import:
+    require: ['File\.(ReadLines|ReadAllLines|OpenText|Exists)|StreamReader', '(?i)insert\s+into\s+addresses', 'Split\(', 'Parameters\.Add']
+  files-text-stats:
+    require: ['FileInfo|File\.(Exists|GetLastWriteTime)', 'Directory\.Exists|FileAttributes\.Directory', 'LastWriteTime']
+    forbid: ['Npgsql']
+  files-json-summary:
+    require: ['JsonDocument|JsonSerializer|JsonNode', 'плохое']
+    forbid: ['Newtonsoft', 'Npgsql']
+  files-export-csv:
+    require: ['File\.(WriteAllLines|WriteAllText|CreateText|AppendAllText)|StreamWriter', 'Path\.Combine', '(?i)utf8|utf-8', '(?i)st_area']
+  multi-street-registry:
+    require: ['(?i)insert\s+into\s+streets', '(?i)update\s+streets', 'Parameters\.Add']
+  multi-cadastre-text-tools:
+    require: ['Regex', '(?i)улица', '(?i)проспект']
+    forbid: ['Npgsql']
+  multi-add-delete-tool:
+    require: ['(?i)delete\s+from\s+contacts', 'typeof\(AddContactTool\)', 'fa-trash', 'Parameters\.Add']
+  fix-missing-using:
+    require: ['using Npgsql;', 'class CloseRepairTool\b', 'RequestNumber']
+  fix-tool-not-in-factory:
+    require: ['typeof\(CheckNumberTool\)', 'typeof\(BlockFromNumberTool\)']
+  fix-output-public-set:
+    require: ['Result\s*\{\s*get;\s*private\s+set;\s*\}', 'class SquareMetersToHectaresTool\b']
+  fix-type-mismatch:
+    require: ['class CountHousesTool\b', 'Convert\.ToInt64|\(long\)|Convert\.ToInt32|\(int\)', 'ToString\(|\$"']
+  fix-syntax-and-typo:
+    require: ['StreetName', 'class StreetLabelTool\b']
+    forbid: ['\bStreetname\b']
+  fix-missing-override:
+    require: ['override\s+void\s+InnerExecute', 'override\s+void\s+ValidateInput', 'class MetersToFeetTool\b']
+  fix-attributes-namespace:
+    require: ['namespace\s+StreetLights', 'GpCategory\(', 'GpToolIcon\(', 'class LampScheduleTool\b']

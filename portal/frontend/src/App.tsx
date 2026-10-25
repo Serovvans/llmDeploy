@@ -1,6 +1,6 @@
 import { Loader, SingleToast } from '@skbkontur/react-ui';
-import { useEffect } from 'react';
-import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { lazy, Suspense, useEffect } from 'react';
+import { Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 
 import { ChatProvider } from './chat/ChatProvider';
 import { MediaUploadsProvider } from './chat/MediaUploads';
@@ -24,6 +24,44 @@ import { texts } from './texts';
 import { ThemeProvider } from './theme/ThemeProvider';
 
 const HOME = '/chat';
+
+const CodeSection = lazy(() => import('./code/CodeSection'));
+
+/**
+ * Флаг раздела «Код» (концепция §5.13.14): включён — `/cogis…` ведёт в раздел, прежний диалог открывается
+ * на `/code/dialogs/:id`; выключен — `/code…` ведёт на прежний экран помощника CoGIS.
+ */
+function CogisRoute() {
+  const { config } = useSession();
+  const { id } = useParams();
+  if (config?.code.enabled) {
+    return <Navigate to={id ? `/code/dialogs/${id}` : '/code'} replace />;
+  }
+  return <CogisScreen />;
+}
+
+function CodeRoute() {
+  const { config } = useSession();
+  const { pathname } = useLocation();
+  if (!config) {
+    return null;
+  }
+  if (!config.code.enabled) {
+    const old = /^\/code\/dialogs\/([^/]+)/.exec(pathname)?.[1];
+    return <Navigate to={old ? `/cogis/${old}` : '/cogis'} replace />;
+  }
+  return (
+    <Suspense
+      fallback={
+        <Loader active caption={texts.common.loading} delayBeforeSpinnerShow={300}>
+          <div style={{ flex: 1 }} />
+        </Loader>
+      }
+    >
+      <CodeSection />
+    </Suspense>
+  );
+}
 
 /** Экраны входа: адрес, не совпадающий с текущим шагом, ведёт на экран этого шага (концепция §3.1). */
 function LoginFlow() {
@@ -72,7 +110,8 @@ function Workspace() {
         <Route path="/chat/:id?" element={<ChatScreen />} />
         <Route path="/knowledge" element={<KnowledgeScreen />} />
         <Route path="/sql/:id?" element={<SqlScreen />} />
-        <Route path="/cogis/:id?" element={<CogisScreen />} />
+        <Route path="/cogis/:id?" element={<CogisRoute />} />
+        <Route path="/code/*" element={<CodeRoute />} />
         <Route path="/documents/:id?" element={<DocumentsScreen />} />
         <Route path="/admin/users" element={<UsersScreen />} />
         <Route path="/profile" element={<ProfileScreen user={user} />} />

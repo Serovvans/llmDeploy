@@ -124,7 +124,7 @@ async def test_messages_are_paged_from_newest(portal: Portal) -> None:
     assert set(question) == {
         "id", "role", "content", "status", "error_code", "reasoning", "reasoning_seconds",
         "attachments", "sources", "sources_found", "sql_check", "sql_run", "sql_dangers",
-        "dropped_messages", "memory_mode", "created_at",
+        "dropped_messages", "memory_mode", "created_at", "code_target", "code_edit",
     }  # fmt: skip
     assert question["status"] == "complete" and question["attachments"] == []
     assert question["sources"] is None and question["sources_found"] is None

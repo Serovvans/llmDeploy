@@ -7,7 +7,7 @@ from uuid import UUID
 
 from portal.files.ports import MediaType, RecordingType
 
-DialogKind = Literal["chat", "sql", "cogis", "docparse"]
+DialogKind = Literal["chat", "sql", "cogis", "docparse", "code"]
 MessageRole = Literal["user", "assistant"]
 MessageStatus = Literal["complete", "streaming", "stopped", "length_limit", "error"]
 AnswerMode = Literal["fast", "thorough"]
@@ -25,6 +25,7 @@ class Dialog:
     кончается пересказанная часть; оба есть или оба `None` (§5.10.6). `carried_text` —
     перенесённое при создании; `carried_source_id` — исходный диалог того же владельца
     (`None` — удалён), `carried_source_title` — его название на момент переноса (§5.10.7).
+    `project_id` — проект, которому принадлежит диалог `code` (§7.5.8).
     """
 
     id: UUID
@@ -38,6 +39,7 @@ class Dialog:
     carried_text: str | None = None
     carried_source_id: UUID | None = None
     carried_source_title: str | None = None
+    project_id: UUID | None = None
 
 
 @dataclass
@@ -51,7 +53,8 @@ class Message:
     оба только в диалоге `sql` (§7.1). `sql_run` — итог проверки блоков ответа на тестовых
     данных (§7.4); `None` — проверки не было или её итог не сохранён. `memory_mode` —
     режим пары «вопрос + ответ» в памяти диалога (§5.10.1): хранится у вопроса, у ответа
-    при чтении — режим его вопроса.
+    при чтении — режим его вопроса. `code_edit` — правка помощника у ответа диалога
+    `code` (§7.5.10).
     """
 
     id: UUID
@@ -72,6 +75,7 @@ class Message:
     created_at: datetime
     sql_run: dict[str, Any] | None = None
     memory_mode: MemoryMode = "full"
+    code_edit: dict[str, Any] | None = None
 
 
 @dataclass

@@ -50,6 +50,7 @@ from portal.files.ports import (
     UnreadableDocumentError,
 )
 from portal.files.text import looks_like_text, read_text
+from portal.files.zipdir import zip_directory_bytes
 
 _PDF_LOCK = threading.Lock()
 # Разметка DOCX: одно дерево на процесс (§1.5); под ней других блокировок не берут.
@@ -679,14 +680,11 @@ class ContentDocumentReader:
         """
         with path.open("rb") as file:
             try:
-                end = zipfile._EndRecData(file)  # type: ignore[attr-defined]
+                size = zip_directory_bytes(file)
             except zipfile.BadZipFile as error:
                 raise UnreadableDocumentError from error
-            except OSError:
-                return False  # как zipfile.is_zipfile: записи конца нет
-        if end is None:
+        if size is None:
             return False
-        size: int = end[zipfile._ECD_SIZE]  # type: ignore[attr-defined]
         if size > self._settings.zip_max_directory_bytes:
             raise UnreadableDocumentError
         return True

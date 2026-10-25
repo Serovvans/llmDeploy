@@ -6,6 +6,15 @@ import { type DraftEvent, readEvents, type StreamEvent } from './stream';
 import type {
   AdminUser,
   Attachment,
+  CodeBuild,
+  CodeCreated,
+  CodeEdit,
+  CodeEditFull,
+  CodeFile,
+  CodeProject,
+  CodeProjectItem,
+  CodeSdk,
+  CodeSnapshot,
   CursorPage,
   Dialog,
   DialogKind,
@@ -30,6 +39,7 @@ import type {
   SqlSchemaSummary,
   TemporaryPasswordResult,
   UnlockLoginResult,
+  WizardForm,
 } from './types';
 
 /** Отказ сервера в формате контракта. */
@@ -249,6 +259,14 @@ async function* stream<E extends { type: string } = StreamEvent>(
   }
 }
 
+/** Файл ответа и его имя из `Content-Disposition` (`filename*=UTF-8''…`, контракт §5.9, §7.5.5). */
+async function download(response: Response): Promise<{ blob: Blob; fileName: string | null }> {
+  const name = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get('Content-Disposition') ?? '')?.[1];
+  return { blob: await response.blob(), fileName: name ? decodeURIComponent(name) : null };
+}
+
+const ZIP_TYPE = 'application/zip';
+
 export interface UserListQuery {
   page: number;
   q: string;
@@ -387,9 +405,7 @@ export const api = {
   /** Файл DOCX: диалог целиком или один ответ `messageId` (контракт §5.9). */
   exportDialog: async (id: string, messageId?: string) => {
     const query = messageId ? `?${new URLSearchParams({ message_id: messageId }).toString()}` : '';
-    const response = await send('GET', `/api/dialogs/${id}/export${query}`, { accept: DOCX_TYPE });
-    const name = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get('Content-Disposition') ?? '')?.[1];
-    return { blob: await response.blob(), fileName: name ? decodeURIComponent(name) : null };
+    return download(await send('GET', `/api/dialogs/${id}/export${query}`, { accept: DOCX_TYPE }));
   },
 
   listSqlSchemas: () => request<{ items: SqlSchemaSummary[] }>('GET', '/api/sql/schemas'),
@@ -490,6 +506,80 @@ export const api = {
     const query = params.toString();
     return request<DocumentText>('GET', `/api/kb/documents/${id}/text${query ? `?${query}` : ''}`);
   },
+
+  // ---------- Раздел «Код» (контракт §7.5, 0.9) ----------
+
+  listCodeProjects: (cursor: string | null) => {
+    const params = new URLSearchParams();
+    if (cursor) {
+      params.set('cursor', cursor);
+    }
+    const query = params.toString();
+    return request<CursorPage<CodeProjectItem>>('GET', `/api/code/projects${query ? `?${query}` : ''}`);
+  },
+
+  /** Мастер (с `carried` — перенос в «Код», §7.5.4) или пример из инструкции. */
+  createCodeProject: (
+    body:
+      | { source: 'wizard'; wizard: WizardForm; carried?: { text: string; source_dialog_id: string } }
+      | { source: 'example'; name: string },
+  ) => request<CodeCreated>('POST', '/api/code/projects', body),
+
+  importCodeProject: async (file: File, name: string) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('name', name);
+    const response = await send('POST', '/api/code/projects/import', { form });
+    return (await response.json()) as CodeCreated;
+  },
+
+  getCodeProject: (id: string) => request<CodeProject>('GET', `/api/code/projects/${id}`),
+
+  updateCodeProject: (id: string, changes: { packages?: string[]; schema_id?: string | null }) =>
+    request<CodeProject>('PATCH', `/api/code/projects/${id}`, changes),
+
+  deleteCodeProject: (id: string) => request<undefined>('DELETE', `/api/code/projects/${id}`),
+
+  createCodeFile: (projectId: string, path: string) =>
+    request<CodeFile>('POST', `/api/code/projects/${projectId}/files`, { path, content: '' }),
+
+  /** Сохранение и переименование с ревизией, которую видел сотрудник (контракт §7.5.3). */
+  updateCodeFile: (projectId: string, fileId: string, changes: { revision: number; path?: string; content?: string }) =>
+    request<CodeFile>('PATCH', `/api/code/projects/${projectId}/files/${fileId}`, changes),
+
+  deleteCodeFile: (projectId: string, fileId: string) =>
+    request<undefined>('DELETE', `/api/code/projects/${projectId}/files/${fileId}`),
+
+  /** «Скачать для Visual Studio» — ZIP исходников с файлом проекта (§7.5.5). */
+  exportCodeProject: async (id: string) =>
+    download(await send('GET', `/api/code/projects/${id}/export`, { accept: ZIP_TYPE })),
+
+  listCodeSnapshots: (id: string) => request<{ items: CodeSnapshot[] }>('GET', `/api/code/projects/${id}/snapshots`),
+
+  restoreCodeSnapshot: (id: string, snapshotId: string) =>
+    request<CodeProject>('POST', `/api/code/projects/${id}/snapshots/${snapshotId}/restore`),
+
+  /** Сборка синхронная: ответ приходит, когда она закончена (контракт §7.5.7). */
+  buildCodeProject: (id: string) => request<CodeBuild>('POST', `/api/code/projects/${id}/build`),
+
+  /** Архив для CoGIS (§7.5.7); отказ `409 archive_unavailable` с `details.reason`. */
+  downloadCodeArchive: async (id: string) =>
+    download(await send('GET', `/api/code/projects/${id}/build/archive`, { accept: ZIP_TYPE })),
+
+  getCodeEdit: (id: string, messageId: string) =>
+    request<CodeEditFull>('GET', `/api/code/projects/${id}/edits/${messageId}`),
+
+  /** Решение по правке: принимаемые файлы с ревизией, с которой сравнивал сотрудник; `[]` — отклонить всё. */
+  decideCodeEdit: (id: string, messageId: string, accept: { path: string; revision: number | null }[]) =>
+    request<{ edit: CodeEdit; project: CodeProject }>('POST', `/api/code/projects/${id}/edits/${messageId}/decision`, {
+      accept,
+    }),
+
+  /**
+   * Справочник и набор пакетов (§7.5.14). Единственный маршрут с `ETag`: запрос — обычный, без
+   * `cache: "no-store"`, поэтому повторное открытие раздела получает `304` из кеша браузера.
+   */
+  getCodeSdk: () => request<CodeSdk>('GET', '/api/code/sdk'),
 
   /** Подсказки тегов: теги документов выбранных коллекций, видимых пользователю (контракт §8.5). */
   listKbTags: (scopes: KbScope[], q: string) => {

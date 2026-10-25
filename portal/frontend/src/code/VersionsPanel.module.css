@@ -1,0 +1,42 @@
+/* Версии проекта (концепция §5.13.13): время, причина и «Вернуть» в строке. */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 24px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.loading {
+  height: 120px;
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--p-line);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.time {
+  color: var(--p-text-muted);
+}
+
+.reason {
+  color: var(--p-text);
+}

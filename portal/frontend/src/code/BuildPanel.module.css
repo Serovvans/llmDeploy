@@ -1,0 +1,210 @@
+/* Панель «Сборка» (концепция §5.13.8): свёрнута 44 px — только «Путь до CoGIS», развёрнута 240 px. */
+.panel {
+  grid-area: build;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 44px;
+  border-top: 1px solid var(--p-line);
+  background: var(--p-bg);
+}
+
+.expanded {
+  height: 240px;
+}
+
+.route {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  height: 43px;
+  padding: 0 8px 0 16px;
+  white-space: nowrap;
+}
+
+.stations {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.stations > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sep {
+  color: var(--p-text-muted);
+}
+
+.station,
+.stationText {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+}
+
+.station {
+  cursor: pointer;
+}
+
+.station:hover {
+  background: var(--p-surface-2);
+}
+
+.station:focus-visible,
+.stationText:focus-visible,
+.messageButton:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+}
+
+.ok {
+  color: var(--p-text);
+}
+
+.error {
+  flex: none;
+  color: var(--p-error-text);
+}
+
+.warning {
+  flex: none;
+  color: var(--p-warning-icon);
+}
+
+.mutedIcon {
+  color: var(--p-text-muted);
+}
+
+.toggle {
+  margin-left: auto;
+}
+
+.disabled {
+  overflow: hidden;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  text-overflow: ellipsis;
+}
+
+.messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--p-line);
+}
+
+.stale {
+  padding: 8px 16px 0;
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.tabs {
+  flex: none;
+  padding: 0 16px;
+}
+
+.listScroll {
+  flex: 1;
+  min-height: 0;
+  border-top: 1px solid var(--p-line);
+}
+
+.list {
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+}
+
+.note {
+  padding: 8px 16px 0;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.message {
+  display: block;
+}
+
+.messageInner {
+  display: grid;
+  grid-template-columns: 16px minmax(160px, max-content) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 16px;
+  border: 0;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+}
+
+.messageInner svg {
+  margin-top: 2px;
+}
+
+.messageButton {
+  cursor: pointer;
+}
+
+.messageButton:hover {
+  background: var(--p-surface-2);
+}
+
+.place {
+  color: var(--p-accent);
+  text-decoration: underline;
+}
+
+.placeText {
+  color: var(--p-text);
+}
+
+.mono {
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+}
+
+.text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.footer {
+  flex: none;
+  overflow: hidden;
+  padding: 6px 16px;
+  border-top: 1px solid var(--p-line);
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

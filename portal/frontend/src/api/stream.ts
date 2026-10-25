@@ -1,6 +1,6 @@
 /** Разбор потока событий портала (контракт §6.1): `event:` и одна строка `data:` с JSON, пустая строка — конец события. */
 
-import type { DocparseField, Source, SqlCheck, SqlDanger, SqlRun } from './types';
+import type { CodeEdit, DocparseField, Source, SqlCheck, SqlDanger, SqlRun } from './types';
 
 /** События потоков ответа и разбора документа (контракт §6.2, §6.4). Событие неизвестного типа разбор пропускает. */
 export type StreamEvent =
@@ -17,6 +17,8 @@ export type StreamEvent =
   | { type: 'reasoning_delta'; text: string }
   | { type: 'delta'; text: string }
   | { type: 'title'; title: string }
+  | { type: 'code_fix'; stage: 'building' | 'fixing'; attempt: number; max_attempts: number }
+  | ({ type: 'code_edit' } & CodeEdit)
   | { type: 'done'; status: 'complete' | 'length_limit' }
   | { type: 'error'; code: string; message: string; details?: { page: number; pages_total: number } };
 
@@ -41,6 +43,8 @@ const KNOWN_EVENTS = new Set<string>([
   'reasoning_delta',
   'delta',
   'title',
+  'code_fix',
+  'code_edit',
   'done',
   'error',
 ]);

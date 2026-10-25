@@ -1,0 +1,36 @@
+/*
+ * Волнистые линии сообщений сборки (концепция §5.13.6, Д-50; контракт §1.1). Monaco рисует их картинкой
+ * `data:`, которую CSP портала не пропускает, — здесь та же волна из градиентов цветами портала.
+ * Правила темы Monaco добавляет в документ позже, поэтому селекторы специфичнее его `.monaco-editor .squiggly-*`.
+ */
+:root .monaco-editor .squiggly-error,
+:root .monaco-editor .squiggly-warning {
+  --p-squiggly: var(--p-error-text);
+  border-bottom: none;
+  background:
+    linear-gradient(135deg, transparent 0 35%, var(--p-squiggly) 35% 65%, transparent 65%) left bottom / 6px 3px repeat-x,
+    linear-gradient(45deg, transparent 0 35%, var(--p-squiggly) 35% 65%, transparent 65%) 3px bottom / 6px 3px repeat-x;
+}
+
+:root .monaco-editor .squiggly-warning {
+  --p-squiggly: var(--p-warning-icon);
+}
+
+:root .monaco-editor .squiggly-error::before,
+:root .monaco-editor .squiggly-warning::before {
+  background: none;
+}
+
+/*
+ * Подсказка у подчёркивания: быстрых исправлений в разделе нет (§5.13.6), а Monaco всё равно пишет
+ * в её строке действий «Исправления недоступны». Эта надпись — единственный элемент строки, который
+ * не кнопка; «Просмотреть проблему» остаётся.
+ */
+.monaco-hover .hover-row.status-bar .actions > div:not(.action-container) {
+  display: none;
+}
+
+/* Строка, к которой перешли из панели «Сборка», подсвечивается на 2 секунды (§5.13.8). */
+.monaco-editor .p-flash-line {
+  background: var(--p-surface-3);
+}

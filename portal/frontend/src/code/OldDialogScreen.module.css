@@ -1,0 +1,31 @@
+/* Прежний диалог: лента и заметка вместо панели запроса у низа колонки (§5.13.14). */
+.screen {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.notice {
+  flex: none;
+  width: 100%;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 12px 32px 24px;
+}
+
+.failed {
+  padding: 24px;
+}
+
+.loading {
+  height: 100%;
+  min-height: 200px;
+}

@@ -36,7 +36,7 @@ def test_previous_release_data_survives_without_summary_or_carried(settings: Set
     def query(statement: str, **params: Any) -> list[Any]:
         return asyncio.run(_run(target, (statement,), **params))
 
-    assert query("SELECT version_num FROM alembic_version") == [("0009",)]
+    assert query("SELECT version_num FROM alembic_version") == [("0010",)]
     assert query(
         "SELECT kind, summary, summary_until_position, carried_text, carried_source_id, "
         "carried_source_title FROM dialogs ORDER BY kind"

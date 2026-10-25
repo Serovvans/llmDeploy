@@ -37,6 +37,20 @@ describe('разбор потока событий', () => {
     ]);
   });
 
+  it('события помощника проекта: шаг цикла исправления и правка (контракт §7.5.10, §7.5.11)', async () => {
+    const edit = { status: 'proposed', files: [], rejected_files: [], incomplete: false, verification: null, decided_at: null };
+    const events = await collect(
+      streamOf(
+        'event: code_fix\ndata: {"stage":"building","attempt":0,"max_attempts":2}\n\n',
+        `event: code_edit\ndata: ${JSON.stringify(edit)}\n\n`,
+      ),
+    );
+    expect(events).toEqual([
+      { type: 'code_fix', stage: 'building', attempt: 0, max_attempts: 2 },
+      { type: 'code_edit', ...edit },
+    ]);
+  });
+
   it('собирает событие, разорванное между частями, в том числе посреди русской буквы', async () => {
     const bytes = new TextEncoder().encode('event: delta\ndata: {"text":"аренда"}\n\n');
     const cut = bytes.length - 12;

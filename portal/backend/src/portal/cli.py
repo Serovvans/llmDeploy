@@ -11,10 +11,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
+import yaml
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.exc import DBAPIError
 
+from portal.code.evaluation import EvalSetError, parse_tasks, summary
+from portal.code.evaluation import format_report as format_code_report
+from portal.code.ports import BuildUnavailableError
 from portal.core.app import create_app
 from portal.core.audit import read_audit
 from portal.core.clock import SystemClock
@@ -22,6 +26,7 @@ from portal.core.container import (
     AdminContainer,
     WorkerContainer,
     build_admin_container,
+    build_code_eval_container,
     build_container,
     build_worker_container,
 )
@@ -42,6 +47,7 @@ from portal.kb.explaining import FragmentExplainer
 from portal.kb.ports import (
     CollectionMismatchError,
     EmbeddingsUnavailableError,
+    KnowledgeUnavailableError,
     VectorIndexUnavailableError,
 )
 from portal.kb.qdrant import QdrantVectorIndex
@@ -204,6 +210,39 @@ async def _eval_search(
     return format_report(report)
 
 
+def _code_packages(settings: Settings) -> str:
+    """Офлайн-набор `code.packages`: строка на пакет, поля через табуляцию (§13.4)."""
+    return "".join(
+        f"{package.id}\t{package.version}\t{package.sha512}\n" for package in settings.code.packages
+    )
+
+
+async def _eval_code(settings: Settings, directory: Path, out: Path | None) -> str:
+    """Прогон контрольного набора раздела «Код» (§13.4); в базу ничего не пишет."""
+    if not settings.code.build.enabled:
+        raise ConfigError("Прогон набора требует включённой сборки (code.build.enabled).")
+    try:
+        raw = yaml.safe_load((directory / "tasks.yaml").read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        # Содержимое набора в сообщение не попадает: только вид ошибки.
+        raise ConfigError(f"Контрольный набор не читается: {type(error).__name__}") from error
+    container = build_code_eval_container(settings)
+    try:
+        try:
+            tasks = parse_tasks(
+                raw, container.code.templates, settings.code, settings.dialogs.message_max_chars
+            )
+        except EvalSetError as error:
+            raise ConfigError(f"Контрольный набор не по формату: {error}") from error
+        results = [await container.evaluator.run(task) for task in tasks]
+    finally:
+        await container.aclose()
+    if out is not None:
+        report = {"groups": summary(results), "tasks": [item.data() for item in results]}
+        out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return format_code_report(results)
+
+
 async def _reprocess(settings: Settings, action: str, all_ready: bool, images: bool) -> str:
     """Команды массовой переобработки: им нужна только база (§13.5)."""
     clock = SystemClock()
@@ -309,6 +348,10 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         help="выключить улучшение поиска на этот прогон; можно несколько раз",
     )
+    commands.add_parser("code-packages", help="напечатать офлайн-набор пакетов раздела «Код»")
+    eval_code = commands.add_parser("eval-code", help="прогнать контрольный набор раздела «Код»")
+    eval_code.add_argument("--set", type=Path, required=True, help="каталог набора (tasks.yaml)")
+    eval_code.add_argument("--out", type=Path, help="записать итог в JSON")
     return parser
 
 
@@ -332,7 +375,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         settings = load_settings(os.environ)
-        if args.command == "migrate":
+        if args.command == "code-packages":
+            # Журнал не включается: вывод разбирает скрипт загрузки набора (§13.4).
+            sys.stdout.write(_code_packages(settings))
+        elif args.command == "eval-code":
+            sys.stdout.write(asyncio.run(_eval_code(settings, args.set, args.out)))
+        elif args.command == "migrate":
             migrate(settings)
         elif args.command == "serve":
             _serve(settings)
@@ -376,6 +424,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         EmbeddingsUnavailableError,
         ModelUnavailableError,
         ModelOverloadedError,
+        KnowledgeUnavailableError,
+        BuildUnavailableError,
         OSError,
     ) as error:
         sys.stderr.write(f"Служба недоступна: {type(error).__name__}\n")

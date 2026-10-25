@@ -1,0 +1,132 @@
+/* Мастер «Новый GPTool» — колонка 760 px по центру, прокручивается целиком (§5.13.4). */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  width: 100%;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 24px 32px 48px;
+}
+
+.part {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.partTitle {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.tool {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: var(--p-bg);
+}
+
+.toolHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.toolTitle {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.iconField {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.params {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.paramsTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+/* Имя, тип, «Обяз.», две подписи и удаление — одна строка слева направо (§5.13.4). */
+.paramHead,
+.paramRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.1fr) 40px minmax(0, 1fr) minmax(0, 1fr) 32px;
+  gap: 8px;
+  align-items: start;
+}
+
+.paramHead {
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.required {
+  display: flex;
+  justify-content: center;
+  padding-top: 6px;
+}
+
+.database {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.database .muted {
+  padding-left: 26px;
+}
+
+.counter,
+.counterOver {
+  display: block;
+}
+
+.counterOver {
+  color: var(--p-error-text);
+}
+
+.error {
+  margin-top: 4px;
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.submit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

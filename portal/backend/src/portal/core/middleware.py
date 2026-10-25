@@ -22,6 +22,8 @@ _SAFE_METHODS = frozenset({"GET", "HEAD"})
 _API_PREFIX = "/api/"
 _UNAVAILABLE = (OperationalError, InterfaceError, OSError, TimeoutError)
 BODY_REFUSAL_KEY = "portal.body_refusal"
+# Единственное исключение из `no-store`: справочник SDK со своим `ETag` (§1.1, §7.5.14).
+_OWN_CACHE_PATHS = frozenset({"/api/code/sdk"})
 
 
 @dataclass(frozen=True)
@@ -96,8 +98,10 @@ class PortalMiddleware:
         async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
                 status["code"] = message["status"]
-                if is_api:
-                    MutableHeaders(scope=message)["Cache-Control"] = "no-store"
+                headers = MutableHeaders(scope=message)
+                own_cache = scope["path"] in _OWN_CACHE_PATHS and "cache-control" in headers
+                if is_api and not own_cache:
+                    headers["Cache-Control"] = "no-store"
             await send(message)
 
         try:

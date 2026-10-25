@@ -1,10 +1,13 @@
-import { Button, Gapped, Modal, Radio, RadioGroup, Select } from '@skbkontur/react-ui';
+import { Button, Gapped, Input, Modal, Radio, RadioGroup, Select } from '@skbkontur/react-ui';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
-import { api, NetworkError } from '../../api/client';
-import type { Dialog, DialogKind, MemoryPair, Message } from '../../api/types';
+import { api, ApiError, isApiError, NetworkError } from '../../api/client';
+import type { CodeProject, Dialog, DialogKind, MemoryPair, Message } from '../../api/types';
+import { ProjectNameField } from '../../code/ProjectNameField';
+import { projectNameError, projectNameServerError } from '../../code/rules';
 import { draftNotice, type DraftExit } from '../../memory/draft';
 import { useSummaryDraft } from '../../memory/useSummaryDraft';
+import { useSession } from '../../session/SessionContext';
 import { texts } from '../../texts';
 import { Notice } from '../Notice';
 import { exitOf, saveFailure, type SaveFailure } from './CompressModal';
@@ -15,6 +18,19 @@ const t = texts.memory;
 const tt = t.transfer;
 type Target = Exclude<DialogKind, 'docparse'>;
 const TARGETS: Target[] = ['chat', 'sql', 'cogis'];
+/** При включённом разделе «Код» третий вариант — «Код» вместо «Помощник CoGIS» (§4.9, 0.9). */
+const CODE_TARGETS: Target[] = ['chat', 'sql', 'code'];
+const tc = texts.workshop.carriedTool;
+
+function defaultTarget(kind: DialogKind, codeOn: boolean): Target {
+  if (kind === 'docparse') {
+    return 'chat';
+  }
+  if (kind === 'code' || kind === 'cogis') {
+    return codeOn ? 'code' : 'cogis';
+  }
+  return kind;
+}
 /** Быстрый ответ не мигает индикатором загрузки (концепция §4.9). */
 const LOADING_DELAY_MS = 300;
 /** Начало вопроса в пункте выбора ответа — короче строки описи: пункт списка в одну строку. */
@@ -50,6 +66,8 @@ interface TransferModalProps {
   keepRecent: number;
   maxChars: number;
   onDone: (dialog: Dialog) => void;
+  /** Перенос в «Код» создал проект (0.9): открывается его страница. */
+  onProjectCreated: (project: CodeProject) => void;
   onExit: (exit: DraftExit) => void;
   onClose: () => void;
 }
@@ -60,7 +78,12 @@ export function TransferModal(props: TransferModalProps) {
   const continuing = until !== null;
   const draft = useSummaryDraft(source.id, onExit);
   const { state } = draft;
-  const [target, setTarget] = useState<Target>(source.kind === 'docparse' ? 'chat' : source.kind);
+  const { config } = useSession();
+  const codeOn = config?.code.enabled === true;
+  const [target, setTarget] = useState<Target>(() => defaultTarget(source.kind, codeOn));
+  const [projectName, setProjectName] = useState('');
+  const [nameError, setNameError] = useState<string | null>(null);
+  const nameInput = useRef<Input>(null);
   const [what, setWhat] = useState<What>('summary');
   const [pairs, setPairs] = useState<MemoryPair[] | null>(null);
   const [answerId, setAnswerId] = useState<string | null>(null);
@@ -193,20 +216,53 @@ export function TransferModal(props: TransferModalProps) {
     } else if (state.text.length > maxChars) {
       problem = tt.tooLong(maxChars);
     }
+    const nameProblem = target === 'code' ? projectNameError(projectName) : null;
+    setNameError(nameProblem);
     if (problem) {
       setFailure({ notice: null, field: problem });
+    }
+    if (problem || nameProblem) {
+      if (!problem) {
+        nameInput.current?.focus();
+      }
       return;
     }
     setSaving(true);
     setFailure(null);
+    const carried = { text: state.text, source_dialog_id: source.id };
     try {
-      props.onDone(await api.createDialog(target, { text: state.text, source_dialog_id: source.id }));
+      if (target === 'code') {
+        // Новый проект — каркас мастера: один инструмент без параметров, подписи по умолчанию (API-42).
+        const tool = { title_ru: tc.titleRu, title_en: tc.titleEn, category: tc.category, icon: tc.icon };
+        const wizard = { name: projectName, tools: [{ ...tool, uses_database: false, description: '', inputs: [], outputs: [] }] };
+        const created = await api.createCodeProject({ source: 'wizard', wizard, carried });
+        props.onProjectCreated(created.project);
+      } else {
+        props.onDone(await api.createDialog(target, carried));
+      }
     } catch (error) {
       setSaving(false);
       const gone = exitOf(error);
       if (gone) {
         onExit(gone);
         return;
+      }
+      if (target === 'code' && error instanceof ApiError) {
+        const field = error.fields.find((item) => item.field === 'name' || item.field === 'wizard.name');
+        const text = isApiError(error, 'project_name_taken')
+          ? texts.workshop.name.taken
+          : field
+            ? projectNameServerError(field.code, projectName)
+            : null;
+        if (text) {
+          setNameError(text);
+          nameInput.current?.focus();
+          return;
+        }
+        if (isApiError(error, 'project_limit_reached')) {
+          setFailure({ notice: { text: texts.workshop.limitReached(Number(error.details.max)), action: null }, field: null });
+          return;
+        }
       }
       setFailure(
         saveFailure(error, 'carried.text', {
@@ -222,6 +278,9 @@ export function TransferModal(props: TransferModalProps) {
   const verbatimOffered = !continuing && answers.length > 0;
   const showField = what === 'verbatim' || state.phase !== 'idle';
   const title = source.title ?? texts.dialogs[source.kind].newLabel;
+  const targets = codeOn ? CODE_TARGETS : TARGETS;
+  // Прежний диалог помощника CoGIS при включённом разделе «Код» — только для чтения: панели памяти нет (§4.9).
+  const readOnly = codeOn && source.kind === 'cogis';
   const intro = [continuing ? tt.continueIntro : null, source.kind === 'docparse' && what === 'summary' ? tt.docparseIntro : null]
     .filter(Boolean)
     .join('. ');
@@ -230,7 +289,12 @@ export function TransferModal(props: TransferModalProps) {
   const notice =
     failure?.notice ??
     (state.failure
-      ? draftNotice(state.failure, state.text.length > 0, { purpose: 'transfer', keepRecent: props.keepRecent, verbatim: verbatimOffered })
+      ? draftNotice(state.failure, state.text.length > 0, {
+          purpose: 'transfer',
+          keepRecent: props.keepRecent,
+          verbatim: verbatimOffered,
+          readOnly,
+        })
       : null);
   const answerNotice =
     answer === 'failed' || answer === 'network' ? (
@@ -254,7 +318,7 @@ export function TransferModal(props: TransferModalProps) {
             <div role="group" aria-labelledby={whereId}>
               <RadioGroup<Target> value={target} onValueChange={setTarget} disabled={saving}>
                 <Gapped gap={24}>
-                  {TARGETS.map((kind) => (
+                  {targets.map((kind) => (
                     <Radio<Target> key={kind} value={kind}>
                       {tt.kinds[kind]}
                     </Radio>
@@ -263,6 +327,21 @@ export function TransferModal(props: TransferModalProps) {
               </RadioGroup>
             </div>
           </div>
+          {target === 'code' && (
+            <div className={styles.row}>
+              <span />
+              <ProjectNameField
+                value={projectName}
+                error={nameError}
+                disabled={saving}
+                inputRef={nameInput}
+                onChange={(value) => {
+                  setProjectName(value);
+                  setNameError(null);
+                }}
+              />
+            </div>
+          )}
           {intro && <p className={styles.intro}>{intro}</p>}
           {!continuing && (
             <div className={styles.row}>

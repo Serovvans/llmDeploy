@@ -1,0 +1,989 @@
+# Контрольный набор раздела «Код» (docs/portal-design.md §5.4, §10 п. 38;
+# формат — docs/portal-api.md §13.4). Ведёт codegen-evaluator.
+#
+# Прогон: `portal eval-code --set <каталог> [--out <файл.json>]` в контейнере portal-api
+# (тот же путь, что у сотрудника: каркас → вопрос помощнику → правка → сборка → цикл
+# исправления). Сравнение двух прогонов: `python compare.py было.json стало.json`.
+#
+# Поля задачи — по контракту. `request: null` у задач мастера — вопросом служит
+# assistant_request мастера (code.prompts.wizard_request и описания инструментов), как у
+# сотрудника. Ожидаемое сверх итога сборки (обязательные обращения к API, запрещённые
+# конструкции) — в expect.yaml; задачи «Объяснить» — в explain.yaml.
+
+# ---------------------------------------------------------------- база данных
+- id: db-street-search
+  group: database
+  project:
+    wizard:
+      name: StreetSearch
+      tools:
+        - title_ru: Найти улицы по названию
+          title_en: Find streets by name
+          category: Адреса
+          icon: fa fa-search
+          uses_database: true
+          description: >-
+            Сотрудник вводит часть названия улицы, например «Лен». Нужно найти в таблице
+            streets все улицы, в названии которых есть этот текст, без учёта больших и
+            маленьких букв, и выдать их названия через запятую по алфавиту, не больше 50.
+            Если ничего не нашлось — так и написать.
+          inputs:
+            - { name: NamePart, type: string, required: true, title_ru: Часть названия, title_en: Name part }
+          outputs:
+            - { name: Result, type: string, title_ru: Найденные улицы, title_en: Found streets }
+  schema: |
+    CREATE TABLE streets (
+        id serial PRIMARY KEY,
+        name text NOT NULL,
+        district text
+    );
+  action: write
+  request: null
+
+- id: db-permit-status
+  group: database
+  project:
+    wizard:
+      name: PermitDesk
+      tools:
+        - title_ru: Сменить статус разрешения
+          title_en: Change permit status
+          category: Разрешения
+          icon: fa fa-check-square-o
+          uses_database: true
+          description: >-
+            По номеру разрешения на строительство меняем его статус в таблице permits и
+            ставим время изменения. Допустимые статусы: «на рассмотрении», «выдано»,
+            «отказано» — другой статус не принимать, а сказать сотруднику, какие можно.
+            Если разрешения с таким номером нет — сообщить об этом.
+          inputs:
+            - { name: PermitNumber, type: string, required: true, title_ru: Номер разрешения, title_en: Permit number }
+            - { name: NewStatus, type: string, required: true, title_ru: Новый статус, title_en: New status }
+          outputs:
+            - { name: Result, type: string, title_ru: Результат, title_en: Result }
+  schema: |
+    CREATE TABLE permits (
+        number text PRIMARY KEY,
+        status text NOT NULL,
+        updated_at timestamptz
+    );
+  action: write
+  request: null
+
+- id: db-buildings-count
+  group: database
+  project:
+    wizard:
+      name: BuildingStats
+      tools:
+        - title_ru: Число домов в районе
+          title_en: Buildings in district
+          category: Статистика
+          icon: fa fa-building
+          uses_database: true
+          description: >-
+            Посчитать, сколько домов в выбранном районе и сколько из них выше заданной
+            этажности. Данные — в таблице buildings. Ответ одной строкой, например
+            «В районе Центральный 120 домов, выше 9 этажей — 15».
+          inputs:
+            - { name: District, type: string, required: true, title_ru: Район, title_en: District }
+            - { name: MinFloors, type: int, required: true, title_ru: Этажей больше чем, title_en: Floors above }
+          outputs:
+            - { name: Result, type: string, title_ru: Итог, title_en: Summary }
+  schema: |
+    CREATE TABLE buildings (
+        id serial PRIMARY KEY,
+        district text NOT NULL,
+        address text NOT NULL,
+        floors integer
+    );
+  action: write
+  request: null
+
+- id: db-purge-events
+  group: database
+  project:
+    wizard:
+      name: EventCleanup
+      tools:
+        - title_ru: Удалить старые события журнала
+          title_en: Purge old events
+          category: Обслуживание
+          icon: fa fa-trash
+          uses_database: true
+          description: >-
+            Удалить из таблицы events записи старше заданного числа дней. Меньше 30 дней
+            удалять нельзя — сказать об этом. В результате написать, сколько записей
+            удалено.
+          inputs:
+            - { name: Days, type: int, required: true, title_ru: Старше дней, title_en: Older than days }
+          outputs:
+            - { name: Result, type: string, title_ru: Результат, title_en: Result }
+  schema: |
+    CREATE TABLE events (
+        id bigserial PRIMARY KEY,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        message text
+    );
+  action: write
+  request: null
+
+- id: db-appeal-register
+  group: database
+  project:
+    wizard:
+      name: Appeals
+      tools:
+        - title_ru: Зарегистрировать обращение
+          title_en: Register appeal
+          category: Обращения граждан
+          icon: fa fa-inbox
+          uses_database: true
+          description: >-
+            Записать обращение жителя в таблицу appeals: имя, телефон и текст обращения.
+            Телефон оставить только цифрами, их должно быть 10 или 11. В результате
+            выдать номер, который база присвоила обращению.
+          inputs:
+            - { name: ApplicantName, type: string, required: true, title_ru: Имя заявителя, title_en: Applicant name }
+            - { name: Phone, type: string, required: true, title_ru: Телефон, title_en: Phone }
+            - { name: AppealText, type: string, required: true, title_ru: Текст обращения, title_en: Appeal text }
+          outputs:
+            - { name: Result, type: string, title_ru: Номер обращения, title_en: Appeal number }
+  schema: |
+    CREATE TABLE appeals (
+        id serial PRIMARY KEY,
+        applicant text NOT NULL,
+        phone text NOT NULL,
+        body text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+    );
+  action: write
+  request: null
+
+- id: db-contact-duplicate
+  group: database
+  project:
+    example: ContactBook
+  schema: |
+    CREATE TABLE contacts (
+        id serial PRIMARY KEY,
+        organization text NOT NULL,
+        email text NOT NULL
+    );
+  action: write
+  request: >-
+    Перед добавлением проверьте, нет ли уже в таблице contacts такого email (большие и
+    маленькие буквы не важны). Если есть — ничего не добавлять, а в результате написать,
+    что такой контакт уже есть и у какой организации.
+
+# ---------------------------------------------------------------- геометрия
+- id: geo-parcel-area
+  group: geometry
+  project:
+    wizard:
+      name: ParcelArea
+      tools:
+        - title_ru: Площадь участка
+          title_en: Parcel area
+          category: Кадастр
+          icon: fa fa-map
+          uses_database: true
+          description: >-
+            По кадастровому номеру найти участок в таблице parcels и посчитать его площадь
+            в гектарах с двумя знаками после запятой. Геометрия хранится в проекции 3857,
+            площадь нужна настоящая, на местности. Нет участка — так и сказать.
+          inputs:
+            - { name: CadastralNumber, type: string, required: true, title_ru: Кадастровый номер, title_en: Cadastral number }
+          outputs:
+            - { name: Result, type: string, title_ru: Площадь, title_en: Area }
+  schema: |
+    -- PostGIS
+    CREATE TABLE parcels (
+        cad_number text PRIMARY KEY,
+        address text,
+        geom geometry(MultiPolygon, 3857) NOT NULL
+    );
+  action: write
+  request: null
+
+- id: geo-poi-radius
+  group: geometry
+  project:
+    wizard:
+      name: NearbyObjects
+      tools:
+        - title_ru: Объекты рядом с точкой
+          title_en: Objects near point
+          category: Поиск
+          icon: fa fa-crosshairs
+          uses_database: true
+          description: >-
+            Сотрудник вводит широту, долготу и радиус в метрах. Найти в таблице poi объекты
+            в этом радиусе и выдать их названия с расстоянием в метрах, от ближайшего,
+            не больше 20 штук. Радиус больше 10 км не принимать.
+          inputs:
+            - { name: Latitude, type: double, required: true, title_ru: Широта, title_en: Latitude }
+            - { name: Longitude, type: double, required: true, title_ru: Долгота, title_en: Longitude }
+            - { name: RadiusMeters, type: double, required: true, title_ru: "Радиус, м", title_en: "Radius, m" }
+          outputs:
+            - { name: Result, type: string, title_ru: Найденные объекты, title_en: Found objects }
+  schema: |
+    -- PostGIS
+    CREATE TABLE poi (
+        id serial PRIMARY KEY,
+        name text NOT NULL,
+        kind text,
+        geom geometry(Point, 4326) NOT NULL
+    );
+  action: write
+  request: null
+
+- id: geo-zone-by-point
+  group: geometry
+  project:
+    wizard:
+      name: ZoneLookup
+      tools:
+        - title_ru: Зона по координатам
+          title_en: Zone by coordinates
+          category: Градостроительство
+          icon: fa fa-map-marker
+          uses_database: true
+          description: >-
+            По широте и долготе определить, в какую территориальную зону из таблицы zones
+            попадает точка, и выдать код и название зоны. Если точка не попала ни в одну
+            зону — сообщить. Широта от -90 до 90, долгота от -180 до 180.
+          inputs:
+            - { name: Latitude, type: double, required: true, title_ru: Широта, title_en: Latitude }
+            - { name: Longitude, type: double, required: true, title_ru: Долгота, title_en: Longitude }
+          outputs:
+            - { name: Result, type: string, title_ru: Зона, title_en: Zone }
+  schema: |
+    -- PostGIS
+    CREATE TABLE zones (
+        code text PRIMARY KEY,
+        title text NOT NULL,
+        geom geometry(MultiPolygon, 4326) NOT NULL
+    );
+  action: write
+  request: null
+
+- id: geo-distance-calc
+  group: geometry
+  project:
+    wizard:
+      name: GeoDistance
+      tools:
+        - title_ru: Расстояние между точками
+          title_en: Distance between points
+          category: Измерения
+          icon: fa fa-arrows-h
+          uses_database: false
+          description: >-
+            Посчитать расстояние по поверхности Земли между двумя точками, заданными
+            широтой и долготой, без базы данных. Результат — в километрах с тремя знаками
+            после запятой. Неверные координаты не принимать.
+          inputs:
+            - { name: Latitude1, type: double, required: true, title_ru: Широта первой точки, title_en: Latitude 1 }
+            - { name: Longitude1, type: double, required: true, title_ru: Долгота первой точки, title_en: Longitude 1 }
+            - { name: Latitude2, type: double, required: true, title_ru: Широта второй точки, title_en: Latitude 2 }
+            - { name: Longitude2, type: double, required: true, title_ru: Долгота второй точки, title_en: Longitude 2 }
+          outputs:
+            - { name: Result, type: string, title_ru: "Расстояние, км", title_en: "Distance, km" }
+  schema: null
+  action: write
+  request: null
+
+# ---------------------------------------------------------------- файлы
+- id: files-csv-import
+  group: files
+  project:
+    wizard:
+      name: AddressImport
+      tools:
+        - title_ru: Загрузить адреса из CSV
+          title_en: Import addresses from CSV
+          category: Адреса
+          icon: fa fa-upload
+          uses_database: true
+          description: >-
+            На сервере лежит CSV-файл с колонками «улица;дом» и строкой заголовка. Нужно
+            загрузить все строки в таблицу addresses. Пустые строки пропускать, строки с
+            ошибкой не загружать, а в результате написать, сколько загружено и номера
+            строк с ошибками (не больше 20). Файла нет — сказать.
+          inputs:
+            - { name: FilePath, type: string, required: true, title_ru: Путь к файлу на сервере, title_en: File path on server }
+          outputs:
+            - { name: Result, type: string, title_ru: Результат загрузки, title_en: Import result }
+  schema: |
+    CREATE TABLE addresses (
+        id serial PRIMARY KEY,
+        street text NOT NULL,
+        house text NOT NULL
+    );
+  action: write
+  request: null
+
+- id: files-text-stats
+  group: files
+  project:
+    wizard:
+      name: FileStats
+      tools:
+        - title_ru: Сведения о текстовом файле
+          title_en: Text file info
+          category: Файлы
+          icon: fa fa-file-text-o
+          uses_database: false
+          description: >-
+            По пути к файлу на сервере выдать размер в килобайтах, число строк и дату
+            последнего изменения. Если файла нет или путь — это папка, сказать об этом
+            понятными словами.
+          inputs:
+            - { name: FilePath, type: string, required: true, title_ru: Путь к файлу, title_en: File path }
+          outputs:
+            - { name: Result, type: string, title_ru: Сведения, title_en: File info }
+  schema: null
+  action: write
+  request: null
+
+- id: files-json-summary
+  group: files
+  project:
+    wizard:
+      name: SurveySummary
+      tools:
+        - title_ru: Сводка по обследованию
+          title_en: Survey summary
+          category: Отчёты
+          icon: fa fa-list-alt
+          uses_database: false
+          description: >-
+            Есть JSON-файл с массивом объектов обследования, у каждого поля "type" и
+            "condition". Посчитать, сколько объектов каждого типа и сколько из них в
+            состоянии "плохое". Выдать строками «тип: всего N, в плохом состоянии M».
+          inputs:
+            - { name: JsonPath, type: string, required: true, title_ru: Путь к JSON-файлу, title_en: JSON file path }
+          outputs:
+            - { name: Result, type: string, title_ru: Сводка, title_en: Summary }
+  schema: null
+  action: write
+  request: null
+
+- id: files-export-csv
+  group: files
+  project:
+    wizard:
+      name: ParcelExport
+      tools:
+        - title_ru: Выгрузить участки района в CSV
+          title_en: Export district parcels to CSV
+          category: Кадастр
+          icon: fa fa-download
+          uses_database: true
+          description: >-
+            Выгрузить из таблицы parcels все участки выбранного района в CSV-файл в
+            указанной папке на сервере: кадастровый номер, адрес, площадь в квадратных
+            метрах. Разделитель — точка с запятой, кодировка UTF-8. Имя файла — район и
+            сегодняшняя дата. В результате выдать полный путь к файлу и число строк.
+          inputs:
+            - { name: District, type: string, required: true, title_ru: Район, title_en: District }
+            - { name: OutputFolder, type: string, required: true, title_ru: Папка для файла, title_en: Output folder }
+          outputs:
+            - { name: Result, type: string, title_ru: Файл выгрузки, title_en: Export file }
+  schema: |
+    -- PostGIS
+    CREATE TABLE parcels (
+        cad_number text PRIMARY KEY,
+        district text NOT NULL,
+        address text,
+        geom geometry(MultiPolygon, 3857) NOT NULL
+    );
+  action: write
+  request: null
+
+# ---------------------------------------------------------------- несколько инструментов
+- id: multi-street-registry
+  group: multi-tool
+  project:
+    wizard:
+      name: StreetRegistry
+      tools:
+        - title_ru: Добавить улицу
+          title_en: Add street
+          category: Адреса
+          icon: fa fa-plus
+          uses_database: true
+          description: >-
+            Добавить улицу в таблицу streets с названием и районом. Если в этом районе
+            уже есть улица с таким названием — не добавлять и сообщить.
+          inputs:
+            - { name: StreetName, type: string, required: true, title_ru: Название улицы, title_en: Street name }
+            - { name: District, type: string, required: true, title_ru: Район, title_en: District }
+          outputs:
+            - { name: Result, type: string, title_ru: Результат, title_en: Result }
+        - title_ru: Переименовать улицу
+          title_en: Rename street
+          category: Адреса
+          icon: fa fa-pencil
+          uses_database: true
+          description: >-
+            Поменять название улицы по её номеру в таблице streets. Сообщить старое и
+            новое название; если улицы с таким номером нет — сказать.
+          inputs:
+            - { name: StreetId, type: int, required: true, title_ru: Номер улицы, title_en: Street id }
+            - { name: NewName, type: string, required: true, title_ru: Новое название, title_en: New name }
+          outputs:
+            - { name: Result, type: string, title_ru: Результат, title_en: Result }
+  schema: |
+    CREATE TABLE streets (
+        id serial PRIMARY KEY,
+        name text NOT NULL,
+        district text NOT NULL
+    );
+  action: write
+  request: null
+
+- id: multi-cadastre-text-tools
+  group: multi-tool
+  project:
+    wizard:
+      name: CadastreText
+      tools:
+        - title_ru: Проверить кадастровый номер
+          title_en: Check cadastral number
+          category: Кадастр
+          icon: fa fa-check
+          uses_database: false
+          description: >-
+            Проверить, что кадастровый номер записан в виде «47:14:1203001:814» — четыре
+            части через двоеточие, только цифры, во второй части две цифры, в третьей 6
+            или 7. Ответить «номер верный» или объяснить, что не так.
+          inputs:
+            - { name: CadastralNumber, type: string, required: true, title_ru: Кадастровый номер, title_en: Cadastral number }
+          outputs:
+            - { name: Result, type: string, title_ru: Проверка, title_en: Check result }
+        - title_ru: Привести адрес к единому виду
+          title_en: Normalize address
+          category: Адреса
+          icon: fa fa-magic
+          uses_database: false
+          description: >-
+            Убрать лишние пробелы, заменить «ул», «пр-т», «д» на «улица», «проспект»,
+            «дом», первая буква каждого слова названия — заглавная.
+          inputs:
+            - { name: Address, type: string, required: true, title_ru: Адрес, title_en: Address }
+          outputs:
+            - { name: Result, type: string, title_ru: Адрес в едином виде, title_en: Normalized address }
+        - title_ru: Квартал по кадастровому номеру
+          title_en: Block from cadastral number
+          category: Кадастр
+          icon: fa fa-th
+          uses_database: false
+          description: >-
+            Из кадастрового номера участка получить номер кадастрового квартала — первые
+            три части через двоеточие. Неверный номер не принимать.
+          inputs:
+            - { name: CadastralNumber, type: string, required: true, title_ru: Кадастровый номер, title_en: Cadastral number }
+          outputs:
+            - { name: Result, type: string, title_ru: Кадастровый квартал, title_en: Cadastral block }
+  schema: null
+  action: write
+  request: null
+
+- id: multi-add-delete-tool
+  group: multi-tool
+  project:
+    example: ContactBook
+  schema: |
+    CREATE TABLE contacts (
+        id serial PRIMARY KEY,
+        organization text NOT NULL,
+        email text NOT NULL
+    );
+  action: write
+  request: >-
+    Добавьте в проект второй инструмент «Удалить контакт»: по email удаляет запись из той
+    же таблицы contacts и пишет в результате, сколько записей удалено. Категория та же,
+    иконка — корзина.
+
+# ---------------------------------------------------------------- исправление сборки
+- id: fix-missing-using
+  group: fix
+  project:
+    name: RoadRepair
+    packages: [Npgsql]
+    files:
+      GpToolFactory.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+
+        namespace RoadRepair
+        {
+            public sealed class GpToolFactory : IGpToolFactory
+            {
+                public Type[] GetToolTypes()
+                {
+                    return new Type[] { typeof(CloseRepairTool) };
+                }
+            }
+        }
+      CloseRepairTool.cs: |
+        using System;
+        using Atemiko.eLiteMap.Geodatabase;
+        using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
+
+        namespace RoadRepair
+        {
+            [GpToolIcon("fa fa-road")]
+            [GpCategory("Дороги")]
+            [GpDescription("Закрыть заявку на ремонт", "Close repair request")]
+            public sealed class CloseRepairTool : GpTool
+            {
+                [GpRequired]
+                [GpDescription("Номер заявки", "Request number")]
+                public string? RequestNumber { get; set; }
+
+                [GpRequired]
+                [GpDescription("Подключение к базе", "Database connection")]
+                public Workspace? TargetWorkspace { get; set; }
+
+                [GpDescription("Результат выполнения", "Execution result")]
+                public string? Result { get; private set; }
+
+                public override void ValidateInput()
+                {
+                    if (string.IsNullOrWhiteSpace(RequestNumber))
+                    {
+                        throw new UserException("Не задан номер заявки.");
+                    }
+                }
+
+                public override void InnerExecute()
+                {
+                    using var connection = new NpgsqlConnection(GetConnectionString());
+                    connection.Open();
+                    using var command = new NpgsqlCommand(
+                        "UPDATE repair_requests SET status = 'closed', closed_at = now() WHERE number = @number",
+                        connection);
+                    command.Parameters.AddWithValue("number", RequestNumber!.Trim());
+                    var updated = command.ExecuteNonQuery();
+                    Result = updated == 0 ? "Заявка не найдена." : "Заявка закрыта.";
+                }
+
+                private string GetConnectionString()
+                {
+                    var properties = TargetWorkspace?.WorkspaceName?.ConnectionProperties
+                        ?? throw new UserException("Не задано подключение к базе данных.");
+                    if (properties.TryGetValue(WorkspaceName.PropertyNames.ConnectionString, out var value)
+                        && value is string connectionString
+                        && !string.IsNullOrWhiteSpace(connectionString))
+                    {
+                        return connectionString;
+                    }
+
+                    throw new UserException("В подключении к базе нет строки подключения.");
+                }
+            }
+        }
+  schema: null
+  action: fix
+  request: Исправить ошибки сборки
+
+- id: fix-tool-not-in-factory
+  group: fix
+  project:
+    name: CadastreCheck
+    packages: []
+    files:
+      GpToolFactory.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+
+        namespace CadastreCheck
+        {
+            public sealed class GpToolFactory : IGpToolFactory
+            {
+                public Type[] GetToolTypes()
+                {
+                    return new Type[] { typeof(CheckNumberTool) };
+                }
+            }
+        }
+      CheckNumberTool.cs: |
+        using System;
+        using System.Text.RegularExpressions;
+        using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
+
+        namespace CadastreCheck
+        {
+            [GpToolIcon("fa fa-check")]
+            [GpCategory("Кадастр")]
+            [GpDescription("Проверить кадастровый номер", "Check cadastral number")]
+            public sealed class CheckNumberTool : GpTool
+            {
+                [GpRequired]
+                [GpDescription("Кадастровый номер", "Cadastral number")]
+                public string? Number { get; set; }
+
+                [GpDescription("Проверка", "Check result")]
+                public string? Result { get; private set; }
+
+                public override void ValidateInput()
+                {
+                    if (string.IsNullOrWhiteSpace(Number))
+                    {
+                        throw new UserException("Не задан кадастровый номер.");
+                    }
+                }
+
+                public override void InnerExecute()
+                {
+                    var valid = Regex.IsMatch(Number!.Trim(), @"^\d{2}:\d{2}:\d{6,7}:\d+$");
+                    Result = valid ? "Номер верный." : "Номер записан неверно.";
+                }
+            }
+        }
+      BlockFromNumberTool.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
+
+        namespace CadastreCheck
+        {
+            [GpToolIcon("fa fa-th")]
+            [GpCategory("Кадастр")]
+            [GpDescription("Квартал по кадастровому номеру", "Block from cadastral number")]
+            public sealed class BlockFromNumberTool : GpTool
+            {
+                [GpRequired]
+                [GpDescription("Кадастровый номер", "Cadastral number")]
+                public string? Number { get; set; }
+
+                [GpDescription("Кадастровый квартал", "Cadastral block")]
+                public string? Result { get; private set; }
+
+                public override void ValidateInput()
+                {
+                    if (string.IsNullOrWhiteSpace(Number) || Number.Split(':').Length != 4)
+                    {
+                        throw new UserException("Кадастровый номер должен состоять из четырёх частей через двоеточие.");
+                    }
+                }
+
+                public override void InnerExecute()
+                {
+                    var parts = Number!.Trim().Split(':');
+                    Result = string.Join(":", parts[0], parts[1], parts[2]);
+                }
+            }
+        }
+  schema: null
+  action: fix
+  request: Исправить ошибки сборки
+
+- id: fix-output-public-set
+  group: fix
+  project:
+    name: AreaUnits
+    packages: []
+    files:
+      GpToolFactory.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+
+        namespace AreaUnits
+        {
+            public sealed class GpToolFactory : IGpToolFactory
+            {
+                public Type[] GetToolTypes()
+                {
+                    return new Type[] { typeof(SquareMetersToHectaresTool) };
+                }
+            }
+        }
+      SquareMetersToHectaresTool.cs: |
+        using System;
+        using System.Globalization;
+        using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
+
+        namespace AreaUnits
+        {
+            [GpToolIcon("fa fa-calculator")]
+            [GpCategory("Измерения")]
+            [GpDescription("Перевести площадь в гектары", "Square meters to hectares")]
+            public sealed class SquareMetersToHectaresTool : GpTool
+            {
+                [GpRequired]
+                [GpDescription("Площадь, кв. м", "Area, sq. m")]
+                public double AreaSquareMeters { get; set; }
+
+                [GpDescription("Площадь, га", "Area, ha")]
+                public string? Result { get; set; }
+
+                public override void ValidateInput()
+                {
+                    if (AreaSquareMeters < 0)
+                    {
+                        throw new UserException("Площадь не может быть отрицательной.");
+                    }
+                }
+
+                public override void InnerExecute()
+                {
+                    var hectares = AreaSquareMeters / 10000.0;
+                    Result = hectares.ToString("0.####", CultureInfo.GetCultureInfo("ru-RU")) + " га";
+                }
+            }
+        }
+  schema: null
+  action: fix
+  request: Исправить ошибки сборки
+
+- id: fix-type-mismatch
+  group: fix
+  project:
+    name: HouseCounter
+    packages: [Npgsql]
+    files:
+      GpToolFactory.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+
+        namespace HouseCounter
+        {
+            public sealed class GpToolFactory : IGpToolFactory
+            {
+                public Type[] GetToolTypes()
+                {
+                    return new Type[] { typeof(CountHousesTool) };
+                }
+            }
+        }
+      CountHousesTool.cs: |
+        using System;
+        using Atemiko.eLiteMap.Geodatabase;
+        using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
+        using Npgsql;
+
+        namespace HouseCounter
+        {
+            [GpToolIcon("fa fa-home")]
+            [GpCategory("Статистика")]
+            [GpDescription("Число домов на улице", "Houses on street")]
+            public sealed class CountHousesTool : GpTool
+            {
+                [GpRequired]
+                [GpDescription("Улица", "Street")]
+                public string? Street { get; set; }
+
+                [GpRequired]
+                [GpDescription("Подключение к базе", "Database connection")]
+                public Workspace? TargetWorkspace { get; set; }
+
+                [GpDescription("Число домов", "Houses count")]
+                public string? Result { get; private set; }
+
+                public override void ValidateInput()
+                {
+                    if (string.IsNullOrWhiteSpace(Street))
+                    {
+                        throw new UserException("Не задана улица.");
+                    }
+                }
+
+                public override void InnerExecute()
+                {
+                    using var connection = new NpgsqlConnection(GetConnectionString());
+                    connection.Open();
+                    using var command = new NpgsqlCommand(
+                        "SELECT count(*) FROM addresses WHERE street = @street", connection);
+                    command.Parameters.AddWithValue("street", Street!.Trim());
+                    long count = command.ExecuteScalar();
+                    Result = count;
+                }
+
+                private string GetConnectionString()
+                {
+                    var properties = TargetWorkspace?.WorkspaceName?.ConnectionProperties
+                        ?? throw new UserException("Не задано подключение к базе данных.");
+                    if (properties.TryGetValue(WorkspaceName.PropertyNames.ConnectionString, out var value)
+                        && value is string connectionString
+                        && !string.IsNullOrWhiteSpace(connectionString))
+                    {
+                        return connectionString;
+                    }
+
+                    throw new UserException("В подключении к базе нет строки подключения.");
+                }
+            }
+        }
+  schema: null
+  action: fix
+  request: Исправить ошибки сборки
+
+- id: fix-syntax-and-typo
+  group: fix
+  project:
+    name: StreetLabels
+    packages: []
+    files:
+      GpToolFactory.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+
+        namespace StreetLabels
+        {
+            public sealed class GpToolFactory : IGpToolFactory
+            {
+                public Type[] GetToolTypes()
+                {
+                    return new Type[] { typeof(StreetLabelTool) };
+                }
+            }
+        }
+      StreetLabelTool.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
+
+        namespace StreetLabels
+        {
+            [GpToolIcon("fa fa-tag")]
+            [GpCategory("Подписи")]
+            [GpDescription("Подпись улицы для карты", "Street map label")]
+            public sealed class StreetLabelTool : GpTool
+            {
+                [GpRequired]
+                [GpDescription("Название улицы", "Street name")]
+                public string? StreetName { get; set; }
+
+                [GpDescription("Тип улицы", "Street type")]
+                public string? StreetType { get; set; }
+
+                [GpDescription("Подпись", "Label")]
+                public string? Result { get; private set; }
+
+                public override void ValidateInput()
+                {
+                    if (string.IsNullOrWhiteSpace(StreetName))
+                    {
+                        throw new UserException("Не задано название улицы.");
+                    }
+                }
+
+                public override void InnerExecute()
+                {
+                    var type = string.IsNullOrWhiteSpace(StreetType) ? "ул." : StreetType.Trim()
+                    Result = $"{type} {Streetname!.Trim()}";
+                }
+            }
+        }
+  schema: null
+  action: fix
+  request: Исправить ошибки сборки
+
+- id: fix-missing-override
+  group: fix
+  project:
+    name: LengthUnits
+    packages: []
+    files:
+      GpToolFactory.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+
+        namespace LengthUnits
+        {
+            public sealed class GpToolFactory : IGpToolFactory
+            {
+                public Type[] GetToolTypes()
+                {
+                    return new Type[] { typeof(MetersToFeetTool) };
+                }
+            }
+        }
+      MetersToFeetTool.cs: |
+        using System;
+        using System.Globalization;
+        using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
+
+        namespace LengthUnits
+        {
+            [GpToolIcon("fa fa-arrows-h")]
+            [GpCategory("Измерения")]
+            [GpDescription("Метры в футы", "Meters to feet")]
+            public sealed class MetersToFeetTool : GpTool
+            {
+                [GpRequired]
+                [GpDescription("Длина, м", "Length, m")]
+                public double Meters { get; set; }
+
+                [GpDescription("Длина, футы", "Length, ft")]
+                public string? Result { get; private set; }
+
+                public void ValidateInput()
+                {
+                    if (Meters < 0)
+                    {
+                        throw new UserException("Длина не может быть отрицательной.");
+                    }
+                }
+
+                public void InnerExecute()
+                {
+                    Result = (Meters / 0.3048).ToString("0.##", CultureInfo.InvariantCulture);
+                }
+            }
+        }
+  schema: null
+  action: fix
+  request: Исправить ошибки сборки
+
+- id: fix-attributes-namespace
+  group: fix
+  project:
+    name: StreetLights
+    packages: []
+    files:
+      GpToolFactory.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+
+        public sealed class GpToolFactory : IGpToolFactory
+        {
+            public Type[] GetToolTypes()
+            {
+                return new Type[] { typeof(LampScheduleTool) };
+            }
+        }
+      LampScheduleTool.cs: |
+        using System;
+        using eLiteGIS.Geoprocessing;
+        using eLiteGIS.Utilities;
+
+        [GpDescription("Время включения фонарей", "Street lights schedule")]
+        public sealed class LampScheduleTool : GpTool
+        {
+            [GpRequired]
+            [GpDescription("Дата", "Date")]
+            public DateTime Date { get; set; }
+
+            [GpDescription("Время включения", "Switch-on time")]
+            public string? Result { get; private set; }
+
+            public override void InnerExecute()
+            {
+                var month = Date.Month;
+                var hour = month is >= 5 and <= 8 ? 21 : month is 11 or 12 or 1 ? 16 : 18;
+                Result = $"{Date:dd.MM.yyyy}: включить в {hour}:00";
+            }
+        }
+  schema: null
+  action: fix
+  request: Исправить ошибки сборки

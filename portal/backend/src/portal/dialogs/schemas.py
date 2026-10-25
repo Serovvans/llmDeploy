@@ -3,7 +3,13 @@
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    model_serializer,
+)
 
 from portal.core.schemas import ApiTime, RequestModel
 from portal.dialogs.domain import (
@@ -85,6 +91,23 @@ class CogisMessageRequest(RequestModel):
     action: Literal["write", "explain", "debug"]
 
 
+class CodeTargetRequest(RequestModel):
+    """Выделенный фрагмент файла проекта; границы проверяет сценарий (§7.5.8)."""
+
+    file_id: UUID
+    start_line: int
+    end_line: int
+
+
+class CodeMessageRequest(RequestModel):
+    """Тело сообщения в диалоге `code` (§7.5.8): `file_ids` и `target` обязательны, `null` — нет."""
+
+    content: str
+    action: Literal["write", "explain", "fix"]
+    file_ids: list[UUID] | None
+    target: CodeTargetRequest | None
+
+
 class DocparseMessageRequest(RequestModel):
     """Вопрос по разобранному документу."""
 
@@ -116,6 +139,13 @@ class CogisMemoryQuery(BaseModel):
     """Строка запроса оценки памяти в помощнике CoGIS."""
 
     action: Literal["write", "explain", "debug"]
+
+
+class CodeMemoryQuery(BaseModel):
+    """Строка запроса оценки памяти помощника проекта; нет `files` — все файлы (§7.5.8)."""
+
+    action: Literal["write", "explain", "fix"]
+    files: str | None = None
 
 
 class SqlRegenerateRequest(RequestModel):
@@ -197,12 +227,23 @@ class SummaryOut(BaseModel):
 
 
 class CarriedOut(BaseModel):
-    """Перенесённое — поле `carried` диалога (§5.1)."""
+    """Перенесённое — поле `carried` диалога (§5.1).
+
+    `source_project_id` есть только у источника вида `code`: у других видов поля нет.
+    """
 
     text: str
     source_dialog_id: UUID | None
     source_kind: DialogKind | None
     source_title: str | None
+    source_project_id: UUID | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_project(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.source_kind != "code":
+            data.pop("source_project_id", None)
+        return data
 
 
 class DialogMemoryOut(DialogOut):
@@ -233,6 +274,7 @@ def _carried(carried: CarriedView) -> CarriedOut:
         source_dialog_id=carried.source_dialog_id,
         source_kind=carried.source_kind,
         source_title=carried.source_title,
+        source_project_id=carried.source_project_id,
     )
 
 
@@ -323,6 +365,8 @@ class MessageOut(BaseModel):
     sql_dangers: list[str] | None
     dropped_messages: int
     memory_mode: MemoryMode
+    code_target: dict[str, Any] | None
+    code_edit: dict[str, Any] | None
     created_at: ApiTime
 
     @classmethod
@@ -347,8 +391,18 @@ class MessageOut(BaseModel):
             sql_dangers=message.sql_dangers,
             dropped_messages=message.dropped_messages,
             memory_mode=message.memory_mode,
+            code_target=_code_target(message.params) if message.role == "user" else None,
+            code_edit=message.code_edit,
             created_at=message.created_at,
         )
+
+
+def _code_target(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Фрагмент вопроса диалога `code` без снимка текста (§5.1, §7.5.8)."""
+    target = params.get("target")
+    if not isinstance(target, dict):
+        return None
+    return {key: target[key] for key in ("file_id", "path", "start_line", "end_line")}
 
 
 class MessageListOut(BaseModel):

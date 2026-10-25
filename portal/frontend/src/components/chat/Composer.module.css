@@ -60,3 +60,19 @@
   font-size: 14px;
   line-height: 20px;
 }
+
+/* Колонка помощника проекта 380 / 440 px (концепция §5.13.10). */
+.narrow {
+  max-width: none;
+  margin: 0;
+  padding: 8px 16px 16px;
+}
+
+.narrow .hintRow {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.narrow .hintRow .hint {
+  align-self: flex-start;
+}

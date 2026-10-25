@@ -1,6 +1,7 @@
 import { IconBooksLibraryRegular24 } from '@skbkontur/icons/IconBooksLibraryRegular24';
 import { IconCheckARegular16 } from '@skbkontur/icons/IconCheckARegular16';
 import { IconCommentRectTextRegular24 } from '@skbkontur/icons/IconCommentRectTextRegular24';
+import { IconDevCodeRegular24 } from '@skbkontur/icons/IconDevCodeRegular24';
 import { IconDocTextRegular24 } from '@skbkontur/icons/IconDocTextRegular24';
 import { IconLocationMapRegular24 } from '@skbkontur/icons/IconLocationMapRegular24';
 import { IconPeople2Regular24 } from '@skbkontur/icons/IconPeople2Regular24';
@@ -24,6 +25,8 @@ const SECTIONS = [
   { to: '/cogis', label: texts.nav.cogis, Icon: IconLocationMapRegular24 },
   { to: '/documents', label: texts.nav.documents, Icon: IconDocTextRegular24 },
 ];
+/** При включённом разделе «Код» его пункт стоит на месте «CoGIS» (концепция §3.2, 0.9). */
+const CODE_SECTION = { to: '/code', label: texts.nav.code, Icon: IconDevCodeRegular24 };
 
 const THEMES: { value: ThemePreference; label: string }[] = [
   { value: 'system', label: texts.nav.themeSystem },
@@ -49,7 +52,8 @@ function initials(fullName: string): string {
 /** Рейка разделов (концепция §3.2): пять разделов, внизу — «Пользователи», «Тема», «Профиль». */
 export function AppRail({ user }: { user: SessionUser }) {
   const { preference, setPreference } = useThemeChoice();
-  const { logout } = useSession();
+  const { logout, config } = useSession();
+  const sections = config?.code.enabled ? SECTIONS.map((item) => (item.to === '/cogis' ? CODE_SECTION : item)) : SECTIONS;
   const navigate = useNavigate();
   const onProfile = useLocation().pathname === '/profile';
   // Пока идёт разбор документа, у пункта «Документы» вместо иконки — индикатор (концепция §5.9).
@@ -62,7 +66,7 @@ export function AppRail({ user }: { user: SessionUser }) {
   return (
     <nav className={styles.rail} aria-label={texts.nav.label}>
       <div className={styles.group}>
-        {SECTIONS.map(({ to, label, Icon }) => (
+        {sections.map(({ to, label, Icon }) => (
           <NavLink key={to} to={to} className={itemClass}>
             {to === '/documents' && parsing ? (
               <span className={styles.spinner}>

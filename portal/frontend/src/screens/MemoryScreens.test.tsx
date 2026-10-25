@@ -95,7 +95,7 @@ function setup(memory: () => ReturnType<typeof ok>, options: { kind?: DialogKind
     [`GET /api/dialogs/${ID}/messages`]: () => ok({ items: [...messages].reverse(), next_cursor: null }),
     [`GET /api/dialogs/${ID}/memory`]: memory,
   });
-  const base = { chat: '/chat', sql: '/sql', cogis: '/cogis', docparse: '/documents' }[kind];
+  const base = { chat: '/chat', sql: '/sql', cogis: '/cogis', docparse: '/documents', code: '/code' }[kind];
   renderApp(`${base}/${ID}`);
   return { server, user: userEvent.setup({ applyAccept: false }) };
 }

@@ -1,0 +1,24 @@
+/* Окно сравнения: подписи «Было» / «Стало» над колонками или легенда «− было, + стало» в одну колонку. */
+.view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.labels {
+  display: grid;
+  flex: none;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--p-line);
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.editor {
+  flex: 1;
+  min-height: 0;
+}

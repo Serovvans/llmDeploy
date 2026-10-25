@@ -74,6 +74,17 @@ INNER_MODULES = [
     "core/ports.py",
     "core/pagination.py",
     "core/clock.py",
+    "code/domain.py",
+    "code/errors.py",
+    "code/paths.py",
+    "code/ports.py",
+    "code/edit.py",
+    "code/prompt.py",
+    "code/wizard.py",
+    "code/service.py",
+    "code/assistant.py",
+    "files/zipdir.py",
+    "code/evaluation.py",
 ]
 # Сценарии зависят от портов, а не от их реализаций.
 INFRASTRUCTURE = {
@@ -90,6 +101,8 @@ INFRASTRUCTURE = {
     "portal.kb.qdrant", "portal.kb.embedder", "portal.kb.evalset",
     "portal.files.media", "portal.media.ffmpeg", "portal.media.gigaam", "portal.media.files",
     "portal.worker.queue",
+    "portal.code.repositories", "portal.code.tables", "portal.code.routes", "portal.code.schemas",
+    "portal.code.sandbox", "portal.code.reference", "portal.code.templates", "portal.code.zipio",
 }  # fmt: skip
 
 

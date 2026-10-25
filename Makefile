@@ -331,6 +331,7 @@ check: ## Локальные проверки: docker compose config, ruff, mypy
 	cd $(SCRIPTS_DIR) && bash -n *.sh && uvx --from shellcheck-py shellcheck *.sh
 	cd $(PORTAL_DIR)/backend && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest -q
 	cd $(PORTAL_DIR)/dev && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest -q
+	cd $(PORTAL_DIR)/backend && uv run ruff format --check ../eval/code && uv run ruff check ../eval/code && uv run pytest -q ../eval/code
 	cd $(PORTAL_DIR)/frontend && npm ci && npm run check
 	cd $(E2E_DIR) && npm ci && npm run typecheck
 	bash $(SCRIPTS_DIR)/check_code_sandbox.sh

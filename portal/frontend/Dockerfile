@@ -48,8 +48,9 @@ COPY <<'EOF' /etc/caddy/Caddyfile
 	}
 
 	# Адреса экранов — те же, что в маршрутах приложения (src/App.tsx). У разделов с
-	# историей допустим один сегмент — идентификатор диалога; глубже — уже 404.
-	@screen path_regexp ^/(login(/code)?|password|second-factor|knowledge|admin/users|profile|(chat|sql|cogis|documents)(/[^/]*)?)?$
+	# историей допустим один сегмент — идентификатор диалога; глубже — уже 404. В разделе
+	# «Код» тот же сегмент — new или проект, а прежние диалоги лежат под /code/dialogs/.
+	@screen path_regexp ^/(login(/code)?|password|second-factor|knowledge|admin/users|profile|(chat|sql|cogis|documents)(/[^/]*)?|code(/dialogs)?(/[^/]*)?)?$
 	handle @screen {
 		rewrite * /index.html
 		file_server

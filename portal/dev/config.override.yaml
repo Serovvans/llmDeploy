@@ -32,3 +32,10 @@ media:
   # (docs/portal-api.md §8.7); с рабочим значением gigaam он без весов не стартует.
   asr:
     engine: stub
+
+code:
+  # Сборка C# на стенде включена: песочница здесь настоящая, с заглушкой SDK
+  # (docs/portal-api.md §7.5.15); на ВМ флаг включают после make cogis-sdk и проверки
+  # сборки на настоящих DLL.
+  build:
+    enabled: true

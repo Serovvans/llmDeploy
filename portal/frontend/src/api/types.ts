@@ -1,4 +1,4 @@
-/** Типы контракта `docs/portal-api.md` версии 0.17 (поля релизов 0.7 и 0.8). Имена полей — как в контракте. */
+/** Типы контракта `docs/portal-api.md` версии 0.19 (поля релизов 0.7–0.9). Имена полей — как в контракте. */
 
 export type LoginStep = 'second_factor' | 'password_change' | 'second_factor_setup' | 'ready';
 
@@ -112,6 +112,30 @@ export interface PortalConfig {
    * `max_chars` — предел длины пересказа и перенесённого.
    */
   memory: { enabled: boolean; keep_recent_pairs: number; max_chars: number };
+  /** Раздел «Код» (контракт §4, §7.5): флаги раздела и сборки, пределы и типы параметров мастера. */
+  code: CodeConfig;
+}
+
+export interface CodeParameterType {
+  id: string;
+  title: string;
+  csharp: string;
+  input: boolean;
+  output: boolean;
+}
+
+export interface CodeConfig {
+  enabled: boolean;
+  build_enabled: boolean;
+  file_extensions: string[];
+  max_projects: number;
+  max_files: number;
+  file_max_bytes: number;
+  project_max_bytes: number;
+  import_max_bytes: number;
+  max_snapshots: number;
+  fix_attempts: number;
+  wizard: { max_tools: number; max_parameters: number; parameter_types: CodeParameterType[] };
 }
 
 export interface FieldError {
@@ -133,7 +157,7 @@ export interface CursorPage<T> {
   next_cursor: string | null;
 }
 
-export type DialogKind = 'chat' | 'sql' | 'cogis' | 'docparse';
+export type DialogKind = 'chat' | 'sql' | 'cogis' | 'docparse' | 'code';
 
 export interface Dialog {
   id: string;
@@ -162,6 +186,8 @@ export interface DialogCarried {
   source_dialog_id: string | null;
   source_kind: DialogKind | null;
   source_title: string | null;
+  /** Только у источника `code`: проект, на который ведёт ссылка (контракт §5.1, 0.9). */
+  source_project_id?: string;
 }
 
 export type TranscriptionStatus = 'queued' | 'processing' | 'ready' | 'error';
@@ -283,6 +309,10 @@ export interface Message {
   dropped_messages: number;
   /** Режим пары «вопрос + ответ» (контракт §5.10.1): у вопроса — сохранённый, у ответа — режим его вопроса. */
   memory_mode: MemoryMode;
+  /** Только у вопроса в диалоге `code`: фрагмент, с которым задан вопрос (путь — на момент вопроса). */
+  code_target?: CodeTarget | null;
+  /** Только у ответа в диалоге `code`: правка помощника. */
+  code_edit?: CodeEdit | null;
   created_at: string;
 }
 
@@ -324,12 +354,20 @@ export type AnswerMode = 'fast' | 'thorough';
 
 export type SqlAction = 'write' | 'explain' | 'debug' | 'optimize';
 export type CogisAction = 'write' | 'explain' | 'debug';
+/** Действие вопроса помощнику проекта (контракт §7.5.8): `fix` — только кнопкой «Исправить с помощником». */
+export type CodeAction = 'write' | 'explain' | 'fix';
 
 /** Параметры вопроса по виду диалога (контракт §5.3); к ним добавляется `content`. */
 export type QuestionParams =
   | { mode: AnswerMode; collections: KbScope[]; tags?: string[] }
   | { action: SqlAction; dialect: string; schema_id: string | null; test_run: boolean }
   | { action: CogisAction }
+  | {
+      action: CodeAction;
+      /** `null` — все файлы проекта; список — только эти (открытые вкладки). */
+      file_ids: string[] | null;
+      target: { file_id: string; start_line: number; end_line: number } | null;
+    }
   | Record<string, never>;
 
 export interface SqlSchemaSummary {
@@ -417,4 +455,197 @@ export interface DuplicateDocument {
   status: KbStatus;
   error_code: string | null;
   can_delete: boolean;
+}
+
+/* ---------- Раздел «Код» (контракт §7.5, 0.9) ---------- */
+
+export interface CodeFile {
+  id: string;
+  path: string;
+  content: string;
+  /** Номер изменения файла, с 1. */
+  revision: number;
+  updated_at: string;
+}
+
+export type BuildStatus = 'succeeded' | 'failed' | 'timeout';
+
+/** Сообщение сборки: строки и столбцы — с 1; `file` — `null` у сообщения без места. */
+export interface Diagnostic {
+  severity: 'error' | 'warning';
+  code: string;
+  file: string | null;
+  line: number | null;
+  column: number | null;
+  end_line: number | null;
+  end_column: number | null;
+  message: string;
+}
+
+/** Находка правил GPTool (контракт §7.5.13): место — `null` у находки без места. */
+export interface RuleFinding {
+  rule: string;
+  file: string | null;
+  line: number | null;
+  column: number | null;
+  message: string;
+}
+
+export interface CodeArchive {
+  files: { file_name: string; kind: 'tool' | 'package' | 'memo' }[];
+  on_server: string[];
+}
+
+export interface CodeBuild {
+  status: BuildStatus;
+  /** Файлы или пакеты проекта изменились после этой сборки. */
+  outdated: boolean;
+  sdk_version: string | null;
+  packages: { id: string; version: string }[];
+  diagnostics: Diagnostic[];
+  diagnostics_truncated: boolean;
+  factory: string | null;
+  tools: { name: string; title: string; category: string | null }[] | null;
+  /** `[]` — нарушений нет; `null` — правила не проверялись. */
+  findings: RuleFinding[] | null;
+  archive: CodeArchive | null;
+  created_at: string;
+}
+
+export interface CodeProject {
+  id: string;
+  name: string;
+  packages: string[];
+  schema_id: string | null;
+  dialog_id: string;
+  files: CodeFile[];
+  /** Последняя сборка кнопкой «Собрать»; `null` — проект так не собирался. */
+  build: CodeBuild | null;
+  /** Идёт любая сборка проекта — кнопкой или проверка правки циклом исправления. */
+  build_running: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CodeProjectItem {
+  id: string;
+  name: string;
+  updated_at: string;
+  build: { status: BuildStatus; outdated: boolean; findings: number | null } | null;
+}
+
+export interface CodeTarget {
+  file_id: string;
+  path: string;
+  start_line: number;
+  end_line: number;
+}
+
+export type CodeRejectReason =
+  | 'outside_project'
+  | 'invalid_path'
+  | 'extension_not_allowed'
+  | 'file_too_large'
+  | 'project_limit'
+  | 'path_conflict'
+  | 'empty_file';
+
+export interface CodeVerification {
+  status: 'succeeded' | 'failed' | 'timeout' | 'unavailable';
+  builds: number;
+  warnings: number;
+  diagnostics: Diagnostic[];
+  findings: RuleFinding[];
+}
+
+/** Правка помощника — `Message.code_edit` и событие `code_edit` (контракт §7.5.1). */
+export interface CodeEdit {
+  status: 'proposed' | 'accepted' | 'rejected' | 'superseded';
+  files: { path: string; change: 'modified' | 'added'; decision: 'accepted' | 'rejected' | null }[];
+  /** `path` — недоверенный текст из ответа модели. */
+  rejected_files: { path: string; reason: string }[];
+  incomplete: boolean;
+  verification: CodeVerification | null;
+  decided_at: string | null;
+}
+
+/** Правка с содержимым — `GET …/edits/{message_id}`. */
+export interface CodeEditFull extends Omit<CodeEdit, 'files'> {
+  files: (CodeEdit['files'][number] & {
+    after: string;
+    current: { revision: number; content: string } | null;
+    outdated: boolean;
+  })[];
+}
+
+export type CodeSnapshotReason = 'edit_accepted' | 'build_succeeded' | 'restored' | 'before_restore';
+
+export interface CodeSnapshot {
+  id: string;
+  reason: CodeSnapshotReason;
+  created_at: string;
+  accepted_files: number | null;
+  restored_from: string | null;
+}
+
+export interface WizardParameter {
+  name: string;
+  type: string;
+  required?: boolean;
+  title_ru: string;
+  title_en: string;
+}
+
+export interface WizardTool {
+  title_ru: string;
+  title_en: string;
+  category: string;
+  icon: string;
+  uses_database: boolean;
+  description: string;
+  inputs: WizardParameter[];
+  outputs: WizardParameter[];
+}
+
+export interface WizardForm {
+  name: string;
+  tools: WizardTool[];
+}
+
+export type ImportSkipReason = 'invalid_path' | 'file_too_large' | 'not_text' | 'duplicate' | 'project_limit' | 'unreadable';
+
+export interface ImportReport {
+  ignored_files: number;
+  skipped_files: { path: string; reason: string }[];
+  unmatched_packages: { id: string; version: string | null; offline_version: string | null }[];
+}
+
+export interface CodeCreated {
+  project: CodeProject;
+  assistant_request: string | null;
+  import: ImportReport | null;
+}
+
+export interface SdkMember {
+  kind: 'constructor' | 'method' | 'property' | 'field' | 'event' | 'enum_value';
+  name: string;
+  signature: string;
+}
+
+export interface SdkType {
+  namespace: string;
+  name: string;
+  kind: 'class' | 'struct' | 'interface' | 'enum' | 'delegate';
+  origin: 'cogis' | 'dotnet';
+  signature: string;
+  members: SdkMember[];
+}
+
+/** Справочник и набор пакетов — `GET /api/code/sdk` (контракт §7.5.14). */
+export interface CodeSdk {
+  available: boolean;
+  sdk_version: string | null;
+  libraries: { file_name: string; version: string | null }[];
+  packages: { id: string; version: string; on_server: boolean }[];
+  types: SdkType[];
 }

@@ -1,0 +1,116 @@
+/*
+ * Каркас проекта (концепция §5.13.2): панель 240 px от верха до «Сборки», строка заголовка над
+ * редактором и помощником, «Сборка» под панелью и редактором, помощник 380 / 440 px до низа окна.
+ */
+.project {
+  --assistant-w: 380px;
+
+  flex: 1;
+  display: grid;
+  grid-template-areas:
+    'panel header'
+    'panel editor'
+    'build build';
+  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-rows: 56px minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+@media (min-width: 1600px) {
+  .project {
+    --assistant-w: 440px;
+  }
+}
+
+.withAssistant {
+  grid-template-areas:
+    'panel header header'
+    'panel editor assistant'
+    'build build assistant';
+  grid-template-columns: 240px minmax(0, 1fr) var(--assistant-w);
+}
+
+.header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding: 0 16px 0 24px;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.titleWrap {
+  min-width: 0;
+}
+
+.headerActions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.editor {
+  grid-area: editor;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.editorArea {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.editorHost {
+  flex: 1;
+  min-height: 0;
+}
+
+.hidden {
+  display: none;
+}
+
+.editorNotice {
+  flex: none;
+  padding: 8px 16px 0;
+}
+
+.reportLine {
+  display: block;
+}
+
+.reportList {
+  display: flex;
+  flex-direction: column;
+  padding-left: 16px;
+}
+
+.reportItem {
+  overflow-wrap: anywhere;
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+}
+
+.missing {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.failed {
+  padding: 24px;
+}
+
+.loading {
+  height: 100%;
+  min-height: 200px;
+}

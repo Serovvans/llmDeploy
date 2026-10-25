@@ -15,6 +15,16 @@ from portal.auth.crypto import Argon2PasswordHasher, HkdfSecretCipher
 from portal.auth.repositories import SqlAuthUnitOfWorkFactory
 from portal.auth.service import AuthService
 from portal.auth.totp import PyotpTotpProvider
+from portal.code.assistant import CodeTool
+from portal.code.edit import history_text
+from portal.code.evaluation import CodeEvaluator
+from portal.code.ports import CodeSandbox
+from portal.code.reference import SdkIndex
+from portal.code.repositories import SqlCodeUnitOfWorkFactory
+from portal.code.sandbox import HttpCodeSandbox
+from portal.code.service import CodeService
+from portal.code.templates import load_templates
+from portal.code.zipio import ZipProjectArchives
 from portal.core.clock import SystemClock
 from portal.core.db import create_engine
 from portal.core.ports import Clock, SessionAuthenticator
@@ -23,7 +33,7 @@ from portal.dialogs.domain import DialogKind
 from portal.dialogs.drafts import SummaryDrafts
 from portal.dialogs.export import DocxExporter
 from portal.dialogs.files import AttachmentFiles
-from portal.dialogs.generation import GenerationService
+from portal.dialogs.generation import GenerationService, HistoryView
 from portal.dialogs.ports import DialogTool
 from portal.dialogs.repositories import SqlDialogUnitOfWorkFactory
 from portal.dialogs.service import DialogService
@@ -103,6 +113,8 @@ class Container(AdminContainer):
     knowledge: KnowledgeBase
     # Приём записей: резервы квоты живут в памяти этого объекта — он один на процесс (§1.6).
     media_storage: MediaStorage
+    code: CodeService
+    code_tool: CodeTool
 
 
 @dataclass(frozen=True)
@@ -174,6 +186,126 @@ def build_admin_container(settings: Settings, clock: Clock | None = None) -> Adm
     )
 
 
+def _knowledge(
+    settings: Settings,
+    engine: AsyncEngine,
+    clock: Clock,
+    http_client: httpx.AsyncClient,
+    qdrant: AsyncQdrantClient,
+    model: ChatModel,
+) -> KnowledgeRetriever:
+    """Поиск по базе знаний для ответов (§8.4)."""
+    return KnowledgeRetriever(
+        SqlKbUnitOfWorkFactory(engine, clock),
+        _embedder(settings, http_client),
+        QdrantVectorIndex(qdrant, settings.kb),
+        QueryRewriter(model, settings.kb.rewrite),
+        BifrostReranker(http_client, settings.kb.rerank, settings.require_rerank_api_key()),
+        RatioTokenEstimator(settings.llm.chars_per_token, settings.llm.tokens_per_image),
+        settings.kb,
+    )
+
+
+def _code(
+    settings: Settings,
+    engine: AsyncEngine,
+    clock: Clock,
+    http_client: httpx.AsyncClient,
+    sql_schemas: SqlSchemaService,
+    knowledge: KnowledgeBase,
+    model: ChatModel,
+    max_model_len: int,
+    code_sandbox: CodeSandbox | None,
+) -> tuple[CodeService, CodeTool]:
+    """Раздел «Код»: проекты и помощник; шаблоны мастера проверяются здесь (§7.5.4)."""
+    code_settings = settings.code
+    if code_settings.build.enabled:
+        # При выключенном флаге сборки к песочнице портал не обращается вовсе (§7.5.15).
+        code_sandbox = code_sandbox or HttpCodeSandbox(http_client, code_settings.build)
+    else:
+        code_sandbox = None
+    code_uow = SqlCodeUnitOfWorkFactory(engine)
+    code = CodeService(
+        code_uow,
+        code_sandbox,
+        SdkIndex(code_settings),
+        ZipProjectArchives(),
+        sql_schemas,
+        load_templates(
+            code_settings.templates_dir, [package.id for package in code_settings.packages]
+        ),
+        clock,
+        code_settings,
+        message_max_chars=settings.dialogs.message_max_chars,
+        carried_max_chars=settings.memory.max_chars,
+        zip_max_directory_bytes=settings.files.zip_max_directory_bytes,
+    )
+    estimator = RatioTokenEstimator(settings.llm.chars_per_token, settings.llm.tokens_per_image)
+    tool = CodeTool(
+        code_uow, code, sql_schemas, knowledge, model, estimator, settings, max_model_len
+    )
+    return code, tool
+
+
+@dataclass(frozen=True)
+class CodeEvalContainer:
+    """Зависимости `portal eval-code`: те же объекты раздела «Код», что у `portal-api`."""
+
+    settings: Settings
+    engine: AsyncEngine
+    http_client: httpx.AsyncClient
+    qdrant: AsyncQdrantClient
+    code: CodeService
+    evaluator: CodeEvaluator
+
+    async def aclose(self) -> None:
+        """Закрыть соединения с Bifrost, песочницей, Qdrant и базой."""
+        await self.http_client.aclose()
+        await self.qdrant.close()
+        await self.engine.dispose()
+
+
+def build_code_eval_container(
+    settings: Settings,
+    chat_model: ChatModel | None = None,
+    knowledge: KnowledgeBase | None = None,
+    code_sandbox: CodeSandbox | None = None,
+) -> CodeEvalContainer:
+    """Собрать прогон контрольного набора; в базу он не пишет (§13.4).
+
+    Нужны `PORTAL_LLM_API_KEY`, `QDRANT_API_KEY` и `MAX_MODEL_LEN` (§13.5). `chat_model`,
+    `knowledge` и `code_sandbox` подменяют модель, поиск и песочницу в тестах.
+    """
+    clock = SystemClock()
+    llm_api_key = settings.require_llm_api_key()
+    max_model_len = settings.require_max_model_len()
+    engine = create_engine(settings)
+    http_client = httpx.AsyncClient()
+    qdrant = _qdrant_client(settings)
+    model = chat_model or BifrostChatModel(http_client, settings.llm, llm_api_key)
+    knowledge = knowledge or _knowledge(settings, engine, clock, http_client, qdrant, model)
+    sql_schemas = SqlSchemaService(SqlSchemaStoreFactory(engine), clock, settings.sql)
+    code, tool = _code(
+        settings,
+        engine,
+        clock,
+        http_client,
+        sql_schemas,
+        knowledge,
+        model,
+        max_model_len,
+        code_sandbox,
+    )
+    return CodeEvalContainer(
+        settings=settings,
+        engine=engine,
+        http_client=http_client,
+        qdrant=qdrant,
+        code=code,
+        evaluator=CodeEvaluator(tool, code, knowledge, model, settings.code),
+    )
+
+
 def build_container(
     settings: Settings,
     clock: Clock | None = None,
@@ -182,6 +314,7 @@ def build_container(
     qdrant: AsyncQdrantClient | None = None,
     sql_sandbox: SqlSandbox | None = None,
     transcription_queue: TranscriptionQueue | None = None,
+    code_sandbox: CodeSandbox | None = None,
 ) -> Container:
     """Собрать все зависимости API.
 
@@ -189,7 +322,8 @@ def build_container(
     сборка отказывает (§13.5); при включённом `sql.sandbox.enabled` — и без паролей
     песочницы. `chat_model`, `knowledge`, `qdrant`, `sql_sandbox` и `transcription_queue`
     подменяют клиент Bifrost, базу знаний, клиент Qdrant, песочницу SQL и очередь
-    расшифровки вложений в тестах.
+    расшифровки вложений в тестах; `code_sandbox` — песочницу сборки C#. Шаблоны мастера
+    читаются и проверяются здесь же: ошибка в них — отказ запуска (§7.5.6).
     """
     clock = clock or SystemClock()
     secret_key = settings.require_secret_key()
@@ -253,11 +387,24 @@ def build_container(
             settings.sql.sandbox, *settings.require_sql_sandbox_passwords()
         )
         sql_runner = SqlTestRunner(sql_sandbox, model, sql_checker, settings.sql.sandbox)
+    code, code_tool = _code(
+        settings,
+        base.engine,
+        clock,
+        http_client,
+        sql_schemas,
+        knowledge,
+        model,
+        max_model_len,
+        code_sandbox,
+    )
     tools: dict[DialogKind, DialogTool] = {
         "sql": SqlTool(sql_schemas, sql_checker, settings.sql, sql_runner),
         "cogis": CogisTool(knowledge, settings.cogis),
         "docparse": DocparseDialogTool(dialog_uow, settings.docparse),
+        "code": code_tool,
     }
+    history_views: dict[DialogKind, HistoryView] = {"code": history_text}
     generation = GenerationService(
         dialog_uow,
         model,
@@ -273,6 +420,8 @@ def build_container(
         clock,
         settings,
         max_model_len,
+        editors={"code": code_tool},
+        history_views=history_views,
     )
     return Container(
         settings=settings,
@@ -300,6 +449,7 @@ def build_container(
             generation.is_forming,
             docparse.is_forming,
             DocxExporter(),
+            settings.code.enabled,
         ),
         sql_schemas=sql_schemas,
         sql_checker=sql_checker,
@@ -313,6 +463,7 @@ def build_container(
             generation.wait_idle,
             settings,
             max_model_len,
+            history_views,
         ),
         qdrant=qdrant,
         kb=KbService(
@@ -329,6 +480,8 @@ def build_container(
         ),
         knowledge=knowledge,
         media_storage=media_storage,
+        code=code,
+        code_tool=code_tool,
     )
 
 

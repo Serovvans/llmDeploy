@@ -60,7 +60,8 @@ interface AnswerProps {
   /** Ответ формируется в этой вкладке — только у последнего сообщения. */
   generation: Generation | null;
   isLast: boolean;
-  onRegenerate: () => void;
+  /** Нет — лента только для чтения (прежний диалог помощника CoGIS): «Ответить заново» не показывается. */
+  onRegenerate?: () => void;
   onOpenSource: OpenSource;
   openingFragment: string | null;
   dialogId: string;
@@ -68,7 +69,16 @@ interface AnswerProps {
   nothingFoundText?: string;
   /** «Продолжить отсюда» (0.8): перенос разговора до этого ответа; нет — функция выключена. */
   onContinue?: () => void;
+  /** Своя строка состояния ответа (помощник проекта); `null` — как в чате. */
+  phaseLabel?: PhaseLabel;
+  /** Блок под текстом ответа — карточка правки помощника проекта (концепция §5.13.11). */
+  extra?: React.ReactNode;
+  /** Свой текст отказа модели по длине (помощник проекта, §5.13.10). */
+  tooLongText?: string;
 }
+
+/** Строка состояния своего раздела: по фазе и тексту, полученному к этому моменту. */
+export type PhaseLabel = (generation: Generation, message: ChatMessage) => string | null;
 
 type FigureSource = Source & { image_id: string };
 
@@ -99,8 +109,9 @@ function Answer(props: AnswerProps) {
   const busy = useBusy(generation);
   const hasText = message.content.length > 0;
   const formingElsewhere = message.status === 'streaming' && !generation;
-  // Проверка на тестовых данных идёт после ответа: он дописан, но диалог занят до её конца (концепция §5.7).
-  const checking = generation?.phase === 'checking';
+  // Проверка на тестовых данных и цикл исправления идут после ответа: он дописан, но диалог занят до их конца.
+  const checking = generation?.phase === 'checking' || generation?.phase === 'fixing';
+  const ownLabel = generation && props.phaseLabel ? props.phaseLabel(generation, message) : null;
   const [activeSource, setActiveSource] = useState<number | null>(null);
   const [brokenFigures, setBrokenFigures] = useState<ReadonlySet<string>>(new Set());
   const answerId = useId();
@@ -123,7 +134,16 @@ function Answer(props: AnswerProps) {
 
   return (
     <div className={message.memory_mode === 'excluded' ? `${styles.answer} ${styles.excludedAnswer}` : styles.answer}>
-      {generation && isWaiting(generation) && (
+      {ownLabel && generation && (isWaiting(generation) || generation.phase === 'fixing') && (
+        <p className={styles.state}>
+          <Spinner type="mini" caption={null} />
+          <span>
+            {ownLabel}
+            {busy && isWaiting(generation) && ` ${t.busy}`}
+          </span>
+        </p>
+      )}
+      {!ownLabel && generation && isWaiting(generation) && (
         <p className={styles.state}>
           <Spinner type="mini" caption={null} />
           <span>
@@ -149,6 +169,14 @@ function Answer(props: AnswerProps) {
           sqlRun={message.sql_run}
         />
       )}
+      {/* Строка «Готовлю правку…» — пока идёт текст ответа с блоком правки. */}
+      {ownLabel && generation?.phase === 'answering' && (
+        <p className={styles.state}>
+          <Spinner type="mini" caption={null} />
+          <span>{ownLabel}</span>
+        </p>
+      )}
+      {props.extra}
       {figures.length > 0 && (
         <section className={styles.sources}>
           <h2 className={styles.sourcesTitle}>{t.sources.figures}</h2>
@@ -202,8 +230,10 @@ function Answer(props: AnswerProps) {
         <p className={styles.note}>{hasText ? t.lengthLimit : t.lengthLimitEmpty}</p>
       )}
       {message.status === 'error' && (
-        <Notice kind="error" action={isLast ? { label: texts.common.retry, onClick: onRegenerate } : undefined}>
-          {answerErrorText(message.error_code, hasText, message.error_message)}
+        <Notice kind="error" action={isLast && onRegenerate ? { label: texts.common.retry, onClick: onRegenerate } : undefined}>
+          {message.error_code === 'message_too_long' && props.tooLongText
+            ? props.tooLongText
+            : answerErrorText(message.error_code, hasText, message.error_message)}
         </Notice>
       )}
       {message.status !== 'streaming' && message.status !== 'error' && (
@@ -213,14 +243,14 @@ function Answer(props: AnswerProps) {
               {copy.label}
             </Link>
           )}
-          {isLast && !checking && (
+          {isLast && onRegenerate && !checking && (
             <Link component="button" icon={<IconArrowRoundSyncForwardRegular16 />} onClick={onRegenerate}>
               {t.regenerate}
             </Link>
           )}
-          {isLast && checking && (
+          {isLast && onRegenerate && checking && (
             // Недоступное действие остаётся в обходе по Tab и объясняет причину, а не молчит.
-            <TitleHint text={texts.sql.testRun.waitRun} always>
+            <TitleHint text={generation?.phase === 'fixing' ? texts.workshop.assistant.busy : texts.sql.testRun.waitRun} always>
               <Link
                 component="button"
                 className={styles.unavailable}
@@ -294,6 +324,7 @@ function phaseText(view: DialogView): string {
       answering: t.phase.answering,
       // Шаги проверки не озвучиваются: её итог объявляется один раз, по завершении.
       checking: t.phase.done,
+      fixing: t.phase.done,
     };
     return phases[view.generation.phase];
   }
@@ -314,7 +345,8 @@ function phaseText(view: DialogView): string {
 interface MessageListProps {
   dialogId: string;
   view: DialogView;
-  onRegenerate: () => void;
+  /** Нет — лента только для чтения (прежний диалог помощника CoGIS): «Ответить заново» не показывается. */
+  onRegenerate?: () => void;
   onLoadOlder: () => void;
   onOpenSource: OpenSource;
   /** Цитата, просмотр которой сейчас открывается: на её карточке — индикатор. */
@@ -325,6 +357,14 @@ interface MessageListProps {
   header?: React.ReactNode;
   /** Память диалога: пометки пар ведут в панель, пара из описи отмечается и прокручивается. */
   memory?: FeedMemory;
+  /** Узкая колонка (помощник проекта, Д-57): «Вы» и «Ответ» — над блоком, а не на полях. */
+  narrow?: boolean;
+  /** Строка состояния ответа своего раздела. */
+  phaseLabel?: PhaseLabel;
+  /** Под вопросом (фрагмент кода) и под ответом (карточка правки) — свои блоки раздела. */
+  questionExtra?: (message: ChatMessage) => React.ReactNode;
+  answerExtra?: (message: ChatMessage, isLast: boolean) => React.ReactNode;
+  tooLongText?: string;
 }
 
 /** Лента-протокол (концепция §4.2): слева пометка «Вы» или «Ответ», вопрос — на подложке, ответ — текстом. */
@@ -332,6 +372,7 @@ export function MessageList(props: MessageListProps) {
   const { dialogId, view, onRegenerate, onLoadOlder, onOpenSource, openingFragment } = props;
   const memory = props.memory ?? NO_MEMORY;
   const { reveal } = memory;
+  const narrow = props.narrow ?? false;
   const scroll = useRef<ScrollContainer>(null);
   const list = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -344,7 +385,7 @@ export function MessageList(props: MessageListProps) {
     if (following) {
       scroll.current?.scrollToBottom();
     }
-  }, [following, view.messages.length, last?.content, last?.reasoning, last?.status, last?.sql_run]);
+  }, [following, view.messages.length, last?.content, last?.reasoning, last?.status, last?.sql_run, last?.code_edit]);
 
   // Высота ленты меняется и без новых сообщений (настройки в заголовке перенеслись на вторую строку):
   // конец ответа не должен уйти под панель запроса.
@@ -367,11 +408,16 @@ export function MessageList(props: MessageListProps) {
     if (row) {
       setFollowing(false);
       row.scrollIntoView({ block: 'start' });
+      // Узкая колонка: панель памяти закрылась, фокус — на блок вопроса (концепция §5.13.12).
+      if (narrow && row instanceof HTMLElement) {
+        row.tabIndex = -1;
+        row.focus({ preventScroll: true });
+      }
     }
-  }, [reveal]);
+  }, [reveal, narrow]);
 
   return (
-    <div ref={list} className={styles.list}>
+    <div ref={list} className={props.narrow ? `${styles.list} ${styles.narrow}` : styles.list}>
       <ScrollContainer
         ref={scroll}
         onScroll={(event) => {
@@ -442,6 +488,7 @@ export function MessageList(props: MessageListProps) {
                 {message.memory_mode === 'text_only' && message.attachments.length > 0 && (
                   <MemoryMark text={texts.memory.textOnly} onOpen={openPair} />
                 )}
+                {props.questionExtra?.(message)}
                 {/* Опасные операции во вставленном запросе — под вопросом, на всю ширину колонки (§5.7). */}
                 {message.sql_dangers?.map((danger) => (
                   <Notice key={danger} kind="warning">
@@ -460,6 +507,9 @@ export function MessageList(props: MessageListProps) {
                   dialogId={dialogId}
                   nothingFoundText={props.nothingFoundText}
                   onContinue={onContinue ? () => onContinue(message.id) : undefined}
+                  phaseLabel={props.phaseLabel}
+                  tooLongText={props.tooLongText}
+                  extra={props.answerExtra?.(message, index === view.messages.length - 1)}
                 />
               )}
             </div>

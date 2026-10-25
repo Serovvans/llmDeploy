@@ -38,7 +38,7 @@ from portal.dialogs.domain import (
     Message,
 )
 from portal.dialogs.files import AttachmentFiles
-from portal.dialogs.ports import DialogUnitOfWorkFactory
+from portal.dialogs.ports import DialogRepository, DialogUnitOfWorkFactory
 from portal.files.names import display_file_name
 from portal.files.ports import (
     DocumentReader,
@@ -105,13 +105,15 @@ class SummaryView:
 class CarriedView:
     """Перенесённое — поле `carried` диалога (§5.1).
 
-    `source_dialog_id` и `source_kind` — `None`, когда исходного диалога владельца уже нет.
+    `source_dialog_id` и `source_kind` — `None`, когда исходного диалога владельца уже нет;
+    `source_project_id` — проект источника вида `code` (§5.1).
     """
 
     text: str
     source_dialog_id: UUID | None
     source_kind: DialogKind | None
     source_title: str | None
+    source_project_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,56 @@ def _decode_cursor(cursor: str) -> list[object]:
     return values
 
 
+@dataclass(frozen=True)
+class CarriedFields:
+    """Перенесённое, готовое к записи в новый диалог (§5.10.7)."""
+
+    text: str
+    source_id: UUID
+    source_title: str | None
+
+
+def carried_text(carried: CarriedInput, max_chars: int) -> str:
+    """Текст перенесённого без пробелов по краям; пусто или длиннее предела — отказ."""
+    text = carried.text.strip()
+    if not text:
+        raise validation_error([field_error("carried.text", "required")])
+    if len(text) > max_chars:
+        raise validation_error([field_error("carried.text", "too_long")])
+    return text
+
+
+async def carried_fields(
+    repository: DialogRepository, owner_id: UUID, carried: CarriedInput, max_chars: int
+) -> CarriedFields:
+    """Проверить перенесённое: источник — только свой диалог, иначе `404` (§5.10.7).
+
+    Название источника — снимок на момент переноса; у диалога `code` — имя его проекта.
+    """
+    text = carried_text(carried, max_chars)
+    source = await repository.get_dialog(owner_id, carried.source_dialog_id)
+    if source is None:
+        raise not_found()
+    title = source.title
+    if source.kind == "code" and source.project_id is not None:
+        title = await repository.project_name(owner_id, source.project_id)
+    return CarriedFields(text, source.id, title)
+
+
+def encode_time_cursor(updated_at: datetime, item_id: UUID) -> str:
+    """Курсор списка по `updated_at`, затем `id` (§1.4)."""
+    return _encode_cursor(updated_at.isoformat(), item_id)
+
+
+def decode_time_cursor(cursor: str) -> tuple[datetime, UUID]:
+    """Разобрать курсор `encode_time_cursor`; неверный — `validation_error`."""
+    try:
+        updated_at, item_id = _decode_cursor(cursor)
+        return datetime.fromisoformat(str(updated_at)), UUID(str(item_id))
+    except ValueError as error:
+        raise validation_error([field_error("cursor", "invalid_format")]) from error
+
+
 class DialogExporter(Protocol):
     """Сборка файла экспорта; реализация — на `python-docx`."""
 
@@ -197,6 +249,7 @@ class DialogService:
         is_forming: Callable[[UUID], bool],
         summary_forming: Callable[[UUID], bool],
         exporter: DialogExporter,
+        code_enabled: bool,
     ) -> None:
         """Получить зависимости явно.
 
@@ -209,6 +262,8 @@ class DialogService:
         содержание разбора. `document_executor` — потоки чтения документов: ждущие
         блокировку PDF стоят в их очереди и не занимают общий пул цикла событий.
         `carried_max_chars` — предел длины перенесённого (`memory.max_chars`).
+        `code_enabled` — флаг раздела «Код»: при нём диалоги `cogis` только для чтения
+        (§7.5.15).
         """
         self._uow_factory = uow_factory
         self._storage = storage
@@ -225,6 +280,7 @@ class DialogService:
         self._is_forming = is_forming
         self._summary_forming = summary_forming
         self._exporter = exporter
+        self._code_enabled = code_enabled
 
     async def reset_interrupted(self) -> None:
         """При старте процесса убрать следы прерванной работы (§5.5, «Зависший ответ»).
@@ -278,23 +334,19 @@ class DialogService:
         С `carried` — диалог с перенесённым (§5.10.7): источник — только свой диалог,
         в диалог записываются текст, ссылка на источник и снимок его названия.
         """
-        text = None
         if carried is not None:
-            text = carried.text.strip()
-            if not text:
-                raise validation_error([field_error("carried.text", "required")])
-            if len(text) > self._carried_max_chars:
-                raise validation_error([field_error("carried.text", "too_long")])
+            carried_text(carried, self._carried_max_chars)
         await self.purge_empty(owner_id)
         now = self._clock.now()
-        dialog = Dialog(uuid4(), owner_id, kind, None, now, now, carried_text=text)
+        dialog = Dialog(uuid4(), owner_id, kind, None, now, now)
         async with self._uow_factory() as uow:
             if carried is not None:
-                source = await uow.dialogs.get_dialog(owner_id, carried.source_dialog_id)
-                if source is None:
-                    raise not_found()
-                dialog.carried_source_id = source.id
-                dialog.carried_source_title = source.title
+                fields = await carried_fields(
+                    uow.dialogs, owner_id, carried, self._carried_max_chars
+                )
+                dialog.carried_text = fields.text
+                dialog.carried_source_id = fields.source_id
+                dialog.carried_source_title = fields.source_title
             await uow.dialogs.add_dialog(dialog)
         return dialog
 
@@ -321,12 +373,29 @@ class DialogService:
                     None if source is None else source.id,
                     None if source is None else source.kind,
                     dialog.carried_source_title,
+                    None if source is None else source.project_id,
                 )
         return DialogDetails(dialog, docparse, summary, carried)
 
     async def get(self, owner_id: UUID, dialog_id: UUID) -> Dialog:
         """Диалог владельца."""
         return (await self.get_with_docparse(owner_id, dialog_id))[0]
+
+    async def find(self, owner_id: UUID, dialog_id: UUID) -> Dialog | None:
+        """Диалог владельца или `None`."""
+        async with self._uow_factory() as uow:
+            return await uow.dialogs.get_dialog(owner_id, dialog_id)
+
+    def check_writable(self, dialog: Dialog) -> None:
+        """Диалог прежнего помощника CoGIS при включённом разделе «Код» — только чтение."""
+        if dialog.kind == "cogis" and self._code_enabled:
+            raise errors.dialog_read_only()
+
+    async def writable(self, owner_id: UUID, dialog_id: UUID) -> Dialog:
+        """Диалог владельца, который можно менять: вопрос, повтор, память (§7.5.15)."""
+        dialog = await self.get(owner_id, dialog_id)
+        self.check_writable(dialog)
+        return dialog
 
     async def get_with_docparse(
         self, owner_id: UUID, dialog_id: UUID
@@ -351,21 +420,13 @@ class DialogService:
         self, owner_id: UUID, kind: DialogKind, limit: int, cursor: str | None
     ) -> CursorPage[Dialog]:
         """Диалоги одного вида по убыванию `updated_at`."""
-        before = None
-        if cursor is not None:
-            try:
-                updated_at, dialog_id = _decode_cursor(cursor)
-                before = (datetime.fromisoformat(str(updated_at)), UUID(str(dialog_id)))
-            except ValueError as error:
-                raise validation_error([field_error("cursor", "invalid_format")]) from error
+        before = None if cursor is None else decode_time_cursor(cursor)
         async with self._uow_factory() as uow:
             items = await uow.dialogs.list_dialogs(owner_id, kind, limit + 1, before)
         more = len(items) > limit
         items = items[:limit]
         last = items[-1] if items else None
-        next_cursor = (
-            _encode_cursor(last.updated_at.isoformat(), last.id) if more and last else None
-        )
+        next_cursor = encode_time_cursor(last.updated_at, last.id) if more and last else None
         return CursorPage(items, next_cursor)
 
     async def rename(self, owner_id: UUID, dialog_id: UUID, title: str) -> Dialog:
@@ -379,6 +440,9 @@ class DialogService:
             dialog = await uow.dialogs.get_dialog(owner_id, dialog_id, lock=True)
             if dialog is None:
                 raise not_found()
+            if dialog.kind == "code":
+                raise errors.project_dialog()
+            self.check_writable(dialog)
             await uow.dialogs.set_title(owner_id, dialog_id, title)
             dialog.title = title
             return dialog
@@ -388,6 +452,9 @@ class DialogService:
 
         Формируемый в нём ответ оборвётся сам: его задача увидит, что сообщения нет.
         """
+        dialog = await self.get(owner_id, dialog_id)
+        if dialog.kind == "code":
+            raise errors.project_dialog()
         if not await self._delete(owner_id, dialog_id, only_empty=False):
             raise not_found()
 
@@ -425,8 +492,12 @@ class DialogService:
             files = await uow.dialogs.message_attachments(
                 owner_id, [message.id for message in found if message.role == "user"]
             )
+            section = _SECTION_TITLES.get(dialog.kind, "")
+            if dialog.kind == "code" and dialog.project_id is not None:
+                # Название диалога помощника — у проекта: «Код <имя> <дата>» (§7.5.8).
+                section = f"Код {await uow.dialogs.project_name(owner_id, dialog.project_id)}"
         views = [MessageView(message, files.get(message.id, [])) for message in found]
-        title = dialog.title or f"{_SECTION_TITLES[dialog.kind]} {dialog.created_at:%Y-%m-%d}"
+        title = dialog.title or f"{section} {dialog.created_at:%Y-%m-%d}"
         if message_id is not None:
             answer = next(
                 (

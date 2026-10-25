@@ -1,6 +1,7 @@
 import { ThemeContext } from '@skbkontur/react-ui';
 import { useContext, useLayoutEffect } from 'react';
 
+import { codeVariables } from './codeColors';
 import type { ResolvedTheme } from './preference';
 
 type KonturTheme = React.ContextType<typeof ThemeContext>;
@@ -28,6 +29,7 @@ export function portalVariables(theme: KonturTheme): Record<string, string> {
     '--p-warning-bg': mix(20, theme.warningMain, theme.bgDefault),
     '--p-warning-icon': mix(55, theme.warningMain, theme.textColorDefault),
     '--p-mark-bg': mix(22, theme.linkColor, theme.bgDefault),
+    '--p-added-bg': mix(18, theme.green, theme.bgDefault),
   };
 }
 
@@ -37,7 +39,7 @@ export function ThemeBridge({ resolved }: { resolved: ResolvedTheme }) {
 
   useLayoutEffect(() => {
     const root = document.documentElement;
-    for (const [name, value] of Object.entries(portalVariables(theme))) {
+    for (const [name, value] of Object.entries({ ...portalVariables(theme), ...codeVariables(resolved) })) {
       root.style.setProperty(name, value);
     }
     root.dataset.theme = resolved;

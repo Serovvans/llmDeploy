@@ -9,6 +9,8 @@ interface MemoryLayoutProps {
   bottom: React.ReactNode;
   /** Строка действий, заметки над лентой и сама лента. */
   children: React.ReactNode;
+  /** Панель всегда поверх ленты на всю ширину (помощник проекта, концепция §5.13.12). */
+  overlay?: boolean;
 }
 
 /**
@@ -16,7 +18,7 @@ interface MemoryLayoutProps {
  * В окне уже 1440 px панель встаёт поверх ленты до верхнего края нижнего блока — его высота
  * передаётся стилям переменной: панель запроса меняет высоту по мере набора текста.
  */
-export function MemoryLayout({ panel, bottom, children }: MemoryLayoutProps) {
+export function MemoryLayout({ panel, bottom, children, overlay = false }: MemoryLayoutProps) {
   const main = useRef<HTMLDivElement>(null);
   const lower = useRef<HTMLDivElement>(null);
 
@@ -32,7 +34,7 @@ export function MemoryLayout({ panel, bottom, children }: MemoryLayoutProps) {
   }, []);
 
   return (
-    <div ref={main} className={styles.main}>
+    <div ref={main} className={overlay ? `${styles.main} ${styles.overlay}` : styles.main}>
       <div className={styles.dialog}>
         <div className={styles.upper}>{children}</div>
         <div ref={lower} className={styles.lower}>

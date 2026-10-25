@@ -1,0 +1,129 @@
+/* Экраны раздела «Код» со списком проектов (концепция §5.13.3, §5.13.4, §5.13.14). */
+.section {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 56px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.titleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.crumb {
+  flex: none;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.crumb a,
+.crumb a:visited {
+  color: var(--p-text-muted);
+}
+
+.crumbSep {
+  flex: none;
+  color: var(--p-text-muted);
+}
+
+.title {
+  overflow: hidden;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  width: 100%;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 32px 32px 48px;
+}
+
+.intro {
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.blocks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: var(--p-bg);
+}
+
+.blockTitle {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.blockText {
+  flex: 1;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.modalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.uploader {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fileName {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 20px;
+}

@@ -26,6 +26,11 @@ SQL_DATA_PROMPT = "Подготовь тестовые данные."
 SQL_FIX_PROMPT = "Исправь запрос."
 # Протокол «Пересказ» 0.8 (§12.1): черновик сжатия и переноса памяти диалога.
 SUMMARY_PROMPT = "Перескажи диалог."
+CODE_FIX_PROMPT = "Исправь ошибки сборки."
+CODE_EDIT_LINE = "// Правка заглушки."
+_CODE_FIX_MARK = re.compile(r"\[\[stub:code-fix\]\](.*?)\[\[/stub:code-fix\]\]", re.DOTALL)
+_PROJECT_LINE = re.compile(r"^<проект ", re.MULTILINE)
+_PROJECT_FILE = re.compile(r'<файл имя="([^"\n]*)">\n(.*?)\n</файл>', re.DOTALL)
 _SUMMARY_MESSAGE = re.compile(r"<(?:пользователь|помощник)>")
 RERANK_ERROR_MARK = "[[stub:rerank-error]]"
 NO_USAGE_MARK = "[[stub:no-usage]]"
@@ -167,6 +172,30 @@ def image_description(image: bytes, max_tokens: int | None) -> tuple[str, str]:
     return f"Описание изображения-заглушки {digest}.", "stop"
 
 
+def _first_file(text: str) -> tuple[str, str] | None:
+    """Путь и содержимое первого файла блока `<проект>` (§7.5.9); `None` — файлов нет."""
+    start = _PROJECT_LINE.search(text)
+    found = _PROJECT_FILE.search(text, start.start()) if start else None
+    return (found.group(1), found.group(2)) if found else None
+
+
+def _edit_block(path: str, content: str) -> str:
+    """Блок правки «файл целиком» (§7.5.10)."""
+    return f"```csharp path={path}\n{content}\n```"
+
+
+def code_edit(text: str) -> str:
+    """Правило 2а: правка первого файла проекта со строкой заглушки в конце (§12.2)."""
+    first = _first_file(text)
+    path, content = first if first else ("StubFile.cs", "// Файл заглушки.")
+    if first:
+        content = f"{content.rstrip(chr(10))}\n{CODE_EDIT_LINE}"
+    head = "Правка-заглушка."
+    if any(line.startswith("[1] ") for line in text.splitlines()):
+        head += " [1]"
+    return f"{head}\n\n{_edit_block(path, content)}"
+
+
 def protocol_reply(turn: UserTurn, max_tokens: int | None = None) -> str | None:
     """Ответ на запрос одного из протоколов 0.15 или пересказа 0.8; `None` — не такой запрос.
 
@@ -190,6 +219,12 @@ def protocol_reply(turn: UserTurn, max_tokens: int | None = None) -> str | None:
     if first_line == SQL_FIX_PROMPT:
         marked = _SQL_FIX_MARK.search(turn.text)
         return marked.group(1) if marked else f"```sql\n{_block(turn.text, 'запрос')}\n```"
+    if first_line == CODE_FIX_PROMPT:
+        # Без пометки — первый файл без изменений: правка пуста, цикл кончается (§7.5.11).
+        marked = _CODE_FIX_MARK.search(turn.text)
+        first = _first_file(turn.text)
+        unchanged = _edit_block(*first) if first else ""
+        return marked.group(1) if marked else unchanged
     return None
 
 
@@ -206,6 +241,8 @@ def reply_text(
         return marked.group(1)
     if turn.text == RECOGNITION_PROMPT and len(turn.images) == 1:
         return f"Текст страницы-заглушки {_digest(turn.images[0])}."
+    if _PROJECT_LINE.search(turn.text):
+        return code_edit(turn.text)
     if response_format is not None and response_format.get("type") == "json_schema":
         schema = response_format.get("json_schema", {}).get("schema", {})
         return json.dumps(schema_instance(schema), ensure_ascii=False)

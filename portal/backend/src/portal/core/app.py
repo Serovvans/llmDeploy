@@ -11,6 +11,8 @@ from starlette.responses import JSONResponse, Response
 
 from portal.auth.admin_routes import router as admin_router
 from portal.auth.routes import router as auth_router
+from portal.code.routes import IMPORT_UPLOAD_PATH
+from portal.code.routes import router as code_router
 from portal.core import errors
 from portal.core.access import SESSION_COOKIE, clear_session_cookie
 from portal.core.config_routes import router as config_router
@@ -68,6 +70,7 @@ def _body_limits(container: Container) -> tuple[BodyLimit, list[tuple[re.Pattern
     attachment_limit = container.settings.chat.attachment_max_bytes
     document_limit = container.settings.kb.document_max_bytes
     docparse_limit = container.settings.docparse.document_max_bytes
+    import_limit = container.settings.code.import_max_bytes
     default = BodyLimit(
         server.json_body_max_bytes, errors.request_too_large(server.json_body_max_bytes)
     )
@@ -93,6 +96,13 @@ def _body_limits(container: Container) -> tuple[BodyLimit, list[tuple[re.Pattern
                 errors.file_too_large(docparse_limit),
             ),
         ),
+        (
+            IMPORT_UPLOAD_PATH,
+            BodyLimit(
+                import_limit + server.multipart_overhead_bytes,
+                errors.file_too_large(import_limit),
+            ),
+        ),
         (RECORDING_UPLOAD_PATH, recording),
         (KB_RECORDING_UPLOAD_PATH, recording),
     ]
@@ -114,6 +124,7 @@ def create_app(container: Container) -> FastAPI:
         await container.generation.shutdown()
         await container.drafts.shutdown()
         await container.docparse.shutdown()
+        await container.code.shutdown()
         container.sql_checker.close()
         container.hash_executor.shutdown()
         # Идущее чтение не ждём: тяжёлая страница PDF задержала бы остановку.
@@ -135,6 +146,7 @@ def create_app(container: Container) -> FastAPI:
     app.include_router(dialogs_router)
     app.include_router(tools_router)
     app.include_router(kb_router)
+    app.include_router(code_router)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:

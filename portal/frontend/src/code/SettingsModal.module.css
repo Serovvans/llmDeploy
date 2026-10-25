@@ -1,0 +1,60 @@
+/* Настройки проекта (концепция §5.13.13). */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.part {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.heading {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.subheading {
+  margin: 4px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.name {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr) max-content;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.label,
+.muted {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.mono {
+  overflow-wrap: anywhere;
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+}
+
+/* Без зазора: у `Checkbox` библиотеки свои поля 6 px сверху и снизу — они и разделяют строки. */
+.packages {
+  display: flex;
+  flex-direction: column;
+}
+
+.error {
+  margin-top: 4px;
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}
