@@ -27,5 +27,5 @@ deploy/.env.deploy_copy
 .claude/notes/code-workshop/cogis-docs/
 deploy/cogis-sdk/
 
-# Customer property: GPTool instruction PDF (portal-design.md §8.5, CLAUDE.md rule 10)
-docs/Инструкция создания GPtool.pdf
+# Customer property: CoGIS documentation PDFs (portal-design.md §8.5, CLAUDE.md rule 10)
+docs/*.pdf
