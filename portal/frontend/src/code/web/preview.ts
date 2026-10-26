@@ -115,6 +115,8 @@ export interface PreviewProblem {
   column: number | null;
   /** Текст ошибки браузера как есть или адрес запрета. */
   text: string;
+  /** Директива CSP у запрета; у ошибки — `null`. */
+  directive: string | null;
 }
 
 export interface PreviewLog {
@@ -139,9 +141,38 @@ export function appendMessage(log: PreviewLog, message: FrameMessage, limits: { 
   }
   const problem: PreviewProblem =
     message.type === 'error'
-      ? { kind: 'error', file: message.file, line: message.line, column: message.column, text: message.message }
-      : { kind: message.directive.startsWith('img-src') ? 'image' : 'network', file: null, line: null, column: null, text: message.url };
+      ? { kind: 'error', file: message.file, line: message.line, column: message.column, text: message.message, directive: null }
+      : {
+          kind: message.directive.startsWith('img-src') ? 'image' : 'network',
+          file: null,
+          line: null,
+          column: null,
+          text: message.url,
+          directive: message.directive,
+        };
   return { ...log, problems: [...log.problems, problem] };
+}
+
+/** Тип ошибки браузера из её текста («Uncaught TypeError: …» → `TypeError`); не распознан — `Error`. */
+export function errorName(text: string): string {
+  return /^(?:Uncaught (?:\(in promise\) )?)?([A-Za-z_$][\w$]*(?:Error|Exception))\b/.exec(text)?.[1] ?? 'Error';
+}
+
+/**
+ * Строки вопроса «Исправить с помощником» по ошибкам предпросмотра (§5.13.20). Слой из образца базы
+ * заказчика — только файл, строка, тип ошибки и директива запрета: текст ошибки и адрес могут нести
+ * значения строк базы, а вопрос уходит модели и в историю (ПД §5.8, §8.6).
+ */
+export function previewFixItems(problems: readonly PreviewProblem[], fromSample: boolean): { path: string | null; line: number | null; message: string }[] {
+  const pane = texts.workshop.web.pane;
+  return problems
+    .filter((problem) => problem.kind !== 'image')
+    .map((problem) => {
+      if (problem.kind === 'network') {
+        return { path: problem.file, line: problem.line, message: fromSample ? pane.networkDirective(problem.directive ?? '') : pane.network(problem.text) };
+      }
+      return { path: problem.file, line: problem.line, message: fromSample ? errorName(problem.text) : problem.text };
+    });
 }
 
 /** Ошибки кода — то, что считается на вкладке и на станции; запрет картинки ошибкой не считается (§5.13.21). */

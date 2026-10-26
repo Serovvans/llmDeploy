@@ -308,7 +308,8 @@ test.describe('Пустые состояния и проверки ввода', 
     // С 0.9 адрес помощника CoGIS ведёт в раздел «Код».
     await page.goto('/cogis');
     await expect(page).toHaveURL(/\/code$/);
-    await expect(page.getByRole('heading', { name: 'Пример из инструкции' })).toBeVisible();
+    // С 1.0 начало раздела — выбор вида проекта (docs/portal-ui.md §5.13.17).
+    await expect(page.getByRole('heading', { name: 'Что нужно сделать' })).toBeVisible();
     await page.goto('/documents');
     await expect(page.getByText('Выберите файл или перетащите его сюда').first()).toBeVisible();
 

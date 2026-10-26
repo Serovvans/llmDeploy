@@ -16,7 +16,8 @@ import { MemoryLayout } from '../components/memory/MemoryLayout';
 import { Notice } from '../components/Notice';
 import { useMemoryUi } from '../memory/useMemoryUi';
 import { useSession } from '../session/SessionContext';
-import { formatDate, texts } from '../texts';
+import { snapshotDay } from '../db/selection';
+import { texts } from '../texts';
 import styles from './Assistant.module.css';
 import type { Fragment } from './CodeEditor';
 import { EditProposal } from './EditProposal';
@@ -436,7 +437,7 @@ export function useAssistant(options: Options) {
     );
   } else if (db) {
     const unusable = connection?.usable === false;
-    const date = connection?.snapshot ? formatDate(connection.snapshot.taken_at) : null;
+    const date = connection?.snapshot ? snapshotDay(connection.snapshot.taken_at) : null;
     const link = (
       <span data-opener="scope-schema">
         <Link component="button" onClick={() => options.onOpenSettings('scope-schema')}>

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
+import { ApiError } from '../api/client';
 import type { AdminDbConnection } from '../api/types';
 import { texts } from '../texts';
 import { parseExclusion, validateConnection } from './ConnectionForm';
+import { dbCheckUnavailable } from './refusal';
 import { clipboardText, findingLine, reasonText } from './rights';
 import { availableAt, connectionOf, dbValue, refreshedAt } from './selection';
 
@@ -144,5 +146,19 @@ describe('выбор базы', () => {
     expect(refreshedAt(new Date(2026, 9, 26, 14, 5).toISOString(), now)).toBe('сегодня в 14:05');
     expect(availableAt(new Date(2026, 9, 26, 14, 35).toISOString(), now)).toBe('14:35');
     expect(availableAt(new Date(2026, 9, 27, 9, 0).toISOString(), now)).toBe('27.10.2026, 09:00');
+  });
+});
+
+describe('«Проверить запрос»: отказ подключения — строка «Проверка недоступна» (§5.13.24)', () => {
+  const reasons = texts.db.run.reasons;
+  const error = (code: string, details?: Record<string, unknown>) => new ApiError(409, { code, message: '', ...(details ? { details } : {}) });
+
+  it('коды подключения — однострочное состояние; прочие отказы — не оно', () => {
+    expect(dbCheckUnavailable(error('db_connection_unavailable'))).toBe(reasons.connection_unavailable);
+    expect(dbCheckUnavailable(error('db_connection_unusable'))).toBe(reasons.connection_unusable);
+    expect(dbCheckUnavailable(error('db_unavailable', { reason: 'busy' }))).toBe(reasons.db_busy);
+    expect(dbCheckUnavailable(error('db_unavailable', { reason: 'timeout' }))).toBe(reasons.db_unavailable);
+    expect(dbCheckUnavailable(error('db_samples_not_allowed'))).toBeNull();
+    expect(dbCheckUnavailable(new Error('x'))).toBeNull();
   });
 });

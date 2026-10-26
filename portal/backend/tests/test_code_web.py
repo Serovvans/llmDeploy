@@ -5,6 +5,7 @@
 """
 
 import io
+import time
 import zipfile
 from typing import Any
 
@@ -215,6 +216,17 @@ def test_parameter_values_are_string_constants() -> None:
         "SELECT * FROM t WHERE n = @n AND id = $1", [("@n", "O'Brien"), ("$1", "7")]
     )
     assert bound == "SELECT * FROM t WHERE n = 'O''Brien' AND id = '7'"
+
+
+def test_parameter_set_of_a_full_body_is_checked_in_linear_time() -> None:
+    """Тело на 1 МиБ: 7000 параметров в запросе и 28 900 лишних имён — отказ без задержки."""
+    needed = [f"@p{i}" for i in range(7000)]
+    given = [(f"@x{i}", "") for i in range(28900)] + [(name, "") for name in needed]
+    started = time.monotonic()
+    with pytest.raises(AppError) as raised:
+        bind_parameters(" ".join(needed), given)
+    assert time.monotonic() - started < 0.25
+    assert raised.value.fields[0].code == "unknown_value"
 
 
 @pytest.mark.parametrize(

@@ -24,6 +24,7 @@ from portal.databases.domain import (
     quote_ident,
     resolve_table,
     sample_origin,
+    table_index,
 )
 from portal.databases.ports import (
     DbRightsExcessError,
@@ -417,17 +418,26 @@ class SqlTestRunner:
         if source is None:
             block.unavailable("connection_unavailable")
             return None
+        # Поиск по словарю и учёт повторов множеством: запрос сотрудника может назвать
+        # тысячи таблиц, а работа идёт в единственном цикле событий `portal-api`.
+        index = table_index(source.connection, source.snapshot)
+        seen: set[tuple[str, str]] = set()
         chosen: list[tuple[Mapping[str, Any], Any]] = []
         for schema_name, name in block.tables:
-            table = resolve_table(source.connection, source.snapshot, schema_name, name)
-            why: InventedReason | None = "not_in_snapshot"
-            if table is not None:
-                why = sample_origin(source.connection, table)
-            if why is not None or table is None:
-                block.reasons[name] = why or "not_in_snapshot"
+            table = resolve_table(source.connection, index, schema_name, name)
+            if table is None:
+                block.reasons[name] = "not_in_snapshot"
                 continue
-            if all(table is not other for other, _ in chosen):
-                chosen.append((table, copy_plan(source.connection, table)))
+            key = (table["schema"], table["name"])
+            if key in seen:
+                continue
+            seen.add(key)
+            plan = copy_plan(source.connection, table)
+            why = sample_origin(source.connection, table, plan)
+            if why is not None:
+                block.reasons[name] = why
+                continue
+            chosen.append((table, plan))
         if not chosen:
             return []
         requests = [SampleRequest(t["schema"], t["name"], plan.columns) for t, plan in chosen]

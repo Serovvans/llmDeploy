@@ -85,3 +85,8 @@
   line-height: 20px;
   overflow-wrap: anywhere;
 }
+
+.resultTitle:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}

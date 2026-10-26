@@ -77,7 +77,8 @@ interface Props {
   expanded: boolean;
   onExpand: (expanded: boolean) => void;
   onRun: (files: CodeFile[]) => void;
-  onProblems: (problems: PreviewProblem[]) => void;
+  /** `fromSample` — слой запуска взят из образца базы заказчика (вопрос помощнику без текста ошибок). */
+  onProblems: (problems: PreviewProblem[], fromSample: boolean) => void;
   onJump: (path: string, line: number, column: number) => void;
   /** Предпросмотр или подключения выключили, пока колонка открыта. */
   onFeatureOff: () => void;
@@ -248,7 +249,7 @@ export function PreviewPane(props: Props) {
       const current = latest.current;
       setStatus('loading');
       setLog(EMPTY_LOG);
-      current.onProblems([]);
+      current.onProblems([], false);
       setFrameKey(null);
       const files = await current.prepare();
       if (!files) {
@@ -326,7 +327,7 @@ export function PreviewPane(props: Props) {
   // Ошибки — в строку «Путь до CoGIS» и в вопрос «Исправить с помощником».
   const { onProblems } = props;
   useEffect(() => {
-    onProblems(log.problems);
+    onProblems(log.problems, init.current?.layer.source === 'sample');
   }, [log.problems, onProblems]);
 
   useEffect(() => {

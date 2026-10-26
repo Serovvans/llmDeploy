@@ -249,8 +249,8 @@ function Headline({ kind, children }: { kind: 'ok' | 'warning' | 'error'; childr
   );
 }
 
-/** Состояние без данных — одна строка без рамки, как «Синтаксис проверен». */
-function Line({ icon, children }: { icon?: React.ReactNode; children: string }) {
+/** Однострочное состояние без рамки, как «Синтаксис проверен»: значок и текст (§5.7). */
+export function Line({ icon, children }: { icon?: React.ReactNode; children: string }) {
   return (
     // Не `<p>`: индикатор библиотеки — блочный элемент.
     <div className={styles.line}>

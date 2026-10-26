@@ -2008,6 +2008,7 @@ export const texts = {
         errorsEmpty: 'Ошибок нет',
         placeUnknown: 'место не определено',
         network: (url: string) => `Код обратился к ${url}: в предпросмотре сеть закрыта`,
+        networkDirective: (directive: string) => `Код обратился к сети (${directive}): в предпросмотре сеть закрыта`,
         image: (url: string) =>
           `Код показывает картинку ${url}: в предпросмотре картинки по адресам не загружаются. В CoGIS она загрузится, если адрес верен для его сервера`,
         done: (calls: number, errors: number) => `Предпросмотр: вызовов ${calls}, ошибок ${errors}`,

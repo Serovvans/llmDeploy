@@ -7,17 +7,21 @@
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
-from typing import Any
+import time
+from collections.abc import AsyncIterator, Sequence
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
 import pytest
 
 from portal.core.settings import Settings, SqlSandboxSettings
+from portal.databases.ports import DbUnavailableError, SampleRequest, SampleRows
 from portal.llm.ports import ContentDelta, Finished
 from portal.tools.ports import SandboxQueryError, SandboxRun, SandboxTable
 from portal.tools.sandbox import AsyncpgSqlSandbox
+from portal.tools.sql_run import DbCheck, SampleSource, SqlTestRunner, _Block
 from tests.conftest import close_portal, make_portal
 from tests.db_support import (
     MARKER,
@@ -360,3 +364,38 @@ async def test_real_sandbox_hides_sample_values_in_execution_errors(
         assert MARKER not in str(portal.model.sql_requests)
     finally:
         await close_portal(portal)
+
+
+async def test_thousands_of_tables_against_full_snapshot_take_linear_time() -> None:
+    """Запрос с тысячами имён против снимка на пределе не занимает цикл событий (§13.5).
+
+    До индекса снимка такой блок держал единственный процесс `portal-api` секунды.
+    """
+    schemas = ["cadastre", "public"]
+    columns = [{"name": f"c{j}", "binary": False} for j in range(20)]
+    snapshot: Any = SimpleNamespace(
+        tables=[
+            {"schema": schemas[i % 2], "name": f"t{i}", "columns": columns} for i in range(2000)
+        ]
+    )
+    exclusions = [{"schema": "cadastre", "table": f"x{i}", "column": None} for i in range(500)]
+    connection: Any = SimpleNamespace(
+        schemas=schemas, samples_allowed=True, sample_exclusions=exclusions
+    )
+    requested: list[SampleRequest] = []
+
+    async def read(requests: Sequence[SampleRequest]) -> Sequence[SampleRows]:
+        requested.extend(requests)
+        raise DbUnavailableError("busy")
+
+    names = [f"t{i}" for i in range(2000)] + [f"x{i}" for i in range(2621)]
+    block = _Block(0, 1, "", tables=[(None, name) for name in names + names])
+    runner = SqlTestRunner(cast(Any, None), cast(Any, None), cast(Any, None), cast(Any, None))
+    check = DbCheck("Кадастр", 5, SampleSource(connection, snapshot, read))
+
+    started = time.monotonic()
+    assert await runner._samples(block, check) is None
+    assert time.monotonic() - started < 0.5
+    assert block.reason == "db_busy"
+    assert [item.table for item in requested] == [f"t{i}" for i in range(2000)]
+    assert len(block.reasons) == 2621

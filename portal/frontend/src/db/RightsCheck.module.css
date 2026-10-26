@@ -21,7 +21,15 @@
 }
 
 .warningTitle {
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
   font-weight: 500;
+}
+
+.check:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 4px;
 }
 
 .okIcon,

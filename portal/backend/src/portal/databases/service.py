@@ -43,6 +43,7 @@ from portal.databases.domain import (
     sample_origin,
     selected_tables,
     snapshot_body,
+    table_index,
 )
 from portal.databases.ports import (
     CustomerDatabase,
@@ -670,7 +671,8 @@ class DbService:
             raise validation_error([field_error("db.tables", "too_many")])
         if len(set(tables)) != len(tables):
             raise validation_error([field_error("db.tables", "invalid_format")])
-        if any(find_table(connection, snapshot, schema, name) is None for schema, name in tables):
+        index = table_index(connection, snapshot)
+        if any((schema, name) not in index for schema, name in tables):
             raise validation_error([field_error("db.tables", "unknown_value")])
         return Selection(connection.id, connection.title, tuple(tables))
 

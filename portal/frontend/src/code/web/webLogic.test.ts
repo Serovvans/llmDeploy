@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { texts } from '../../texts';
-import { appendMessage, EMPTY_LOG, errorCount, type FrameMessage, logResult, MAX_TEXT, notInserted, parseFrameMessage } from './preview';
+import { appendMessage, EMPTY_LOG, errorCount, type FrameMessage, logResult, MAX_TEXT, notInserted, parseFrameMessage, previewFixItems } from './preview';
 import { sqlParameters, stripQuotes } from './sqlParams';
 import { extractHtml, fixQuestion, languageOf } from './webRules';
 
@@ -42,6 +42,34 @@ describe('сообщения фрейма предпросмотра — нед�
     state = appendMessage(state, { type: 'blocked', url: 'https://api.example', directive: 'connect-src' }, LIMITS);
     expect(state.problems.map((item) => item.kind)).toEqual(['image', 'error']);
     expect(errorCount(state)).toBe(1);
+  });
+
+  it('слой из образца базы: в вопрос помощнику — только файл, строка, тип ошибки и директива (ПД §5.8)', () => {
+    const big = { log_max_entries: 10, errors_max: 10 };
+    let state = appendMessage(
+      EMPTY_LOG,
+      { type: 'error', file: 'plugin.js', line: 4, column: 9, message: 'Uncaught SyntaxError: Unexpected token \'И\', "Иванов Иван Иванович" is not valid JSON' },
+      big,
+    );
+    state = appendMessage(state, { type: 'error', file: null, line: null, column: null, message: 'Uncaught (in promise) TypeError: Иванов' }, big);
+    state = appendMessage(state, { type: 'error', file: 'plugin.js', line: 7, column: 1, message: 'Uncaught Иванов Иван' }, big);
+    state = appendMessage(state, { type: 'blocked', url: 'https://x.example/?n=50:01:0000000:123', directive: 'connect-src' }, big);
+    state = appendMessage(state, { type: 'blocked', url: 'https://x.example/Иванов.png', directive: 'img-src' }, big);
+
+    const sample = previewFixItems(state.problems, true);
+    expect(sample.map((item) => item.message)).toEqual([
+      'SyntaxError',
+      'TypeError',
+      'Error',
+      texts.workshop.web.pane.networkDirective('connect-src'),
+    ]);
+    expect(sample[0]).toMatchObject({ path: 'plugin.js', line: 4 });
+    const question = fixQuestion('preview', sample);
+    expect(question).not.toMatch(/Иванов|50:01|x\.example/);
+
+    const invented = previewFixItems(state.problems, false);
+    expect(invented[0]?.message).toContain('Иванов Иван Иванович');
+    expect(invented[3]?.message).toBe(texts.workshop.web.pane.network('https://x.example/?n=50:01:0000000:123'));
   });
 
   it('«что сделано» — по функции; слой из образца называет таблицу и число объектов', () => {

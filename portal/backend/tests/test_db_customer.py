@@ -29,6 +29,10 @@ SCHEMA = """
 CREATE SCHEMA shop;
 CREATE TABLE shop.items (id serial PRIMARY KEY, name text, note text);
 INSERT INTO shop.items (name, note) VALUES ('Первый', repeat('x', 100)), ('Второй', NULL);
+CREATE DOMAIN shop.qty AS integer CHECK (VALUE > 0);
+CREATE TABLE shop.orders (
+    item_id integer REFERENCES shop.items (id), qty shop.qty, area numeric(12,2), made date
+);
 CREATE VIEW shop.mode AS
     SELECT pg_catalog.current_setting('transaction_read_only') AS read_only,
            pg_catalog.current_setting('transaction_isolation') AS isolation;
@@ -219,6 +223,28 @@ async def test_third_access_to_one_server_waits_then_is_busy(
         await adapter.check(target)
     assert raised.value.reason == "busy"
     await asyncio.gather(first, second)
+
+
+async def test_snapshot_keeps_keys_and_types_from_real_catalog_rows(
+    settings: Settings, prepared: None
+) -> None:
+    """asyncpg отдаёт столбцы `"char"` (`contype`, `typtype`) байтами — ключи и типы не теряются."""
+    _, content = await _adapter(settings).snapshot(_target(settings, _role("reader")))
+    tables = {t["name"]: {c["name"]: c for c in t["columns"]} for t in content.tables}
+    items, orders = tables["items"], tables["orders"]
+    assert items["id"]["primary_key"] is True
+    assert orders["item_id"]["primary_key"] is False
+    assert orders["item_id"]["references"] == {"schema": "shop", "table": "items", "column": "id"}
+    sandboxed = {name: column["sandbox_type"] for name, column in {**items, **orders}.items()}
+    assert sandboxed == {
+        "id": "integer",
+        "name": "text",
+        "note": "text",
+        "item_id": "integer",
+        "qty": "integer",
+        "area": "numeric(12,2)",
+        "made": "date",
+    }
 
 
 @pytest.mark.parametrize(

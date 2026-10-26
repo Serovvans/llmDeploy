@@ -188,8 +188,8 @@ _RELATION_TYPES = {
 }
 
 
-def _relkind(value: bytes | str) -> str:
-    """`pg_class.relkind` (тип `"char"`): asyncpg отдаёт его байтами."""
+def _char(value: bytes | str) -> str:
+    """Столбец каталога типа `"char"` (`relkind`, `contype`, `typtype`): asyncpg отдаёт байты."""
     return value.decode() if isinstance(value, bytes) else value
 
 
@@ -276,7 +276,8 @@ def column_types(row: Any, postgis: str | None) -> tuple[str, dict[str, Any] | N
         return shown, {"type": subtype, "srid": srid}, sandbox_type(shown), False
     if row["typname"] == "bytea" and row["type_schema"] == "pg_catalog":
         return type_text, None, "bytea", True
-    if row["typtype"] == "d":
+    typtype = _char(row["typtype"])
+    if typtype == "d":
         base = row["base_type"] or _TEXT
         base_spatial = spatial_type(base)
         if base_spatial is not None and postgis is not None and base.startswith(f"{postgis}."):
@@ -287,7 +288,7 @@ def column_types(row: Any, postgis: str | None) -> tuple[str, dict[str, Any] | N
     if row["elem_oid"] is not None:
         internal = type_text if row["elem_schema"] == "pg_catalog" else _TEXT
         return type_text, None, sandbox_type(_catalog_type(internal, row["typname"][1:])), False
-    if row["typtype"] == "b" and row["type_schema"] == "pg_catalog":
+    if typtype == "b" and row["type_schema"] == "pg_catalog":
         return type_text, None, sandbox_type(_catalog_type(type_text, row["typname"])), False
     return type_text, None, _TEXT, False
 
@@ -406,9 +407,7 @@ class AsyncpgCustomerDatabase:
                 RightsFinding(
                     "write",
                     tuple(item for item in _WRITE_ORDER if item in granted),
-                    tuple(
-                        (_RELATION_TYPES[_relkind(row["relkind"])], row["name"]) for row in written
-                    ),
+                    tuple((_RELATION_TYPES[_char(row["relkind"])], row["name"]) for row in written),
                     written[0]["total"],
                 )
             )
@@ -546,7 +545,7 @@ def _snapshot_tables(
     references: dict[tuple[int, int], dict[str, Any]] = {}
     for row in constraints:
         conkey = list(row["conkey"] or [])
-        if row["contype"] == "p":
+        if _char(row["contype"]) == "p":
             keys.setdefault(row["conrelid"], set()).update(conkey)
             continue
         target_names = names.get(row["ref_oid"], {})
@@ -586,7 +585,7 @@ def _snapshot_tables(
             {
                 "schema": relation["nspname"],
                 "name": relation["relname"],
-                "kind": "view" if _relkind(relation["relkind"]) in ("v", "m") else "table",
+                "kind": "view" if _char(relation["relkind"]) in ("v", "m") else "table",
                 "comment": relation["comment"],
                 "columns": listed,
             }

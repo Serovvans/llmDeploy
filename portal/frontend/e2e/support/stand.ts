@@ -168,3 +168,52 @@ export function promptUsage(answerId: string, since: string): PromptUsage | null
   }
   return null;
 }
+
+/**
+ * Перезапускает `portal-api` с накладкой стенда, в которой разделы верхнего уровня из `sectionsYaml`
+ * (например, `db:` и `code:`) заменены целиком; остальное — как в накладке стенда. Возвращает функцию,
+ * которая перезапускает `portal-api` с прежней накладкой. Файлы стенда не меняются, как у
+ * `restartApiWith`. Compose подставляет `CUSTOMER_DB_PASSWORD` из окружения прогона.
+ */
+export function restartApiWithSections(sectionsYaml: string): () => void {
+  let base = readFileSync(STAND_OVERRIDE_FILE, 'utf8');
+  for (const section of sectionsYaml.match(/^[A-Za-z_]+(?=:)/gm) ?? []) {
+    base = base.replace(new RegExp(`^${section}:\\n(?:(?:[ #].*)?\\n)*`, 'm'), '');
+  }
+  mkdirSync(STATE_DIR, { recursive: true });
+  const override = path.join(STATE_DIR, 'api-sections-override.yaml');
+  const composeFile = path.join(STATE_DIR, 'api-sections-override.compose.yml');
+  writeFileSync(override, `${base}\n${sectionsYaml}`);
+  writeFileSync(
+    composeFile,
+    `services:\n  portal-api:\n    volumes:\n      - ${JSON.stringify(`${override}:/etc/portal/config.override.yaml:ro`)}\n`,
+  );
+  const up = ['up', '-d', '--no-build', '--no-deps', '--force-recreate', '--wait', 'portal-api'];
+  standCompose('-f', composeFile, ...up);
+  return () => {
+    standCompose(...up);
+  };
+}
+
+/** Запрос к тестовой базе заказчика `customer-db` (база `cadastre`) от суперпользователя. */
+export function customerSql(query: string): string[] {
+  return standCompose('exec', '-T', 'customer-db', 'psql', '-U', 'postgres', '-d', 'cadastre', '-At', '-c', query)
+    .toString('utf8')
+    .split('\n')
+    .filter(Boolean);
+}
+
+/** Журнал `customer-db` (операторы с префиксом `%a %u`) с момента `since` (ISO 8601), строками. */
+export function customerDbLog(since: string): string[] {
+  return standCompose('logs', '--no-color', '--no-log-prefix', '--since', since, 'customer-db').toString('utf8').split('\n');
+}
+
+/** Журнал `portal-api` с момента `since` (ISO 8601). */
+export function apiLog(since: string): string {
+  return standCompose('logs', '--no-color', '--no-log-prefix', '--since', since, 'portal-api').toString('utf8');
+}
+
+/** Журнал `caddy` с момента `since` (ISO 8601). */
+export function caddyLog(since: string): string {
+  return standCompose('logs', '--no-color', '--no-log-prefix', '--since', since, 'caddy').toString('utf8');
+}

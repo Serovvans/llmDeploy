@@ -174,7 +174,7 @@ def _tables(statement: exp.Expr) -> tuple[tuple[str | None, str], ...]:
         for cte in statement.find_all(exp.CTE)
         if isinstance(cte.args["alias"].this, exp.Identifier)
     }
-    found: list[tuple[str | None, str]] = []
+    found: dict[tuple[str | None, str], None] = {}
     for table in statement.find_all(exp.Table):
         if not isinstance(table.this, exp.Identifier):
             continue
@@ -185,8 +185,7 @@ def _tables(statement: exp.Expr) -> tuple[tuple[str | None, str], ...]:
         name = _name(table.this)
         if schema_name is None and name in ctes:
             continue
-        if (schema_name, name) not in found:
-            found.append((schema_name, name))
+        found.setdefault((schema_name, name))
     return tuple(found)
 
 

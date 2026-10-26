@@ -64,6 +64,7 @@ export function WebExportModal({ project: given, syntaxErrors, savedFiles, onClo
   const [project, setProject] = useState<CodeProject | null>('files' in given ? given : null);
   const [errors, setErrors] = useState<number | null>(syntaxErrors ?? null);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const projectId = given.id;
@@ -88,7 +89,7 @@ export function WebExportModal({ project: given, syntaxErrors, savedFiles, onClo
     return () => {
       cancelled = true;
     };
-  }, [project, projectId, sectionOff]);
+  }, [project, projectId, sectionOff, attempt]);
 
   // Открыто из списка: ошибки синтаксиса считаются по сохранённым файлам тем же правилом, что в редакторе.
   useEffect(() => {
@@ -146,7 +147,16 @@ export function WebExportModal({ project: given, syntaxErrors, savedFiles, onClo
   let body: React.ReactNode;
   if (!project) {
     body = loadFailed ? (
-      <Notice kind="error" action={{ label: texts.common.retry, onClick: () => setLoadFailed(false) }}>
+      <Notice
+        kind="error"
+        action={{
+          label: texts.common.retry,
+          onClick: () => {
+            setLoadFailed(false);
+            setAttempt((n) => n + 1);
+          },
+        }}
+      >
         {texts.common.actionFailed}
       </Notice>
     ) : (

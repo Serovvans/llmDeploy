@@ -238,16 +238,31 @@ def snapshot_body(connection: Connection, snapshot: StoredSnapshot) -> dict[str,
     }
 
 
+TableIndex = dict[tuple[str, str], dict[str, Any]]
+
+
+def table_index(connection: Connection, snapshot: StoredSnapshot) -> TableIndex:
+    """Таблицы снимка по `(схема, имя)` — только среди схем подключения.
+
+    Строится один раз на проверку: поиск каждой таблицы запроса — по словарю, а не
+    перебором снимка (запрос сотрудника может назвать тысячи таблиц).
+    """
+    schemas = set(connection.schemas)
+    return {
+        (item["schema"], item["name"]): item
+        for item in snapshot.tables
+        if item["schema"] in schemas
+    }
+
+
 def find_table(
     connection: Connection, snapshot: StoredSnapshot, schema: str, name: str
 ) -> dict[str, Any] | None:
     """Таблица снимка по точному имени — только среди схем подключения."""
+    if schema not in connection.schemas:
+        return None
     return next(
-        (
-            item
-            for item in visible_tables(connection, snapshot)
-            if item["schema"] == schema and item["name"] == name
-        ),
+        (item for item in snapshot.tables if item["schema"] == schema and item["name"] == name),
         None,
     )
 
@@ -263,10 +278,15 @@ class CopyPlan:
 def copy_plan(connection: Connection, table: Mapping[str, Any]) -> CopyPlan:
     """Столбцы для выборки: кроме исключённых администратором и двоичных."""
     schema, name = table["schema"], table["name"]
+    rules = {
+        item.get("column")
+        for item in connection.sample_exclusions
+        if item["schema"] == schema and item["table"] == name
+    }
     copied: list[str] = []
     excluded: list[tuple[str, Literal["excluded", "binary"]]] = []
     for column in table["columns"]:
-        if column_excluded(connection.sample_exclusions, schema, name, column["name"]):
+        if None in rules or column["name"] in rules:
             excluded.append((column["name"], "excluded"))
         elif column["binary"]:
             excluded.append((column["name"], "binary"))
@@ -329,16 +349,17 @@ def selected_tables(
     connection: Connection, snapshot: StoredSnapshot, selection: Selection
 ) -> list[dict[str, Any]]:
     """Таблицы выбора, которые есть в текущем снимке, в порядке выбора."""
+    index = table_index(connection, snapshot)
     found = []
-    for schema, name in selection.tables:
-        table = find_table(connection, snapshot, schema, name)
+    for key in selection.tables:
+        table = index.get(key)
         if table is not None:
             found.append(table)
     return found
 
 
 def resolve_table(
-    connection: Connection, snapshot: StoredSnapshot, schema: str | None, name: str
+    connection: Connection, index: TableIndex, schema: str | None, name: str
 ) -> dict[str, Any] | None:
     """Таблица запроса в снимке (§7.4, «Проверка на образце», шаг 1).
 
@@ -346,9 +367,9 @@ def resolve_table(
     приведены по правилам PostgreSQL (без кавычек — в нижнем регистре).
     """
     if schema is not None:
-        return find_table(connection, snapshot, schema, name)
+        return index.get((schema, name))
     for candidate in connection.schemas:
-        found = find_table(connection, snapshot, candidate, name)
+        found = index.get((candidate, name))
         if found is not None:
             return found
     return None
@@ -357,11 +378,16 @@ def resolve_table(
 InventedReason = Literal["not_in_snapshot", "excluded", "samples_not_allowed"]
 
 
-def sample_origin(connection: Connection, table: Mapping[str, Any]) -> InventedReason | None:
-    """`None` — таблица идёт образцом; иначе причина, по которой данные придумает модель."""
+def sample_origin(
+    connection: Connection, table: Mapping[str, Any], plan: CopyPlan | None = None
+) -> InventedReason | None:
+    """`None` — таблица идёт образцом; иначе причина, по которой данные придумает модель.
+
+    Таблица, исключённая целиком, не даёт столбцов для копирования; `plan` — уже
+    посчитанный `copy_plan` этой таблицы.
+    """
     if not connection.samples_allowed:
         return "samples_not_allowed"
-    excluded = table_excluded(connection.sample_exclusions, table["schema"], table["name"])
-    if excluded or not copy_plan(connection, table).columns:
+    if not (plan if plan is not None else copy_plan(connection, table)).columns:
         return "excluded"
     return None

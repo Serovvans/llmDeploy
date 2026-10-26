@@ -38,7 +38,7 @@ import { SettingsModal } from './SettingsModal';
 import { readAssistantOpen, readTabs, storeAssistantOpen, storeTabs } from './storage';
 import { BUILD_POLL_MS, type ProjectApi, useProject } from './useProject';
 import { VersionsPanel } from './VersionsPanel';
-import type { PreviewProblem } from './web/preview';
+import { type PreviewProblem, previewFixItems } from './web/preview';
 import { PreviewPane } from './web/PreviewPane';
 import { useSqlCheck } from './web/SqlCheck';
 import { WebExportModal } from './web/WebExportModal';
@@ -156,6 +156,11 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
   const [previewExpanded, setPreviewExpanded] = useState(false);
   const [previewRun, setPreviewRun] = useState<Map<string, string> | null>(null);
   const [previewProblems, setPreviewProblems] = useState<PreviewProblem[]>([]);
+  const [previewFromSample, setPreviewFromSample] = useState(false);
+  const takePreviewProblems = useCallback((problems: PreviewProblem[], fromSample: boolean) => {
+    setPreviewProblems(problems);
+    setPreviewFromSample(fromSample);
+  }, []);
   const [focusPreview, setFocusPreview] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
   const [decisionPending, setDecisionPending] = useState<string | null>(null);
@@ -498,18 +503,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
   const fixSyntax = () =>
     assistant.ask({ kind: 'write', content: fixQuestion('syntax', (syntax ?? []).map((item) => ({ path: item.path, line: item.line, message: item.message }))) });
   const previewErrors = previewProblems.filter((problem) => problem.kind !== 'image');
-  const fixPreview = () =>
-    assistant.ask({
-      kind: 'write',
-      content: fixQuestion(
-        'preview',
-        previewErrors.map((problem) => ({
-          path: problem.file,
-          line: problem.line,
-          message: problem.kind === 'network' ? w.web.pane.network(problem.text) : problem.text,
-        })),
-      ),
-    });
+  const fixPreview = () => assistant.ask({ kind: 'write', content: fixQuestion('preview', previewFixItems(previewProblems, previewFromSample)) });
   const previewChanged = previewRun !== null && (previewRun.size !== files.length || files.some((file) => previewRun.get(file.path) !== textOf(file.id)));
   const previewStation: PreviewStation =
     previewRun === null ? 'none' : previewChanged ? 'changed' : previewErrors.length > 0 ? 'errors' : 'ok';
@@ -893,7 +887,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
           expanded={previewExpanded}
           onExpand={setPreviewExpanded}
           onRun={(ran) => setPreviewRun(new Map(ran.map((file) => [file.path, file.content])))}
-          onProblems={setPreviewProblems}
+          onProblems={takePreviewProblems}
           onJump={(path, line, column) => {
             const file = files.find((item) => item.path === path);
             if (file) {

@@ -30,16 +30,16 @@ function Findings({ items }: { items: RightsFinding[] }) {
 
 function Warnings({ items }: { items: RightsFinding[] }) {
   return (
-    <div className={styles.block}>
-      <p className={styles.warningTitle}>
+    <section className={styles.block}>
+      <h4 className={styles.warningTitle}>
         <span className={styles.warningIcon} aria-hidden="true">
           <IconWarningTriangleRegular16 />
         </span>
         {r.warning}
-      </p>
+      </h4>
       <Findings items={items} />
       <p className={styles.muted}>{r.definerAdvice}</p>
-    </div>
+    </section>
   );
 }
 
@@ -60,10 +60,12 @@ interface Props {
   /** «Загрузить схему» у работающего подключения без схемы. */
   onLoadSnapshot: () => void;
   loadingSnapshot: boolean;
+  /** Итог проверки: на него ставится фокус после «Сохранить и проверить» (§9). */
+  resultRef?: React.Ref<HTMLDivElement>;
 }
 
 /** Итог проверки подключения (свой: `RightsCheck`, концепция §5.14, ПД §8.6). */
-export function RightsCheck({ connection, checking, onLoadSnapshot, loadingSnapshot }: Props) {
+export function RightsCheck({ connection, checking, onLoadSnapshot, loadingSnapshot, resultRef }: Props) {
   const copy = useCopy();
   if (checking) {
     return <Spinner type="mini" caption={r.checking} />;
@@ -90,7 +92,7 @@ export function RightsCheck({ connection, checking, onLoadSnapshot, loadingSnaps
       return <p className={styles.muted}>{r.notChecked}</p>;
     }
     return (
-      <div className={styles.check}>
+      <div className={styles.check} ref={resultRef} tabIndex={-1} role="alert">
         <Headline kind="error">{r.failed}</Headline>
         <p>{reasonText(connection)}</p>
         <p className={styles.muted}>{formatDate(lastError.at)}</p>
@@ -100,7 +102,8 @@ export function RightsCheck({ connection, checking, onLoadSnapshot, loadingSnaps
 
   if (rights.status === 'read_only') {
     return (
-      <div className={styles.check}>
+      // С предупреждением — тоже `status`: это не отказ (§9).
+      <div className={styles.check} ref={resultRef} tabIndex={-1} role="status">
         <Headline kind="ok">{r.readOnly}</Headline>
         {rights.checked_at && <p className={styles.muted}>{r.readOnlyNote(formatDate(rights.checked_at))}</p>}
         {!snapshot && (
@@ -122,7 +125,7 @@ export function RightsCheck({ connection, checking, onLoadSnapshot, loadingSnaps
   }
 
   return (
-    <div className={styles.check}>
+    <div className={styles.check} ref={resultRef} tabIndex={-1} role="alert">
       <Headline kind="error">{r.excess(connection.username)}</Headline>
       <p>{r.excessText(snapshot ? snapshotDay(snapshot.taken_at) : null)}</p>
       <Findings items={rights.findings} />

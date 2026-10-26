@@ -140,7 +140,8 @@ def bind_parameters(sql: str, parameters: Sequence[tuple[str, str]]) -> str:
     occurrences = find_parameters(sql)
     needed = list(dict.fromkeys(item.name for item in occurrences))
     names = [name for name, _ in parameters]
-    missing = [name for name in needed if name not in names]
+    given, known = set(names), set(needed)
+    missing = [name for name in needed if name not in given]
     if missing:
         raise AppError(
             422,
@@ -149,9 +150,9 @@ def bind_parameters(sql: str, parameters: Sequence[tuple[str, str]]) -> str:
             fields=[field_error("parameters", "required")],
             details={"names": missing},
         )
-    if any(name not in needed for name in names):
+    if not given <= known:
         raise validation_error([field_error("parameters", "unknown_value")])
-    if len(set(names)) != len(names):
+    if len(given) != len(names):
         raise validation_error([field_error("parameters", "invalid_format")])
     for index, (_, value) in enumerate(parameters):
         if len(value) > VALUE_MAX_CHARS:

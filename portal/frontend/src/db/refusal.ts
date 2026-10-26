@@ -21,3 +21,21 @@ export function dbRefusal(error: unknown): string | null {
   }
   return null;
 }
+
+/**
+ * Однострочное состояние «Проверка недоступна: …» для «Проверить запрос» (концепция §5.7, §5.13.24) или
+ * `null`, если отказ не про подключение. `db_samples_not_allowed` сюда не входит — это отказ, а не состояние.
+ */
+export function dbCheckUnavailable(error: unknown): string | null {
+  const reasons = texts.db.run.reasons;
+  if (isApiError(error, 'db_connection_unavailable') || isApiError(error, 'db_connection_not_found')) {
+    return reasons.connection_unavailable ?? null;
+  }
+  if (isApiError(error, 'db_connection_unusable')) {
+    return reasons.connection_unusable ?? null;
+  }
+  if (isApiError(error, 'db_unavailable')) {
+    return (error.details.reason === 'busy' ? reasons.db_busy : reasons.db_unavailable) ?? null;
+  }
+  return null;
+}

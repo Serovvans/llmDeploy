@@ -1,11 +1,13 @@
+import { IconInfoCircleRegular16 } from '@skbkontur/icons/IconInfoCircleRegular16';
 import { Button, Gapped, Input, Link, Modal, SingleToast, Textarea } from '@skbkontur/react-ui';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api, isApiError } from '../../api/client';
 import type { CodeProject, PortalConfig, SqlRunBlock } from '../../api/types';
-import { SqlRunResult } from '../../components/chat/SqlRunResult';
+import { Line, SqlRunResult, sqlRunAnnouncement } from '../../components/chat/SqlRunResult';
 import { Notice } from '../../components/Notice';
-import { dbRefusal } from '../../db/refusal';
+import { dbCheckUnavailable, dbRefusal } from '../../db/refusal';
+import { useFocusReturn } from '../../hooks/useFocusReturn';
 import { texts } from '../../texts';
 import styles from './SqlCheck.module.css';
 import { sqlParameters, stripQuotes } from './sqlParams';
@@ -28,6 +30,9 @@ interface Request {
   /** Текст выделения без кавычек — по нему видно, правили ли поле. */
   original: string;
 }
+
+/** Редактор, из меню которого открыто окно (§9). */
+const EDITOR = '[data-testid="code-editor"]';
 
 const PENDING: SqlRunBlock = {
   index: 0,
@@ -191,6 +196,8 @@ interface Result {
   block: SqlRunBlock;
   running: boolean;
   failure: string | null;
+  /** «Проверка недоступна: …» — отказ подключения, однострочное состояние (§5.13.24). */
+  unavailable?: string | null;
 }
 
 /** «Проверить запрос» в проекте (§5.13.23): окно, поток проверки и вкладка с итогом. Итог не сохраняется. */
@@ -199,6 +206,9 @@ export function useSqlCheck({ project, config, sectionOff, reloadConfig, onOpenS
   const [result, setResult] = useState<Result | null>(null);
   const controller = useRef<AbortController | null>(null);
   const enabled = config?.sql.test_run.enabled === true;
+  // Окно открывают из меню редактора: закрытие без проверки возвращает фокус в редактор, запуск — на итог (§9).
+  const rememberOpener = useFocusReturn(modal !== null);
+  const [focusResult, setFocusResult] = useState(false);
 
   // Уход из проекта останавливает проверку — итога нет.
   useEffect(() => () => controller.current?.abort(), []);
@@ -215,6 +225,7 @@ export function useSqlCheck({ project, config, sectionOff, reloadConfig, onOpenS
       const abort = new AbortController();
       controller.current = abort;
       setResult({ request, block: PENDING, running: true, failure: null });
+      setFocusResult(true);
       onShowResult();
       const parameters = Object.entries(request.values).map(([name, value]) => ({ name, value }));
       try {
@@ -252,8 +263,8 @@ export function useSqlCheck({ project, config, sectionOff, reloadConfig, onOpenS
         } else if (isApiError(error, 'schema_required')) {
           setModal({ request, missing: [] });
         } else if (!sectionOff(error) && !isApiError(error, 'unauthenticated')) {
-          const refusal = dbRefusal(error);
-          setResult({ request, block: PENDING, running: false, failure: refusal ?? texts.common.actionFailed });
+          const unavailable = dbCheckUnavailable(error);
+          setResult({ request, block: PENDING, running: false, failure: unavailable ? null : (dbRefusal(error) ?? texts.common.actionFailed), unavailable });
         }
       } finally {
         if (controller.current === abort) {
@@ -267,8 +278,9 @@ export function useSqlCheck({ project, config, sectionOff, reloadConfig, onOpenS
   /** Пункт меню редактора: выделенный текст и место (§5.13.23). */
   const open = useCallback((text: string, source: SqlSource) => {
     const sql = stripQuotes(text);
+    rememberOpener(EDITOR);
     setModal({ request: { sql, values: {}, source, edited: false, original: sql }, missing: [] });
-  }, []);
+  }, [rememberOpener]);
 
   const element =
     // Проверку выключили, пока окно открыто, — окно закрывается (§5.13.24).
@@ -284,6 +296,8 @@ export function useSqlCheck({ project, config, sectionOff, reloadConfig, onOpenS
           onOpenSettings();
         }}
         onSubmit={(request) => {
+          // Фокус уходит на итог, а не в редактор.
+          rememberOpener('');
           setModal(null);
           void run(request);
         }}
@@ -293,6 +307,8 @@ export function useSqlCheck({ project, config, sectionOff, reloadConfig, onOpenS
   const tab = result ? (
     <SqlCheckResult
       result={result}
+      focusTitle={focusResult}
+      onFocused={() => setFocusResult(false)}
       onAgain={() => void run(result.request)}
       onEdit={() => setModal({ request: result.request, missing: [] })}
       onStop={() => controller.current?.abort()}
@@ -310,14 +326,37 @@ function parametersLine(values: Record<string, string>): string {
 }
 
 /** Вкладка «Проверка запроса» панели внизу (§5.13.23): последняя проверка, пока открыта страница. */
-function SqlCheckResult({ result, onAgain, onEdit, onStop }: { result: Result; onAgain: () => void; onEdit: () => void; onStop: () => void }) {
-  const { request, block, running, failure } = result;
+function SqlCheckResult({
+  result,
+  focusTitle,
+  onFocused,
+  onAgain,
+  onEdit,
+  onStop,
+}: {
+  result: Result;
+  /** Запуск проверки: фокус — на заголовок итога, один раз (§9). */
+  focusTitle: boolean;
+  onFocused: () => void;
+  onAgain: () => void;
+  onEdit: () => void;
+  onStop: () => void;
+}) {
+  const { request, block, running, failure, unavailable } = result;
+  const title = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (focusTitle && title.current) {
+      title.current.focus();
+      onFocused();
+    }
+  }, [focusTitle, onFocused]);
+  const announcement = running ? '' : (unavailable ?? failure ?? sqlRunAnnouncement({ blocks: [block] }));
   const head = [c.head, c.lines(request.source.path, request.source.startLine, request.source.endLine), ...(request.edited ? [c.edited] : [])];
   const values = parametersLine(request.values);
   return (
     <div className={styles.result}>
       <div className={styles.resultHead}>
-        <p className={styles.resultTitle}>
+        <p className={styles.resultTitle} ref={title} tabIndex={-1}>
           {head.join(' · ')}
           {values && <span className={styles.mono}> · {values}</span>}
         </p>
@@ -336,9 +375,18 @@ function SqlCheckResult({ result, onAgain, onEdit, onStop }: { result: Result; o
           </Gapped>
         )}
       </div>
-      {failure ? <Notice kind="error">{failure}</Notice> : <SqlRunResult block={block} />}
+      {unavailable ? (
+        <Line icon={<IconInfoCircleRegular16 />}>{unavailable}</Line>
+      ) : failure ? (
+        <Notice kind="error">{failure}</Notice>
+      ) : (
+        <SqlRunResult block={block} />
+      )}
       {block.status === 'fixed' && <p className={styles.muted}>{c.fixedNote}</p>}
       <p className={styles.muted}>{c.notSaved}</p>
+      <div className="p-visually-hidden" role="status">
+        {announcement}
+      </div>
     </div>
   );
 }

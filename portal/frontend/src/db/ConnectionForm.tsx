@@ -232,6 +232,8 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
   const [snapshot, setSnapshot] = useState<DbSnapshot | null>(null);
   const form = useRef<HTMLFormElement>(null);
   const check = useRef<HTMLHeadingElement>(null);
+  const result = useRef<HTMLDivElement>(null);
+  const [checked, setChecked] = useState(0);
 
   useEffect(() => {
     if (focusCheck) {
@@ -239,6 +241,13 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
       check.current?.focus();
     }
   }, [focusCheck]);
+
+  // После «Сохранить и проверить» — фокус на итог проверки (§9).
+  useEffect(() => {
+    if (checked > 0) {
+      result.current?.focus();
+    }
+  }, [checked]);
 
   // Подсказки «Не копировать никогда» — из загруженной схемы базы.
   const savedId = saved?.snapshot ? saved.id : null;
@@ -285,6 +294,7 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
       onChanged();
       SingleToast.push(f.saved);
       setSaved(await api.adminCheckDbConnection(next.id));
+      setChecked((n) => n + 1);
       onChanged();
     } catch (error) {
       const fields = serverErrors(error, values);
@@ -570,6 +580,7 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
                 <RightsCheck
                   connection={saved}
                   checking={pending}
+                  resultRef={result}
                   loadingSnapshot={loadingSnapshot}
                   onLoadSnapshot={() => void loadSnapshot()}
                 />

@@ -151,6 +151,8 @@ describe('базы данных (администратор)', () => {
     });
     expect(await screen.findByText(texts.db.rights.readOnly)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: texts.db.rights.loadSnapshot })).toBeInTheDocument();
+    // Итог проверки объявляется и принимает фокус (§9).
+    await waitFor(() => expect(screen.getByText(texts.db.rights.readOnly).closest('[role="status"]')).toHaveFocus());
   });
 
   it('пусто — приглашение добавить; сбой — «Повторить»', async () => {
