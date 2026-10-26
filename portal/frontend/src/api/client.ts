@@ -2,10 +2,13 @@
  * Клиент API портала — единственное место, где вызывается `fetch`.
  * Здесь добавляется заголовок защиты от CSRF и разбирается общий формат ошибки (контракт §1.3, §2.2).
  */
-import { type DraftEvent, readEvents, type StreamEvent } from './stream';
+import { type DraftEvent, readEvents, type SqlRunStreamEvent, type StreamEvent } from './stream';
 import type {
+  AdminDbConnection,
   AdminUser,
   Attachment,
+  CatalogPlacement,
+  ClientLibraryFile,
   CodeBuild,
   CodeCreated,
   CodeEdit,
@@ -15,7 +18,13 @@ import type {
   CodeProjectItem,
   CodeSdk,
   CodeSnapshot,
+  CodeKind,
+  CodeWeb,
   CursorPage,
+  DbConnection,
+  DbConnectionInput,
+  DbSnapshot,
+  DbTableRef,
   Dialog,
   DialogKind,
   DialogSummary,
@@ -29,6 +38,7 @@ import type {
   FieldError,
   Page,
   PortalConfig,
+  PreviewLayerSample,
   Role,
   SecondFactorConfirmResult,
   SecondFactorResult,
@@ -355,6 +365,14 @@ export const api = {
 
   renameDialog: (id: string, title: string) => request<Dialog>('PATCH', `/api/dialogs/${id}`, { title }),
 
+  /** Выбор подключения у диалога `sql` (контракт §7.6.9); `null` — выбор снят. */
+  setDialogDb: (id: string, db: { connection_id: string; tables: DbTableRef[] } | null) =>
+    request<Dialog>('PATCH', `/api/dialogs/${id}`, { db }),
+
+  /** «Проверить снова» — блок `index` ответа `messageId` на свежем образце (контракт §6.6, §7.4). */
+  recheckSqlRun: (id: string, messageId: string, index: number, signal: AbortSignal) =>
+    stream<SqlRunStreamEvent>(`/api/dialogs/${id}/messages/${messageId}/sql-run`, { json: { index } }, signal),
+
   deleteDialog: (id: string) => request<undefined>('DELETE', `/api/dialogs/${id}`),
 
   /** Сообщения от новых к старым (контракт §5.2). */
@@ -518,11 +536,12 @@ export const api = {
     return request<CursorPage<CodeProjectItem>>('GET', `/api/code/projects${query ? `?${query}` : ''}`);
   },
 
-  /** Мастер (с `carried` — перенос в «Код», §7.5.4) или пример из инструкции. */
+  /** Мастер (с `carried` — перенос в «Код», §7.5.4), пример из инструкции или шаблон веб-вида (§7.5.16). */
   createCodeProject: (
     body:
       | { source: 'wizard'; wizard: WizardForm; carried?: { text: string; source_dialog_id: string } }
-      | { source: 'example'; name: string },
+      | { source: 'example'; name: string }
+      | { source: 'template'; kind: Exclude<CodeKind, 'gptool'>; name: string },
   ) => request<CodeCreated>('POST', '/api/code/projects', body),
 
   importCodeProject: async (file: File, name: string) => {
@@ -535,8 +554,16 @@ export const api = {
 
   getCodeProject: (id: string) => request<CodeProject>('GET', `/api/code/projects/${id}`),
 
-  updateCodeProject: (id: string, changes: { packages?: string[]; schema_id?: string | null }) =>
-    request<CodeProject>('PATCH', `/api/code/projects/${id}`, changes),
+  /** Схема и подключение снимают друг друга: отправляется поле текущего выбора (контракт §7.6.9, А-145). */
+  updateCodeProject: (
+    id: string,
+    changes: {
+      packages?: string[];
+      schema_id?: string | null;
+      db?: { connection_id: string; tables: DbTableRef[] } | null;
+      catalog_files?: ({ file_id: string } & CatalogPlacement)[];
+    },
+  ) => request<CodeProject>('PATCH', `/api/code/projects/${id}`, changes),
 
   deleteCodeProject: (id: string) => request<undefined>('DELETE', `/api/code/projects/${id}`),
 
@@ -550,7 +577,7 @@ export const api = {
   deleteCodeFile: (projectId: string, fileId: string) =>
     request<undefined>('DELETE', `/api/code/projects/${projectId}/files/${fileId}`),
 
-  /** «Скачать для Visual Studio» — ZIP исходников с файлом проекта (§7.5.5). */
+  /** «Скачать для Visual Studio» (§7.5.5); у веб-вида — файлы и `Памятка.txt` (§7.5.16). */
   exportCodeProject: async (id: string) =>
     download(await send('GET', `/api/code/projects/${id}/export`, { accept: ZIP_TYPE })),
 
@@ -580,6 +607,48 @@ export const api = {
    * `cache: "no-store"`, поэтому повторное открытие раздела получает `304` из кеша браузера.
    */
   getCodeSdk: () => request<CodeSdk>('GET', '/api/code/sdk'),
+
+  /** Описание `api` и библиотеки клиента CoGIS (§7.5.16): тоже с `ETag`, как справочник. */
+  getCodeWeb: () => request<CodeWeb>('GET', '/api/code/web'),
+
+  /** Текст библиотеки клиента CoGIS — данными для фрейма предпросмотра, на портале не исполняется (§7.5.16). */
+  getCodeWebLibrary: async (file: ClientLibraryFile) =>
+    (await send('GET', `/api/code/web/libraries/${file}`, { accept: 'text/plain' })).text(),
+
+  /** «Проверить запрос» (§7.5.18): поток проверки §6.6; итог нигде не сохраняется. */
+  checkProjectSql: (id: string, body: { sql: string; parameters: { name: string; value: string }[] }, signal: AbortSignal) =>
+    stream<SqlRunStreamEvent>(`/api/code/projects/${id}/sql-check`, { json: body }, signal),
+
+  /** Слой предпросмотра из образца отмеченной таблицы (§7.5.18). Строки живут только в памяти вкладки. */
+  getPreviewLayer: (id: string, table: DbTableRef) =>
+    request<PreviewLayerSample>(
+      'GET',
+      `/api/code/projects/${id}/preview-layer?${new URLSearchParams({ schema: table.schema, table: table.name }).toString()}`,
+    ),
+
+  // ---------- Подключения к базам заказчика (контракт §7.6, 1.0) ----------
+
+  listDbConnections: () => request<{ items: DbConnection[] }>('GET', '/api/db/connections'),
+
+  getDbSnapshot: (id: string) => request<DbSnapshot>('GET', `/api/db/connections/${id}/snapshot`),
+
+  /** «Обновить схему»: не чаще интервала — иначе `429 db_snapshot_too_soon` с `details.available_at`. */
+  refreshDbSnapshot: (id: string) => request<DbSnapshot>('POST', `/api/db/connections/${id}/snapshot`),
+
+  adminListDbConnections: () => request<{ items: AdminDbConnection[] }>('GET', '/api/admin/db-connections'),
+
+  adminCreateDbConnection: (body: DbConnectionInput) =>
+    request<AdminDbConnection>('POST', '/api/admin/db-connections', body),
+
+  /** Пароль — только чтобы задать новый: без поля он не меняется. */
+  adminUpdateDbConnection: (id: string, changes: Partial<DbConnectionInput>) =>
+    request<AdminDbConnection>('PATCH', `/api/admin/db-connections/${id}`, changes),
+
+  adminDeleteDbConnection: (id: string) => request<undefined>('DELETE', `/api/admin/db-connections/${id}`),
+
+  /** «Проверить подключение»: неудача соединения — не ошибка маршрута, причина в `last_error`. */
+  adminCheckDbConnection: (id: string) =>
+    request<AdminDbConnection>('POST', `/api/admin/db-connections/${id}/check`),
 
   /** Подсказки тегов: теги документов выбранных коллекций, видимых пользователю (контракт §8.5). */
   listKbTags: (scopes: KbScope[], q: string) => {

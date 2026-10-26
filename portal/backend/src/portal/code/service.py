@@ -21,6 +21,17 @@ from portal.code.domain import (
     SdkSnapshot,
     Snapshot,
     StoredBuild,
+    WebAssets,
+)
+from portal.code.kinds import (
+    CLIENTS,
+    WEB_KINDS,
+    Kind,
+    default_catalog,
+    kind_limits,
+    kinds,
+    web_memo,
+    web_name_error,
 )
 from portal.code.paths import (
     conflicts,
@@ -43,9 +54,12 @@ from portal.code.ports import (
     SdkReference,
 )
 from portal.code.wizard import Scaffold, WizardTemplates, check_form, example, scaffold
-from portal.core.errors import field_error, not_found, validation_error
-from portal.core.ports import Clock
+from portal.core.errors import feature_disabled, field_error, not_found, validation_error
+from portal.core.ports import Clock, CurrentUser
 from portal.core.settings import CodeSettings
+from portal.databases import errors as db_errors
+from portal.databases.domain import Selection, selection_of
+from portal.databases.service import DbService, SelectionInput
 from portal.dialogs.domain import Dialog
 from portal.dialogs.service import (
     CarriedInput,
@@ -71,6 +85,15 @@ class _Unset:
 
 
 UNSET = _Unset()
+
+
+@dataclass(frozen=True)
+class CatalogInput:
+    """Настройки кастомизации файла в `catalog_files` (§7.5.16)."""
+
+    file_id: UUID
+    insertion: str
+    clients: list[str]
 
 
 def _field(name: str, code: str) -> Any:
@@ -159,6 +182,8 @@ class CodeService:
         clock: Clock,
         settings: CodeSettings,
         *,
+        web: WebAssets,
+        databases: DbService | None,
         message_max_chars: int,
         carried_max_chars: int,
         zip_max_directory_bytes: int,
@@ -166,7 +191,8 @@ class CodeService:
         """Получить зависимости явно.
 
         `sandbox` — `None`, когда сборка выключена флагом `code.build.enabled`: к песочнице
-        портал не обращается (§7.5.15).
+        портал не обращается (§7.5.15). `databases` — `None` у прогона контрольного набора:
+        выбора подключения там нет.
         """
         self._uow_factory = uow_factory
         self._sandbox = sandbox
@@ -179,6 +205,9 @@ class CodeService:
         self._message_max_chars = message_max_chars
         self._carried_max_chars = carried_max_chars
         self._zip_max_directory_bytes = zip_max_directory_bytes
+        self._web = web
+        self._databases = databases
+        self.kinds: dict[str, Kind] = kinds(settings.file_extensions)
         self.limits = CodeLimits(
             settings.max_files,
             settings.file_max_bytes,
@@ -192,6 +221,15 @@ class CodeService:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    def limits_of(self, project: Project) -> CodeLimits:
+        """Пределы проекта его вида: расширения и «один файл» (§7.5.16)."""
+        return kind_limits(self.limits, self.kinds[project.kind])
+
+    @property
+    def web(self) -> WebAssets:
+        """Шаблоны веб-видов и описание `api`."""
+        return self._web
 
     @property
     def templates(self) -> WizardTemplates:
@@ -243,6 +281,28 @@ class CodeService:
                 uow, owner_id, await self._project(uow, owner_id, project_id)
             )
 
+    async def project(self, owner_id: UUID, project_id: UUID) -> Project:
+        """Свой проект без файлов; чужой — `not_found`."""
+        async with self._uow_factory() as uow:
+            return await self._project(uow, owner_id, project_id)
+
+    async def preview_layer(
+        self, owner_id: UUID, project_id: UUID, schema: str, table: str
+    ) -> dict[str, Any]:
+        """Слой предпросмотра из образца отмеченной таблицы веб-проекта (§7.5.18)."""
+        databases = self._databases
+        if databases is None or not self._settings.preview.enabled or not databases.enabled:
+            raise feature_disabled()
+        project = await self.project(owner_id, project_id)
+        if not project.web:
+            raise errors.wrong_project_kind()
+        selection = selection_of(
+            project.db_connection_id, project.db_connection_title, project.db_tables
+        )
+        if selection is None:
+            raise db_errors.schema_required()
+        return await databases.preview(owner_id, selection, schema, table)
+
     async def _project(
         self, uow: CodeUnitOfWork, owner_id: UUID, project_id: UUID, *, lock: bool = False
     ) -> Project:
@@ -258,15 +318,13 @@ class CodeService:
         built: Scaffold | list[tuple[str, str]],
         packages: Sequence[str],
         carried: CarriedInput | None = None,
+        kind: str = "gptool",
     ) -> ProjectDetails:
         """Создать проект и его диалог одной транзакцией; версии не создаются (§7.5.4)."""
         sources = built.files if isinstance(built, Scaffold) else built
         now = self._clock.now()
-        project = Project(uuid4(), owner_id, name, list(packages), None, 1, now, now)
-        files = [
-            ProjectFile(uuid4(), project.id, path, content, utf8_size(content), 1, now)
-            for path, content in sources
-        ]
+        project = Project(uuid4(), owner_id, name, list(packages), None, 1, now, now, kind=kind)
+        files = [self._new_file(project, path, content, now) for path, content in sources]
         limit = limit_exceeded(len(files), sum(file.size_bytes for file in files), self.limits)
         if limit is not None:
             raise errors.project_limit(limit, self._limit_value(limit))
@@ -288,6 +346,13 @@ class CodeService:
             await uow.dialogs.add_dialog(dialog)
         files.sort(key=lambda file: file.path.lower())
         return ProjectDetails(project, files, None, dialog.id, False)
+
+    def _new_file(self, project: Project, path: str, content: str, now: Any) -> ProjectFile:
+        """Новый файл; у кастомизации Каталога — настройки по расширению (§7.5.16)."""
+        file = ProjectFile(uuid4(), project.id, path, content, utf8_size(content), 1, now)
+        if project.kind == "catalog":
+            file.catalog_insertion, file.catalog_clients = default_catalog(path)
+        return file
 
     @property
     def _package_ids(self) -> list[str]:
@@ -328,6 +393,18 @@ class CodeService:
         built = example(name, self._templates, self._package_ids)
         return Created(await self._create(owner_id, name, built, built.packages), None, None)
 
+    async def create_template(self, owner_id: UUID, kind: str, name: str) -> Created:
+        """Проект веб-вида из шаблона: один файл, диалог помощника, без версий (§7.5.16)."""
+        if kind not in WEB_KINDS:
+            raise validation_error([field_error("kind", "unknown_value")])
+        if (code := web_name_error(name)) is not None:
+            raise validation_error([field_error("name", code)])
+        template = self.kinds[kind].template
+        assert template is not None  # у каждого веб-вида есть шаблон
+        files = [(template, self._web.templates[template])]
+        details = await self._create(owner_id, name.strip(), files, [], kind=kind)
+        return Created(details, None, None)
+
     async def import_zip(self, owner_id: UUID, name: str, data: bytes) -> Created:
         """Проект из архива ZIP: только файлы `.cs` и пакеты набора (§7.5.5)."""
         check_name(name, self._package_ids)
@@ -343,12 +420,25 @@ class CodeService:
 
     async def patch(
         self,
-        owner_id: UUID,
+        user: CurrentUser,
         project_id: UUID,
         packages: Sequence[str] | None,
         schema_id: UUID | _Unset | None,
+        db: SelectionInput | _Unset | None = UNSET,
+        catalog_files: Sequence[CatalogInput] | None = None,
     ) -> ProjectDetails:
-        """Пакеты и схема проекта (§7.5.3): пакеты — из набора, схема — своя или `null`."""
+        """Пакеты, схема, подключение и настройки Каталога проекта (§7.5.3, §7.5.16, §7.6.9).
+
+        Схема и подключение взаимоисключающие: выбор одного снимает другое; `schema_id`
+        снимает подключение и при выключенном `db.enabled`.
+        """
+        owner_id = user.id
+        if isinstance(schema_id, UUID) and isinstance(db, SelectionInput):
+            raise validation_error([field_error("db", "invalid_format")])
+        if not isinstance(db, _Unset) and (self._databases is None or not self._databases.enabled):
+            raise feature_disabled()
+        if catalog_files is not None:
+            self._check_catalog_input(catalog_files)
         chosen: list[str] | None = None
         if packages is not None:
             known = [self._settings.package(item) for item in packages]
@@ -360,16 +450,57 @@ class CodeService:
             chosen = [item.id for item in self._settings.packages if item.id in ids]
         if isinstance(schema_id, UUID) and await self._schemas.find(owner_id, schema_id) is None:
             raise tool_errors.schema_not_found()
+        selection: Selection | None = None
+        if isinstance(db, SelectionInput):
+            assert self._databases is not None  # флаг проверен выше
+            async with self._uow_factory() as uow:
+                await self._project(uow, owner_id, project_id)
+            selection = await self._databases.validate_selection(user, db.connection_id, db.tables)
         async with self._uow_factory() as uow:
             project = await self._project(uow, owner_id, project_id, lock=True)
+            if project.web and packages:
+                raise validation_error([field_error("packages", "invalid_format")])
+            if catalog_files is not None and project.kind != "catalog":
+                raise validation_error([field_error("catalog_files", "invalid_format")])
             if chosen is not None and chosen != project.packages:
                 project.packages = chosen
                 project.revision += 1
             if not isinstance(schema_id, _Unset):
                 project.schema_id = schema_id
+                if schema_id is not None:
+                    _select(project, None)
+            if not isinstance(db, _Unset):
+                _select(project, selection)
+                if selection is not None:
+                    project.schema_id = None
+            if catalog_files is not None:
+                await self._set_catalog(uow, project, catalog_files)
             project.updated_at = self._clock.now()
             await uow.code.save_project(project)
             return await self._details(uow, owner_id, project)
+
+    @staticmethod
+    def _check_catalog_input(items: Sequence[CatalogInput]) -> None:
+        if len({item.file_id for item in items}) != len(items):
+            raise validation_error([field_error("catalog_files", "invalid_format")])
+        for item in items:
+            if not item.clients:
+                raise validation_error([field_error("catalog_files", "required")])
+            if len(set(item.clients)) != len(item.clients):
+                raise validation_error([field_error("catalog_files", "invalid_format")])
+
+    async def _set_catalog(
+        self, uow: CodeUnitOfWork, project: Project, items: Sequence[CatalogInput]
+    ) -> None:
+        """Настройки Каталога: без смены ревизий файла и проекта и без версий (§7.5.16)."""
+        files = {file.id: file for file in await uow.code.files(project.owner_id, project.id)}
+        if any(item.file_id not in files for item in items):
+            raise validation_error([field_error("catalog_files", "unknown_value")])
+        for item in items:
+            file = files[item.file_id]
+            file.catalog_insertion = item.insertion
+            file.catalog_clients = [client for client in CLIENTS if client in item.clients]
+            await uow.code.save_file(project.owner_id, file)
 
     async def delete(self, owner_id: UUID, project_id: UUID) -> None:
         """Удалить проект каскадом: файлы, версии, сборку, диалог помощника (§7.5.3)."""
@@ -396,19 +527,21 @@ class CodeService:
     async def add_file(
         self, owner_id: UUID, project_id: UUID, path: str, content: str
     ) -> ProjectFile:
-        """Новый файл проекта (§7.5.3)."""
-        check_path(path, self._settings.file_extensions)
+        """Новый файл проекта (§7.5.3); у однофайлового вида — `409 single_file_project`."""
         self._check_content(content)
         async with self._uow_factory() as uow:
             project = await self._project(uow, owner_id, project_id, lock=True)
+            limits = self.limits_of(project)
+            if limits.single_file:
+                raise errors.single_file_project()
+            check_path(path, limits.extensions)
             files = await uow.code.files(owner_id, project_id)
             same = next((file for file in files if file.path.lower() == path.lower()), None)
             if same is not None:
                 raise errors.file_exists(same.path)
             if conflicts(path, [file.path for file in files]):
                 raise validation_error([_field("path", "path_conflict")])
-            now = self._clock.now()
-            file = ProjectFile(uuid4(), project_id, path, content, utf8_size(content), 1, now)
+            file = self._new_file(project, path, content, self._clock.now())
             self._check_limits([*files, file])
             await uow.code.add_file(owner_id, file)
             await self._touch(uow, project)
@@ -424,12 +557,12 @@ class CodeService:
         content: str | None,
     ) -> ProjectFile:
         """Правка или переименование файла с проверкой ревизии (§7.5.3)."""
-        if path is not None:
-            check_path(path, self._settings.file_extensions)
         if content is not None:
             self._check_content(content)
         async with self._uow_factory() as uow:
             project = await self._project(uow, owner_id, project_id, lock=True)
+            if path is not None:
+                check_path(path, self.limits_of(project).extensions)
             files = await uow.code.files(owner_id, project_id)
             file = next((item for item in files if item.id == file_id), None)
             if file is None:
@@ -455,9 +588,11 @@ class CodeService:
         return file
 
     async def delete_file(self, owner_id: UUID, project_id: UUID, file_id: UUID) -> None:
-        """Удалить файл проекта."""
+        """Удалить файл проекта; у однофайлового вида — `409 single_file_project`."""
         async with self._uow_factory() as uow:
             project = await self._project(uow, owner_id, project_id, lock=True)
+            if self.limits_of(project).single_file:
+                raise errors.single_file_project()
             files = await uow.code.files(owner_id, project_id)
             if all(file.id != file_id for file in files):
                 raise not_found()
@@ -465,10 +600,22 @@ class CodeService:
             await self._touch(uow, project)
 
     async def export(self, owner_id: UUID, project_id: UUID) -> tuple[str, bytes]:
-        """Выгрузка проекта для Visual Studio (§7.5.5)."""
+        """Выгрузка проекта: для Visual Studio (§7.5.5) или веб-вида с памяткой (§7.5.16)."""
         async with self._uow_factory() as uow:
             project = await self._project(uow, owner_id, project_id)
             files = await uow.code.files(owner_id, project_id)
+        if project.web:
+            memo = web_memo(
+                getattr(self._settings.web_memos, project.kind),
+                [(file.path, file.catalog) for file in files],
+            )
+            content = await asyncio.to_thread(
+                self._archives.web_zip,
+                [(file.path, file.content) for file in files],
+                memo,
+                project.updated_at,
+            )
+            return project.name, content
         sdk = await self.sdk()
         server = {name.lower() for name in sdk.libraries}  # DLL сервера CoGIS (§7.5.14)
         packages = [
@@ -498,16 +645,19 @@ class CodeService:
     def _snapshot(
         self,
         project: Project,
-        files: Sequence[ProjectFile] | Sequence[Mapping[str, str]],
+        files: Sequence[ProjectFile] | Sequence[Mapping[str, Any]],
         reason: Literal["edit_accepted", "build_succeeded", "restored", "before_restore"],
         **extra: Any,
     ) -> Snapshot:
-        listed = [
-            {"path": item.path, "content": item.content}
-            if isinstance(item, ProjectFile)
-            else {"path": item["path"], "content": item["content"]}
-            for item in files
-        ]
+        listed: list[dict[str, Any]] = []
+        for item in files:
+            if isinstance(item, ProjectFile):
+                entry: dict[str, Any] = {"path": item.path, "content": item.content}
+                if item.catalog is not None:
+                    entry["catalog"] = item.catalog
+            else:
+                entry = dict(item)
+            listed.append(entry)
         return Snapshot(
             id=uuid4(),
             project_id=project.id,
@@ -537,7 +687,9 @@ class CodeService:
                 item = wanted.pop(file.path.lower(), None)
                 if item is None:
                     await uow.code.delete_file(owner_id, project_id, file.id)
-                elif item["content"] != file.content or item["path"] != file.path:
+                    continue
+                changed = file
+                if item["content"] != file.content or item["path"] != file.path:
                     changed = replace(
                         file,
                         path=item["path"],
@@ -546,20 +698,16 @@ class CodeService:
                         revision=file.revision + 1,
                         updated_at=now,
                     )
+                if project.kind == "catalog":
+                    changed = replace(changed)
+                    _restore_catalog(changed, item)
+                if changed != file:
                     await uow.code.save_file(owner_id, changed)
             for item in wanted.values():
-                await uow.code.add_file(
-                    owner_id,
-                    ProjectFile(
-                        uuid4(),
-                        project_id,
-                        item["path"],
-                        item["content"],
-                        utf8_size(item["content"]),
-                        1,
-                        now,
-                    ),
-                )
+                added = self._new_file(project, item["path"], item["content"], now)
+                if project.kind == "catalog":
+                    _restore_catalog(added, item)
+                await uow.code.add_file(owner_id, added)
             await self._touch(uow, project)
             restored = self._snapshot(
                 project, target.files, "restored", restored_from=target.created_at
@@ -571,10 +719,12 @@ class CodeService:
 
     async def build(self, owner_id: UUID, project_id: UUID) -> BuildDetails:
         """Сборка кнопкой «Собрать»; закрытие соединения её не прерывает (§7.5.7)."""
+        async with self._uow_factory() as uow:
+            project = await self._project(uow, owner_id, project_id)
+        if project.web:
+            raise errors.wrong_project_kind()
         if self._sandbox is None:
             raise errors.build_unavailable()
-        async with self._uow_factory() as uow:
-            await self._project(uow, owner_id, project_id)
         task = asyncio.create_task(self._build(self._sandbox, owner_id, project_id))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -682,6 +832,8 @@ class CodeService:
         """Архив для CoGIS: только успешная сборка без находок и не устаревшая (§7.5.7)."""
         async with self._uow_factory() as uow:
             project = await self._project(uow, owner_id, project_id)
+            if project.web:
+                raise errors.wrong_project_kind()
             build = await uow.code.build(owner_id, project_id)
             if build is None:
                 raise errors.archive_unavailable("no_build")
@@ -769,9 +921,7 @@ class CodeService:
                 content = stored.files[path][1]
                 current = result.get(path.lower())
                 if current is None:
-                    result[path.lower()] = ProjectFile(
-                        uuid4(), project_id, path, content, utf8_size(content), 1, now
-                    )
+                    result[path.lower()] = self._new_file(project, path, content, now)
                 else:
                     result[path.lower()] = replace(
                         current,
@@ -807,6 +957,23 @@ class CodeService:
                 )
                 await uow.code.add_snapshot(owner_id, snapshot, self._settings.max_snapshots)
             return decided, await self._details(uow, owner_id, project)
+
+
+def _select(project: Project, selection: Selection | None) -> None:
+    """Записать выбор подключения в поля проекта; `None` — снять."""
+    project.db_connection_id = None if selection is None else selection.connection_id
+    project.db_connection_title = None if selection is None else selection.title
+    project.db_tables = [] if selection is None else selection.tables_data()
+
+
+def _restore_catalog(file: ProjectFile, item: Mapping[str, Any]) -> None:
+    """Настройки Каталога из версии; версия без них — по расширению (§7.5.16)."""
+    catalog = item.get("catalog")
+    if catalog is None:
+        file.catalog_insertion, file.catalog_clients = default_catalog(file.path)
+    else:
+        file.catalog_insertion = catalog["insertion"]
+        file.catalog_clients = list(catalog["clients"])
 
 
 def _ordered(result: CompileResult) -> list[Any]:

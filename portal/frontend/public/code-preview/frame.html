@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Предпросмотр</title>
+<!--
+  Страница предпросмотра раздела «Код» (контракт §7.5.17, концепция §5.13.21). Самодостаточна: свой скрипт и
+  стили встроены, внешних ресурсов нет. Исполняется во фрейме с sandbox="allow-scripts" и своей CSP (Caddy):
+  origin непрозрачный, сети нет. Код проекта и данные приходят одним сообщением init от родителя.
+  Цвета элементов страницы — значения светлой темы Контура числами (концепция §7.3, Д-65).
+
+  Картинки Leaflet 1.9.4 (layers.png, layers-2x.png, marker-icon.png, marker-icon-2x.png, marker-shadow.png)
+  встроены строками data: (А-146). Leaflet — BSD 2-Clause License:
+  Copyright (c) 2010-2023, Volodymyr Agafonkin. Copyright (c) 2010-2011, CloudMade. All rights reserved.
+  Redistribution and use in source and binary forms, with or without modification, are permitted provided that
+  the following conditions are met: 1. Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer. 2. Redistributions in binary form must reproduce the
+  above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other
+  materials provided with the distribution. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+  BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-->
+<style>
+  html { background: #ffffff; }
+  body { margin: 0; padding: 16px; font: 14px/20px -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: rgba(0, 0, 0, 0.88); background: #ffffff; }
+  .pv-panel { border: 1px solid rgba(0, 0, 0, 0.16); border-radius: 8px; background: #ffffff; max-width: 360px; }
+  .pv-panel-title { margin: 0; padding: 8px 12px; font-weight: 600; border-bottom: 1px solid rgba(0, 0, 0, 0.16); background: #f6f6f6; border-radius: 8px 8px 0 0; }
+  .pv-panel-body { padding: 12px; }
+  .pv-button { font: inherit; color: rgba(0, 0, 0, 0.88); background: #ffffff; border: 1px solid rgba(0, 0, 0, 0.16); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  .pv-button:hover { background: #f6f6f6; }
+  .pv-button-hidden { border-style: dashed; color: rgba(0, 0, 0, 0.56); }
+  .pv-note { margin: 8px 0 0; color: rgba(0, 0, 0, 0.56); }
+  .pv-catalog-title { margin: 0 0 12px; font-size: 20px; line-height: 28px; font-weight: 600; }
+  .catalog-items-container { padding: 12px 16px; border-bottom: 1px solid rgba(0, 0, 0, 0.16); }
+  .pv-card { max-width: 480px; }
+  .pv-field { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .pv-field label { width: 140px; color: rgba(0, 0, 0, 0.56); overflow-wrap: anywhere; }
+  .pv-field input { flex: 1; font: inherit; padding: 4px 8px; border: 1px solid rgba(0, 0, 0, 0.16); border-radius: 4px; }
+  .pv-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .pv-result { margin: 12px 0 0; }
+  .pv-alert-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.32); display: flex; align-items: center; justify-content: center; }
+  .pv-alert { background: #ffffff; border-radius: 8px; padding: 16px; max-width: 320px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16); }
+  .pv-alert h2 { margin: 0 0 8px; font-size: 16px; line-height: 22px; }
+  .pv-alert p { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<script>
+(function () {
+  'use strict';
+
+  /* (1) WebRTC: CSP его не закрывает (контракт §7.5.17). */
+  ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel'].forEach(function (name) {
+    try {
+      Object.defineProperty(window, name, { value: undefined, writable: false, configurable: false });
+    } catch (error) {
+      window[name] = undefined;
+    }
+  });
+
+  var parentWindow = window.parent;
+  var send = function (message) {
+    // The opaque origin cannot name the portal's origin: "*" is the only possible target.
+    parentWindow.postMessage(message, '*');
+  };
+
+  /* Файл, чей скрипт исполняется сейчас синхронно, и пути всех файлов — чтобы найти место ошибки. */
+  var currentFile = null;
+  var paths = [];
+
+  function placeFromStack(stack) {
+    if (typeof stack !== 'string') {
+      return null;
+    }
+    for (var i = 0; i < paths.length; i += 1) {
+      var at = stack.indexOf(paths[i] + ':');
+      if (at >= 0) {
+        var match = /^:(\d+)(?::(\d+))?/.exec(stack.slice(at + paths[i].length));
+        if (match) {
+          return { file: paths[i], line: Number(match[1]), column: match[2] ? Number(match[2]) : null };
+        }
+      }
+    }
+    return null;
+  }
+
+  function reportError(message, error, line, column) {
+    var place = currentFile !== null
+      ? { file: currentFile, line: line || null, column: column || null }
+      : placeFromStack(error && error.stack) || { file: null, line: null, column: null };
+    send({ type: 'error', file: place.file, line: place.line, column: place.column, message: String(message).slice(0, 2000) });
+  }
+
+  /* (2) Обработчики ошибок и запретов. */
+  window.addEventListener('error', function (event) {
+    reportError(event.message || (event.error && String(event.error)) || 'Error', event.error, event.lineno, event.colno);
+  });
+  window.addEventListener('unhandledrejection', function (event) {
+    var reason = event.reason;
+    var text = reason && reason.message ? (reason.name ? reason.name + ': ' : '') + reason.message : String(reason);
+    var saved = currentFile;
+    currentFile = null;
+    reportError('Uncaught (in promise) ' + text, reason, null, null);
+    currentFile = saved;
+  });
+  document.addEventListener('securitypolicyviolation', function (event) {
+    send({ type: 'blocked', url: String(event.blockedURI || '').slice(0, 2000), directive: String(event.effectiveDirective || event.violatedDirective || '') });
+  });
+
+  /* Картинки Leaflet 1.9.4 строками data: (А-146). */
+  var IMAGES = {
+    'layers.png': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABoAAAAaCAQAAAADQ4RFAAACf0lEQVR4AY1UM3gkARTePdvdoTxXKc+qTl3aU5U6b2Kbkz3Gtq3Zw6ziLGNPzrYx7946Tr6/ee/XeCQ4D3ykPtL5tHno4n0d/h3+xfuWHGLX81cn7r0iTNzjr7LrlxCqPtkbTQEHeqOrTy4Yyt3VCi/IOB0v7rVC7q45Q3Gr5K6jt+3Gl5nCoDD4MtO+j96Wu8atmhGqcNGHObuf8OM/x3AMx38+4Z2sPqzCxRFK2aF2e5Jol56XTLyggAMTL56XOMoS1W4pOyjUcGGQdZxU6qRh7B9Zp+PfpOFlqt0zyDZckPi1ttmIp03jX8gyJ8a/PG2yutpS/Vol7peZIbZcKBAEEheEIAgFbDkz5H6Zrkm2hVWGiXKiF4Ycw0RWKdtC16Q7qe3X4iOMxruonzegJzWaXFrU9utOSsLUmrc0YjeWYjCW4PDMADElpJSSQ0vQvA1Tm6/JlKnqFs1EGyZiFCqnRZTEJJJiKRYzVYzJck2Rm6P4iH+cmSY0YzimYa8l0EtTODFWhcMIMVqdsI2uiTvKmTisIDHJ3od5GILVhBCarCfVRmo4uTjkhrhzkiBV7SsaqS+TzrzM1qpGGUFt28pIySQHR6h7F6KSwGWm97ay+Z+ZqMcEjEWebE7wxCSQwpkhJqoZA5ivCdZDjJepuJ9IQjGGUmuXJdBFUygxVqVsxFsLMbDe8ZbDYVCGKxs+W080max1hFCarCfV+C1KATwcnvE9gRRuMP2prdbWGowm1KB1y+zwMMENkM755cJ2yPDtqhTI6ED1M/82yIDtC/4j4BijjeObflpO9I9MwXTCsSX8jWAFeHr05WoLTJ5G8IQVS/7vwR6ohirYM7f6HzYpogfS3R2OAAAAAElFTkSuQmCC',
+    'layers-2x.png': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADQAAAA0CAQAAABvcdNgAAAEsklEQVR4AWL4TydIhpZK1kpWOlg0w3ZXP6D2soBtG42jeI6ZmQTHzAxiTbSJsYLjO9HhP+WOmcuhciVnmHVQcJnp7DFvScowZorad/+V/fVzMdMT2g9Cv9guXGv/7pYOrXh2U+RRR3dSd9JRx6bIFc/ekqHI29JC6pJ5ZEh1yWkhkbcFeSjxgx3L2m1cb1C7bceyxA+CNjT/Ifff+/kDk2u/w/33/IeCMOSaWZ4glosqT3DNnNZQ7Cs58/3Ce5HL78iZH/vKVIaYlqzfdLu8Vi7dnvUbEza5Idt36tquZFldl6N5Z/POLof0XLK61mZCmJSWjVF9tEjUluu74IUXvgttuVIHE7YxSkaYhJZam7yiM9Pv82JYfl9nptxZaxMJE4YSPty+vF0+Y2up9d3wwijfjZbabqm/3bZ9ecKHsiGmRflnn1MW4pjHf9oLufyn2z3y1D6n8g8TZhxyzipLNPnAUpsOiuWimg52psrTZYnOWYNDTMuWBWa0tJb4rgq1UvmutpaYEbZlwU3CLJm/ayYjHW5/h7xWLn9Hh1vepDkyf7dE7MtT5LR4e7yYpHrkhOUpEfssBLq2pPhAqoSWKUkk7EDqkmK6RrCEzqDjhNDWNE+XSMvkJRDWlZTmCW0l0PHQGRZY5t1L83kT0Y3l2SItk5JAWHl2dCOBm+fPu3fo5/3v61RMCO9Jx2EEYYhb0rmNQMX/vm7gqOEJLcXTGw3CAuRNeyaPWwjR8PRqKQ1PDA/dpv+on9Shox52WFnx0KY8onHayrJzm87i5h9xGw/tfkev0jGsQizqezUKjk12hBMKJ4kbCqGPVNXudyyrShovGw5CgxsRICxF6aRmSjlBnHRzg7Gx8fKqEubI2rahQYdR1YgDIRQO7JvQyD52hoIQx0mxa0ODtW2Iozn1le2iIRdzwWewedyZzewidueOGqlsn1MvcnQpuVwLGG3/IR1hIKxCjelIDZ8ldqWz25jWAsnldEnK0Zxro19TGVb2ffIZEsIO89EIEDvKMPrzmBOQcKQ+rroye6NgRRxqR4U8EAkz0CL6uSGOm6KQCdWjvjRiSP1BPalCRS5iQYiEIvxuBMJEWgzSoHADcVMuN7IuqqTeyUPq22qFimFtxDyBBJEwNyt6TM88blFHao/6tWWhuuOM4SAK4EI4QmFHA+SEyWlp4EQoJ13cYGzMu7yszEIBOm2rVmHUNqwAIQabISNMRstmdhNWcFLsSm+0tjJH1MdRxO5Nx0WDMhCtgD6OKgZeljJqJKc9po8juskR9XN0Y1lZ3mWjLR9JCO1jRDMd0fpYC2VnvjBSEFg7wBENc0R9HFlb0xvF1+TBEpF68d+DHR6IOWVv2BECtxo46hOFUBd/APU57WIoEwJhIi2CdpyZX0m93BZicktMj1AS9dClteUFAUNUIEygRZCtik5zSxI9MubTBH1GOiHsiLJ3OCoSZkILa9PxiN0EbvhsAo8tdAf9Seepd36lGWHmtNANTv5Jd0z4QYyeo/UEJqxKRpg5LZx6btLPsOaEmdMyxYdlc8LMaJnikDlhclqmPiQnTEpLUIZEwkRagjYkEibQErwhkTAKCLQEbUgkzJQWc/0PstHHcfEdQ+UAAAAASUVORK5CYII=',
+    'marker-icon.png': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABkAAAApCAYAAADAk4LOAAAFgUlEQVR4Aa1XA5BjWRTN2oW17d3YaZtr2962HUzbDNpjszW24mRt28p47v7zq/bXZtrp/lWnXr337j3nPCe85NcypgSFdugCpW5YoDAMRaIMqRi6aKq5E3YqDQO3qAwjVWrD8Ncq/RBpykd8oZUb/kaJutow8r1aP9II0WmLKLIsJyv1w/kqw9Ch2MYdB++12Onxee/QMwvf4/Dk/Lfp/i4nxTXtOoQ4pW5Aj7wpici1A9erdAN2OH64x8OSP9j3Ft3b7aWkTg/Fm91siTra0f9on5sQr9INejH6CUUUpavjFNq1B+Oadhxmnfa8RfEmN8VNAsQhPqF55xHkMzz3jSmChWU6f7/XZKNH+9+hBLOHYozuKQPxyMPUKkrX/K0uWnfFaJGS1QPRtZsOPtr3NsW0uyh6NNCOkU3Yz+bXbT3I8G3xE5EXLXtCXbbqwCO9zPQYPRTZ5vIDXD7U+w7rFDEoUUf7ibHIR4y6bLVPXrz8JVZEql13trxwue/uDivd3fkWRbS6/IA2bID4uk0UpF1N8qLlbBlXs4Ee7HLTfV1j54APvODnSfOWBqtKVvjgLKzF5YdEk5ewRkGlK0i33Eofffc7HT56jD7/6U+qH3Cx7SBLNntH5YIPvODnyfIXZYRVDPqgHtLs5ABHD3YzLuespb7t79FY34DjMwrVrcTuwlT55YMPvOBnRrJ4VXTdNnYug5ucHLBjEpt30701A3Ts+HEa73u6dT3FNWwflY86eMHPk+Yu+i6pzUpRrW7SNDg5JHR4KapmM5Wv2E8Tfcb1HoqqHMHU+uWDD7zg54mz5/2BSnizi9T1Dg4QQXLToGNCkb6tb1NU+QAlGr1++eADrzhn/u8Q2YZhQVlZ5+CAOtqfbhmaUCS1ezNFVm2imDbPmPng5wmz+gwh+oHDce0eUtQ6OGDIyR0uUhUsoO3vfDmmgOezH0mZN59x7MBi++WDL1g/eEiU3avlidO671bkLfwbw5XV2P8Pzo0ydy4t2/0eu33xYSOMOD8hTf4CrBtGMSoXfPLchX+J0ruSePw3LZeK0juPJbYzrhkH0io7B3k164hiGvawhOKMLkrQLyVpZg8rHFW7E2uHOL888IBPlNZ1FPzstSJM694fWr6RwpvcJK60+0HCILTBzZLFNdtAzJaohze60T8qBzyh5ZuOg5e7uwQppofEmf2++DYvmySqGBuKaicF1blQjhuHdvCIMvp8whTTfZzI7RldpwtSzL+F1+wkdZ2TBOW2gIF88PBTzD/gpeREAMEbxnJcaJHNHrpzji0gQCS6hdkEeYt9DF/2qPcEC8RM28Hwmr3sdNyht00byAut2k3gufWNtgtOEOFGUwcXWNDbdNbpgBGxEvKkOQsxivJx33iow0Vw5S6SVTrpVq11ysA2Rp7gTfPfktc6zhtXBBC+adRLshf6sG2RfHPZ5EAc4sVZ83yCN00Fk/4kggu40ZTvIEm5g24qtU4KjBrx/BTTH8ifVASAG7gKrnWxJDcU7x8X6Ecczhm3o6YicvsLXWfh3Ch1W0k8x0nXF+0fFxgt4phz8QvypiwCCFKMqXCnqXExjq10beH+UUA7+nG6mdG/Pu0f3LgFcGrl2s0kNNjpmoJ9o4B29CMO8dMT4Q5ox8uitF6fqsrJOr8qnwNbRzv6hSnG5wP+64C7h9lp30hKNtKdWjtdkbuPA19nJ7Tz3zR/ibgARbhb4AlhavcBebmTHcFl2fvYEnW0ox9xMxKBS8btJ+KiEbq9zA4RthQXDhPa0T9TEe69gWupwc6uBUphquXgf+/FrIjweHQS4/pduMe5ERUMHUd9xv8ZR98CxkS4F2n3EUrUZ10EYNw7BWm9x1GiPssi3GgiGRDKWRYZfXlON+dfNbM+GgIwYdwAAAAASUVORK5CYII=',
+    'marker-icon-2x.png': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADIAAABSCAMAAAAhFXfZAAAC91BMVEVMaXEzeak2f7I4g7g3g7cua5gzeKg8hJo3grY4g7c3grU0gLI2frE0daAubJc2gbQwd6QzeKk2gLMtd5sxdKIua5g1frA2f7IydaM0e6w2fq41fK01eqo3grgubJgta5cxdKI1f7AydaQydaMxc6EubJgvbJkwcZ4ubZkwcJwubZgubJcydqUydKIxapgubJctbJcubZcubJcvbJYubJcvbZkubJctbJctbZcubJg2f7AubJcrbZcubJcubJcua5g3grY0fq8ubJcubJdEkdEwhsw6i88vhswuhcsuhMtBjMgthMsrg8srgss6is8qgcs8i9A9iMYtg8spgcoogMo7hcMngMonf8olfso4gr8kfck5iM8jfMk4iM8he8k1fro7itAgesk2hs8eecgzfLcofssdeMg0hc4cd8g2hcsxeLQbdsgZdcgxeLImfcszhM0vda4xgckzhM4xg84wf8Yxgs4udKsvfcQucqhUndROmdM1fK0wcZ8vb5w0eqpQm9MzeKhXoNVcpdYydKNWn9VZotVKltJFjsIwcJ1Rms9OlslLmtH///8+kc9epdYzd6dbo9VHkMM2f7FHmNBClM8ydqVcpNY9hro3gLM9hLczealQmcw3fa46f7A8gLMxc6I3eagyc6FIldJMl9JSnNRSntNNl9JPnNJFi75UnM9ZodVKksg8kM45jc09e6ZHltFBk883gbRBh7pDk9EwcaBzn784g7dKkcY2i81Om9M7j85Llc81is09g7Q4grY/j9A0eqxKmdFFltBEjcXf6fFImdBCiLxJl9FGlNFBi78yiMxVndEvbpo6js74+vx+psPP3+o/ks5HkcpGmNCjwdZCkNDM3ehYoNJEls+lxNkxh8xHks0+jdC1zd5Lg6r+/v/H2ufz9/o3jM3t8/edvdM/k89Th61OiLBSjbZklbaTt9BfptdjmL1AicBHj8hGk9FAgK1dkLNTjLRekrdClc/k7fM0icy0y9tgp9c4jc2NtM9Dlc8zicxeXZn3AAAAQ3RSTlMAHDdTb4yPA+LtnEQmC4L2EmHqB7XA0d0sr478x4/Yd5i1zOfyPkf1sLVq4Nh3FvjxopQ2/STNuFzUwFIwxKaejILpIBEV9wAABhVJREFUeF6s1NdyFEcY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',
+    'marker-shadow.png': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACkAAAApCAQAAAACach9AAACMUlEQVR4Ae3ShY7jQBAE0Aoz/f9/HTMzhg1zrdKUrJbdx+Kd2nD8VNudfsL/Th///dyQN2TH6f3y/BGpC379rV+S+qqetBOxImNQXL8JCAr2V4iMQXHGNJxeCfZXhSRBcQMfvkOWUdtfzlLgAENmZDcmo2TVmt8OSM2eXxBp3DjHSMFutqS7SbmemzBiR+xpKCNUIRkdkkYxhAkyGoBvyQFEJEefwSmmvBfJuJ6aKqKWnAkvGZOaZXTUgFqYULWNSHUckZuR1HIIimUExutRxwzOLROIG4vKmCKQt364mIlhSyzAf1m9lHZHJZrlAOMMztRRiKimp/rpdJDc9Awry5xTZCte7FHtuS8wJgeYGrex28xNTd086Dik7vUMscQOa8y4DoGtCCSkAKlNwpgNtphjrC6MIHUkR6YWxxs6Sc5xqn222mmCRFzIt8lEdKx+ikCtg91qS2WpwVfBelJCiQJwvzixfI9cxZQWgiSJelKnwBElKYtDOb2MFbhmUigbReQBV0Cg4+qMXSxXSyGUn4UbF8l+7qdSGnTC0XLCmahIgUHLhLOhpVCtw4CzYXvLQWQbJNmxoCsOKAxSgBJno75avolkRw8iIAFcsdc02e9iyCd8tHwmeSSoKTowIgvscSGZUOA7PuCN5b2BX9mQM7S0wYhMNU74zgsPBj3HU7wguAfnxxjFQGBE6pwN+GjME9zHY7zGp8wVxMShYX9NXvEWD3HbwJf4giO4CFIQxXScH1/TM+04kkBiAAAAAElFTkSuQmCC',
+  };
+
+  function fixLeafletCss(css) {
+    return css.replace(/url\(images\/([A-Za-z0-9-]+\.png)\)/g, function (whole, name) {
+      return IMAGES[name] ? 'url("' + IMAGES[name] + '")' : whole;
+    });
+  }
+
+  function addStyle(text, parent, before) {
+    var style = document.createElement('style');
+    style.textContent = text;
+    parent.insertBefore(style, before || null);
+  }
+
+  /** Скрипт с текстом; у файла проекта — пустые строки до его начала в файле и `sourceURL`, чтобы строки совпали. */
+  function runScript(text, path, startLine, parent, before, attributes) {
+    var script = document.createElement('script');
+    (attributes || []).forEach(function (attribute) {
+      script.setAttribute(attribute.name, attribute.value);
+    });
+    script.text = path === null ? text : new Array(startLine).join('\n') + text + '\n//# sourceURL=' + path;
+    var saved = currentFile;
+    currentFile = path;
+    (parent || document.body).insertBefore(script, before || null);
+    currentFile = saved;
+  }
+
+  var JS_TYPES = ['', 'text/javascript', 'application/javascript', 'module', 'text/ecmascript', 'application/ecmascript'];
+
+  /** Разметка файла: узлы вставляются, скрипты пересоздаются по порядку — `innerHTML` их не исполняет. */
+  function insertHtml(html, path, parent, before) {
+    var template = document.createElement('template');
+    template.innerHTML = html;
+    var nodes = Array.prototype.slice.call(template.content.childNodes);
+    var holder = document.createDocumentFragment();
+    nodes.forEach(function (node) {
+      holder.appendChild(node);
+    });
+    var scripts = Array.prototype.slice.call(holder.querySelectorAll('script'));
+    var marks = scripts.map(function (script) {
+      var mark = document.createComment('');
+      script.parentNode.replaceChild(mark, script);
+      return { mark: mark, script: script };
+    });
+    parent.insertBefore(holder, before || null);
+    var from = 0;
+    marks.forEach(function (item) {
+      var source = item.script;
+      var type = (source.getAttribute('type') || '').toLowerCase();
+      if (JS_TYPES.indexOf(type) < 0) {
+        item.mark.parentNode.replaceChild(source, item.mark);
+        return;
+      }
+      var at = html.indexOf(source.text, from);
+      var startLine = at >= 0 ? html.slice(0, at).split('\n').length : 1;
+      from = at >= 0 ? at + source.text.length : from;
+      runScript(source.text, path, startLine, item.mark.parentNode, item.mark, Array.prototype.slice.call(source.attributes));
+      item.mark.parentNode.removeChild(item.mark);
+    });
+  }
+
+  function withHelpers(list) {
+    list.first = function (predicate) {
+      for (var i = 0; i < list.length; i += 1) {
+        if (!predicate || predicate(list[i])) {
+          return list[i];
+        }
+      }
+      return undefined;
+    };
+    list.where = function (predicate) {
+      return withHelpers(list.filter(function (item) {
+        return predicate(item);
+      }));
+    };
+    list.addArray = function (items) {
+      (items || []).forEach(function (item) {
+        list.push(item);
+      });
+      return list;
+    };
+    return list;
+  }
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) {
+      node.className = className;
+    }
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+    return node;
+  }
+
+  function showAlert(title, message) {
+    var backdrop = el('div', 'pv-alert-backdrop');
+    var box = el('div', 'pv-alert');
+    box.setAttribute('role', 'alertdialog');
+    box.appendChild(el('h2', '', title === undefined ? '' : String(title)));
+    box.appendChild(el('p', '', message === undefined ? '' : String(message)));
+    var close = el('button', 'pv-button', 'Закрыть');
+    close.type = 'button';
+    close.addEventListener('click', function () {
+      backdrop.remove();
+    });
+    box.appendChild(close);
+    backdrop.appendChild(box);
+    document.body.appendChild(backdrop);
+    close.focus();
+  }
+
+  function start(init) {
+    var files = Array.isArray(init.files) ? init.files : [];
+    paths = files.map(function (file) {
+      return String(file.path);
+    });
+    var features = init.layer && init.layer.features && Array.isArray(init.layer.features.features) ? init.layer.features.features : [];
+    var functions = Array.isArray(init.api_functions) ? init.api_functions : [];
+    var libraries = init.libraries || {};
+
+    /* (4) Библиотеки клиента CoGIS. */
+    if (typeof libraries.leaflet_css === 'string') {
+      addStyle(fixLeafletCss(libraries.leaflet_css), document.head);
+    }
+    ['jquery', 'knockout', 'leaflet'].forEach(function (id) {
+      if (typeof libraries[id] === 'string') {
+        runScript(libraries[id], null);
+      }
+    });
+    if (window.L && window.L.Icon && window.L.Icon.Default) {
+      window.L.Icon.Default.imagePath = '';
+      window.L.Icon.Default.mergeOptions({ iconUrl: IMAGES['marker-icon.png'], iconRetinaUrl: IMAGES['marker-icon-2x.png'], shadowUrl: IMAGES['marker-shadow.png'] });
+    }
+
+    /* (5) Заглушка api (А-131). */
+    var layer = Object.freeze({ name: init.layer && init.layer.name ? String(init.layer.name) : 'Слой предпросмотра' });
+    function objects() {
+      return withHelpers(features.map(function (feature) {
+        var attributes = {};
+        Object.keys(feature.properties || {}).forEach(function (key) {
+          attributes[key] = feature.properties[key];
+        });
+        return { attributes: attributes, geometry: feature.geometry || null };
+      }));
+    }
+    function describe(value, depth) {
+      if (value === layer) {
+        return 'слой предпросмотра';
+      }
+      if (typeof value === 'string') {
+        return JSON.stringify(value);
+      }
+      if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) {
+        return String(value);
+      }
+      if (typeof value === 'function') {
+        return 'функция';
+      }
+      if (Array.isArray(value)) {
+        return depth > 0 ? '[…]' : '[' + value.slice(0, 20).map(function (item) { return describe(item, 1); }).join(', ') + (value.length > 20 ? ', …' : '') + ']';
+      }
+      if (value.type === 'point') {
+        var sr = value.spatialReference;
+        var id = sr && typeof sr === 'object' ? (sr.wkid !== undefined ? sr.wkid : 'WKT') : sr;
+        return 'точка ' + value.x + '; ' + value.y + (id !== undefined && id !== null ? ' (' + id + ')' : '');
+      }
+      return '{…}';
+    }
+    var SYMBOLS = ['createSimplePointSymbol', 'createPicturePointSymbol', 'createSimpleLineSymbol', 'createSimpleFillSymbol'];
+    function call(name, args) {
+      switch (name) {
+        case 'createPoint':
+          return { type: 'point', x: args[0], y: args[1], spatialReference: args[2] };
+        case 'createExtent':
+          return { type: 'extent', xmin: args[0], xmax: args[1], ymin: args[2], ymax: args[3], spatialReference: args[4] };
+        case 'getSpatialReference':
+          return typeof args[0] === 'number' ? { wkid: args[0] } : { wkt: args[0] };
+        case 'getCentroid':
+        case 'project':
+          return args[0];
+        case 'createColor':
+          return { r: args[0], g: args[1], b: args[2], alpha: args[3] };
+        case 'addGraphic':
+          return { graphic: true };
+        case 'getLayer':
+          return layer;
+        case 'searchInLayer':
+          return Promise.resolve(objects());
+        case 'showAlert':
+          showAlert(args[0], args[1]);
+          return undefined;
+        default:
+          return SYMBOLS.indexOf(name) >= 0 ? { type: name, arguments: args } : undefined;
+      }
+    }
+    window.api = new Proxy({}, {
+      get: function (target, name) {
+        // `then` is probed by `await api`; it is not a function of api and is not logged.
+        if (typeof name !== 'string' || name === 'then') {
+          return undefined;
+        }
+        return function () {
+          var args = Array.prototype.slice.call(arguments);
+          var known = functions.indexOf(name) >= 0;
+          var count = known && (name === 'getLayer' || name === 'searchInLayer') ? features.length : null;
+          send({ type: 'log', fn: name, args: args.slice(0, 20).map(function (arg) { return describe(arg, 0).slice(0, 2000); }), known: known, count: count });
+          return known ? call(name, args) : undefined;
+        };
+      },
+    });
+
+    /* (6) Каркас вида и файлы проекта. */
+    var kind = init.kind;
+    var file = files[0];
+    if (kind === 'js_plugin' && file) {
+      var panel = el('section', 'pv-panel');
+      panel.appendChild(el('h1', 'pv-panel-title', 'Кнопка плагина'));
+      var body = el('div', 'pv-panel-body');
+      var run = el('button', 'pv-button', 'Запустить плагин');
+      run.type = 'button';
+      run.addEventListener('click', function () {
+        runScript(String(file.content), String(file.path), 1);
+      });
+      body.appendChild(run);
+      panel.appendChild(body);
+      document.body.appendChild(panel);
+    } else if (kind === 'html_widget' && file) {
+      var widget = el('section', 'pv-panel');
+      widget.appendChild(el('h1', 'pv-panel-title', 'Виджет'));
+      var content = el('div', 'pv-panel-body');
+      widget.appendChild(content);
+      document.body.appendChild(widget);
+      insertHtml(String(file.content), String(file.path), content);
+      if (window.ko && typeof window.ko.applyBindings === 'function') {
+        try {
+          window.ko.applyBindings({}, content);
+        } catch (error) {
+          send({ type: 'error', file: String(file.path), line: null, column: null, message: String(error && error.message ? error.message : error).slice(0, 2000) });
+        }
+      }
+    } else if (kind === 'catalog') {
+      document.body.appendChild(el('h1', 'pv-catalog-title', 'Каталог карт'));
+      [['Folder_1', 'Папка 1'], ['Folder_2', 'Папка 2'], ['Folder_3', 'Папка 3'], ['Map_1', 'Карта 1'], ['Map_2', 'Карта 2']].forEach(function (item) {
+        var block = el('div', 'catalog-items-container', item[1]);
+        block.setAttribute('data-block-id', item[0]);
+        document.body.appendChild(block);
+      });
+      files.forEach(function (item) {
+        var placement = item.catalog || { insertion: 'body_end', clients: ['smartphone', 'tablet', 'desktop'] };
+        if (placement.clients.indexOf(init.client) < 0) {
+          return;
+        }
+        var inHead = placement.insertion === 'head_start' || placement.insertion === 'head_end';
+        var parent = inHead ? document.head : document.body;
+        var before = placement.insertion === 'head_start' || placement.insertion === 'body_start' ? parent.firstChild : null;
+        var path = String(item.path);
+        var text = String(item.content);
+        var extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+        if (extension === 'css') {
+          addStyle(text, parent, before);
+        } else if (extension === 'js') {
+          runScript(text, path, 1, parent, before);
+        } else {
+          insertHtml(text, path, parent, before);
+        }
+      });
+    } else if (kind === 'card_hooks' && file) {
+      var hidden = el('div');
+      hidden.hidden = true;
+      document.body.appendChild(hidden);
+      insertHtml(String(file.content), String(file.path), hidden);
+      var first = features[0] || { properties: {} };
+      var values = {};
+      var ko = window.ko;
+      Object.keys(first.properties || {}).forEach(function (key) {
+        var value = first.properties[key];
+        values[key] = ko && ko.observable ? ko.observable(value) : (function (current) {
+          var read = function () { return current; };
+          read.set = function (next) { current = next; };
+          return read;
+        })(value);
+      });
+      var object = {
+        attributes: function () {
+          return {
+            keyValues: withHelpers(Object.keys(values).map(function (key) {
+              return { key: key, value: values[key]() };
+            })),
+            get: function (name) {
+              return values[name];
+            },
+          };
+        },
+        id: { layerId: 0 },
+        service: { isApplicable: function () { return true; } },
+      };
+      var project = {};
+      var read = function (result) {
+        return typeof result === 'function' ? result() : result;
+      };
+      var card = el('section', 'pv-panel pv-card');
+      card.appendChild(el('h1', 'pv-panel-title', 'Карточка объекта (образец)'));
+      var cardBody = el('div', 'pv-panel-body');
+      Object.keys(values).forEach(function (key, index) {
+        var row = el('div', 'pv-field');
+        var label = el('label', '', key);
+        label.htmlFor = 'pv-field-' + index;
+        var input = el('input');
+        input.id = 'pv-field-' + index;
+        input.value = values[key]() === null || values[key]() === undefined ? '' : String(values[key]());
+        input.addEventListener('input', function () {
+          if (values[key].set) {
+            values[key].set(input.value);
+          } else {
+            values[key](input.value);
+          }
+        });
+        row.appendChild(label);
+        row.appendChild(input);
+        cardBody.appendChild(row);
+      });
+      var result = el('p', 'pv-result');
+      result.setAttribute('role', 'status');
+      var actions = el('div', 'pv-actions');
+      var save = el('button', 'pv-button', 'Сохранить');
+      save.type = 'button';
+      save.addEventListener('click', function () {
+        var errors = typeof window.checkBeforeSave === 'function' ? read(window.checkBeforeSave(object, project)) : null;
+        var list = Array.isArray(errors) ? errors : errors ? [errors] : [];
+        result.textContent = list.length > 0 ? 'Ошибки проверки: ' + list.map(String).join('; ') : 'Проверка пройдена — CoGIS сохранил бы объект';
+      });
+      actions.appendChild(save);
+      ['Задача 1', 'Задача 2'].forEach(function (caption) {
+        var button = { caption: caption };
+        var task = el('button', 'pv-button', caption);
+        task.type = 'button';
+        var visible = typeof window.checkButtonVisibilityInCard === 'function' ? read(window.checkButtonVisibilityInCard(object, button, project)) : true;
+        if (visible === false) {
+          task.className = 'pv-button pv-button-hidden';
+          task.textContent = caption + ' — скрыта кодом';
+        }
+        task.addEventListener('click', function () {
+          var allowed = typeof window.checkBeforeExecuteButtonInCard === 'function' ? read(window.checkBeforeExecuteButtonInCard(object, button, project)) : true;
+          result.textContent = allowed === false ? 'Задача не запустилась бы: код вернул false' : 'Задача запустилась бы';
+        });
+        actions.appendChild(task);
+      });
+      cardBody.appendChild(actions);
+      cardBody.appendChild(result);
+      card.appendChild(cardBody);
+      document.body.appendChild(card);
+    }
+  }
+
+  /* (3) Готовность и одно сообщение init от родителя; дальше сообщения не принимаются. */
+  var started = false;
+  window.addEventListener('message', function onInit(event) {
+    if (started || event.source !== parentWindow || !event.data || event.data.type !== 'init') {
+      return;
+    }
+    started = true;
+    window.removeEventListener('message', onInit);
+    start(event.data);
+  });
+  send({ type: 'ready' });
+})();
+</script>
+</body>
+</html>

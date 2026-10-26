@@ -62,6 +62,8 @@ interface Options {
   placement?: 'side' | 'feed';
   /** Помощник проекта: меняется после сохранённого изменения файлов — оценка повторяется. */
   revision?: string;
+  /** Помощник проекта (1.0): строка о том, что уходит с каждым вопросом, — по виду и выбору базы (§4.9). */
+  codeNote?: string;
 }
 
 export interface MemoryUi {
@@ -105,6 +107,7 @@ export function useMemoryUi({
   onSchemaMissing,
   placement = 'side',
   revision,
+  codeNote,
 }: Options): MemoryUi {
   const { config } = useSession();
   const { loadOlderUntil, showSummary, addDialog, forgetDialog } = useChat();
@@ -451,6 +454,7 @@ export function useMemoryUi({
         onEditSummary={() => openModal({ type: 'edit' })}
         onCancelSummary={() => openModal({ type: 'cancel', pending: false, error: null })}
         onTransfer={current ? () => openTransfer(current, null) : null}
+        codeNote={codeNote}
       />
     ) : null,
     longDialog: longText ? (

@@ -16,7 +16,8 @@ import { formatDateTime, primaryAction, routeAnnouncement, type RouteState } fro
 
 const b = texts.workshop.build;
 
-export type BuildTab = 'errors' | 'warnings' | 'rules';
+/** `sql` — «Проверка запроса» (1.0, §5.13.23): четвёртая, после первой проверки. */
+export type BuildTab = 'errors' | 'warnings' | 'rules' | 'sql';
 
 /** Вкладка, открытая при развороте: первая непустая (§5.13.8). */
 export function firstTab(build: CodeBuild | null): BuildTab {
@@ -51,6 +52,8 @@ interface Props {
   onDownload: () => void;
   onExportVs: () => void;
   onJump: (path: string, line: number, column: number) => void;
+  /** Вкладка «Проверка запроса» (1.0): есть после первой проверки, до ухода из проекта. */
+  sqlTab?: React.ReactNode | null;
 }
 
 function Muted({ children }: { children: React.ReactNode }) {
@@ -216,7 +219,7 @@ interface MessageRowProps {
 }
 
 /** Строка сообщения — кнопка во всю ширину: переход к месту в редакторе (§5.13.8, §9). */
-function MessageRow({ kind, file, line, column, text, exists, onJump }: MessageRowProps) {
+export function MessageRow({ kind, file, line, column, text, exists, onJump }: MessageRowProps) {
   const icon =
     kind === 'warning' ? <IconWarningTriangleRegular16 className={styles.warning} /> : <IconXCircleRegular16 className={styles.error} />;
   const place = file && line ? b.place(file, line) : file;
@@ -285,12 +288,30 @@ function findingsList(items: RuleFinding[], paths: ReadonlySet<string>, onJump: 
 }
 
 /** Сообщения последней сборки по вкладкам (§5.13.8). */
-function Messages({ build, tab, paths, outdated, onTab, onJump }: { build: CodeBuild | null; tab: BuildTab; paths: ReadonlySet<string>; outdated: boolean; onTab: (tab: BuildTab) => void; onJump: Props['onJump'] }) {
+function Messages({
+  build,
+  tab,
+  paths,
+  outdated,
+  sqlTab,
+  onTab,
+  onJump,
+}: {
+  build: CodeBuild | null;
+  tab: BuildTab;
+  paths: ReadonlySet<string>;
+  outdated: boolean;
+  sqlTab: React.ReactNode | null;
+  onTab: (tab: BuildTab) => void;
+  onJump: Props['onJump'];
+}) {
   const errors = build?.diagnostics.filter((item) => item.severity === 'error') ?? [];
   const warnings = build?.diagnostics.filter((item) => item.severity === 'warning') ?? [];
   const findings = build?.findings ?? null;
   let content: React.ReactNode;
-  if (tab === 'errors') {
+  if (tab === 'sql' && sqlTab) {
+    content = sqlTab;
+  } else if (tab === 'errors' || tab === 'sql') {
     content = errors.length > 0 ? <ul className={styles.list}>{diagnosticsList(errors, 'error', paths, onJump)}</ul> : <p className={styles.note}>{b.noErrors}</p>;
   } else if (tab === 'warnings') {
     content = (
@@ -322,10 +343,11 @@ function Messages({ build, tab, paths, outdated, onTab, onJump }: { build: CodeB
     <div className={styles.messages}>
       {outdated && <p className={styles.stale}>{b.staleMessages}</p>}
       <div className={styles.tabs}>
-        <Tabs<BuildTab> value={tab} onValueChange={onTab} size="small">
+        <Tabs<BuildTab> value={tab === 'sql' && !sqlTab ? 'errors' : tab} onValueChange={onTab} size="small">
           <Tabs.Tab id="errors">{b.tabs.errors(errors.length)}</Tabs.Tab>
           <Tabs.Tab id="warnings">{b.tabs.warnings(warnings.length)}</Tabs.Tab>
           <Tabs.Tab id="rules">{b.tabs.rules(findings?.length ?? 0)}</Tabs.Tab>
+          {sqlTab && <Tabs.Tab id="sql">{texts.workshop.web.route.tabs.sqlCheck}</Tabs.Tab>}
         </Tabs>
       </div>
       <div className={styles.listScroll}>
@@ -385,6 +407,7 @@ export function BuildPanel(props: Props) {
           tab={props.tab}
           paths={props.paths}
           outdated={state.kind === 'outdated'}
+          sqlTab={props.sqlTab ?? null}
           onTab={props.onTab}
           onJump={props.onJump}
         />

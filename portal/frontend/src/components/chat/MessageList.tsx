@@ -75,6 +75,11 @@ interface AnswerProps {
   extra?: React.ReactNode;
   /** Свой текст отказа модели по длине (помощник проекта, §5.13.10). */
   tooLongText?: string;
+  /** «Проверить снова» блока проверки на образце (SQL-помощник, 1.0); `recheckWait` — почему ждёт. */
+  onRecheck?: (index: number) => void;
+  recheckWait?: string | null;
+  /** Идёт «Проверить снова»: диалог занят, как во время ответа (концепция §5.7, А-143). */
+  rechecking?: boolean;
 }
 
 /** Строка состояния своего раздела: по фазе и тексту, полученному к этому моменту. */
@@ -110,7 +115,7 @@ function Answer(props: AnswerProps) {
   const hasText = message.content.length > 0;
   const formingElsewhere = message.status === 'streaming' && !generation;
   // Проверка на тестовых данных и цикл исправления идут после ответа: он дописан, но диалог занят до их конца.
-  const checking = generation?.phase === 'checking' || generation?.phase === 'fixing';
+  const checking = generation?.phase === 'checking' || generation?.phase === 'fixing' || Boolean(props.rechecking);
   const ownLabel = generation && props.phaseLabel ? props.phaseLabel(generation, message) : null;
   const [activeSource, setActiveSource] = useState<number | null>(null);
   const [brokenFigures, setBrokenFigures] = useState<ReadonlySet<string>>(new Set());
@@ -167,6 +172,8 @@ function Answer(props: AnswerProps) {
           links={links}
           sqlCheck={message.sql_check}
           sqlRun={message.sql_run}
+          onRecheck={props.onRecheck}
+          recheckWait={props.recheckWait}
         />
       )}
       {/* Строка «Готовлю правку…» — пока идёт текст ответа с блоком правки. */}
@@ -230,7 +237,10 @@ function Answer(props: AnswerProps) {
         <p className={styles.note}>{hasText ? t.lengthLimit : t.lengthLimitEmpty}</p>
       )}
       {message.status === 'error' && (
-        <Notice kind="error" action={isLast && onRegenerate ? { label: texts.common.retry, onClick: onRegenerate } : undefined}>
+        <Notice
+          kind="error"
+          action={isLast && onRegenerate && !props.rechecking ? { label: texts.common.retry, onClick: onRegenerate } : undefined}
+        >
           {message.error_code === 'message_too_long' && props.tooLongText
             ? props.tooLongText
             : answerErrorText(message.error_code, hasText, message.error_message)}
@@ -250,7 +260,16 @@ function Answer(props: AnswerProps) {
           )}
           {isLast && onRegenerate && checking && (
             // Недоступное действие остаётся в обходе по Tab и объясняет причину, а не молчит.
-            <TitleHint text={generation?.phase === 'fixing' ? texts.workshop.assistant.busy : texts.sql.testRun.waitRun} always>
+            <TitleHint
+              text={
+                props.rechecking
+                  ? texts.db.run.recheckBusy
+                  : generation?.phase === 'fixing'
+                    ? texts.workshop.assistant.busy
+                    : texts.sql.testRun.waitRun
+              }
+              always
+            >
               <Link
                 component="button"
                 className={styles.unavailable}
@@ -369,6 +388,8 @@ interface MessageListProps {
   questionExtra?: (message: ChatMessage) => React.ReactNode;
   answerExtra?: (message: ChatMessage, isLast: boolean) => React.ReactNode;
   tooLongText?: string;
+  /** «Проверить снова» у сохранённых блоков проверки на образце (SQL-помощник, 1.0). */
+  onRecheck?: (messageId: string, index: number) => void;
 }
 
 /** Лента-протокол (концепция §4.2): слева пометка «Вы» или «Ответ», вопрос — на подложке, ответ — текстом. */
@@ -377,6 +398,9 @@ export function MessageList(props: MessageListProps) {
   const memory = props.memory ?? NO_MEMORY;
   const { reveal } = memory;
   const narrow = props.narrow ?? false;
+  // «Проверить снова» ждёт конца ответа или другой проверки этого диалога (концепция §5.7).
+  const recheckWait =
+    view.generation || view.recheck || view.messages.at(-1)?.status === 'streaming' ? texts.db.run.recheckWait : null;
   const scroll = useRef<ScrollContainer>(null);
   const list = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -514,6 +538,9 @@ export function MessageList(props: MessageListProps) {
                   phaseLabel={props.phaseLabel}
                   tooLongText={props.tooLongText}
                   extra={props.answerExtra?.(message, index === view.messages.length - 1)}
+                  onRecheck={props.onRecheck && ((block) => props.onRecheck?.(message.id, block))}
+                  recheckWait={recheckWait}
+                  rechecking={view.recheck !== null}
                 />
               )}
             </div>

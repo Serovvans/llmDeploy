@@ -1,0 +1,26 @@
+# Подключения к базам заказчика (docs/portal-api.md §7.6, §13.6). Пароли подключений —
+# в базе портала, зашифрованы PORTAL_SECRET_KEY; здесь только параметры.
+
+db:
+  # Включается после заявки DevOps, учётной записи по памятке и чистой проверки прав
+  # (ПД §8.6); при false маршруты §7.6 и слой из образца — 403.
+  enabled: false
+  application_name: scancontrol-portal
+  # Корневой сертификат заказчика для tls_mode: verify; файла нет — режим недоступен.
+  tls_root_cert_file: /etc/portal/customer-root-ca.pem
+  connect_timeout_seconds: 5
+  statement_timeout_seconds: 10
+  lock_timeout_seconds: 2
+  idle_in_transaction_timeout_seconds: 10
+  max_connections_per_server: 2
+  # Меньше sql.sandbox.total_timeout_seconds (проверка при старте).
+  wait_seconds: 10
+  snapshot_refresh_minutes: 30
+  sample_rows_check: 50
+  sample_rows_preview: 50
+  value_max_bytes: 65536
+  sample_max_bytes: 8388608
+  snapshot_max_tables: 2000
+  snapshot_max_columns: 40000
+  comment_max_chars: 500
+  max_selected_tables: 200

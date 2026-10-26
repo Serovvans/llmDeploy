@@ -27,7 +27,9 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from portal.core.settings import SqlSandboxSettings
+from portal.databases.customer import sandbox_type
 from portal.tools.ports import (
+    SampleTable,
     SandboxQueryError,
     SandboxRun,
     SandboxSetupError,
@@ -110,11 +112,21 @@ class _UnreadableError(Exception):
     """Драйвер не смог прочитать значение результата: чтение прекращено."""
 
 
+class _ParseFailedError(Exception):
+    """Сервер отверг проверяемый запрос на шаге `Parse`/`Describe`, до исполнения."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+
 @dataclass(frozen=True)
 class _Rejected:
-    """СУБД отвергла недоверенный оператор; `message` уже обрезано."""
+    """СУБД отвергла недоверенный оператор; `message` уже обрезано (только поле `M`)."""
 
     message: str
+    sqlstate: str | None = None
+    at_parse: bool = False
 
 
 @dataclass(frozen=True)
@@ -313,13 +325,15 @@ class _Slot:
         self._number = number
         self._settings = settings
 
-    async def run(self, setup: Sequence[str], query: str) -> SandboxRun:
+    async def run(
+        self, setup: Sequence[str], query: str, samples: Sequence[SampleTable] = ()
+    ) -> SandboxRun:
         """Подготовить данные, выполнить запрос, прочитать результат и всё откатить."""
         sandbox = self._sandbox
         connection = await sandbox.connect(sandbox.role(self._number))
         forced = True
         try:
-            outcome = await self._attempt(connection, setup, query)
+            outcome = await self._attempt(connection, setup, query, samples)
             forced = not await sandbox.closed(connection, rollback=True)
         except _TransactionEndedError:
             sandbox.retire(self._number)
@@ -337,7 +351,11 @@ class _Slot:
         return outcome
 
     async def _attempt(
-        self, connection: Any, setup: Sequence[str], query: str
+        self,
+        connection: Any,
+        setup: Sequence[str],
+        query: str,
+        samples: Sequence[SampleTable] = (),
     ) -> SandboxRun | SandboxSetupError | SandboxQueryError:
         """Транзакция проверки; отказ СУБД возвращается, а не поднимается — сеанс цел."""
         schema = f"check_{uuid4().hex}"
@@ -355,13 +373,18 @@ class _Slot:
             await self._guard(connection, schema)
             try:
                 value = await action()
-            except asyncpg.PostgresError as error:
+            except (asyncpg.PostgresError, _ParseFailedError) as raised:
+                error = raised.error if isinstance(raised, _ParseFailedError) else raised
                 if connection.is_closed():
-                    raise
+                    raise error from None
                 if not connection.is_in_transaction():
                     raise _TransactionEndedError from None
-                # Сообщение обрезается сразу при получении.
-                return _Rejected((error.message or "")[: self._settings.error_max_chars])
+                # Сообщение обрезается сразу при получении; только основное (поле `M`).
+                return _Rejected(
+                    (getattr(error, "message", None) or "")[: self._settings.error_max_chars],
+                    getattr(error, "sqlstate", None),
+                    isinstance(raised, _ParseFailedError),
+                )
             # Одного состояния мало: `COMMIT AND CHAIN` оставляет соединение в транзакции,
             # но уже в другой.
             same = connection.is_in_transaction() and await connection.fetchval(_XACT_ID) == xact_id
@@ -369,12 +392,26 @@ class _Slot:
                 raise _TransactionEndedError
             return value
 
+        for sample in samples:
+            # Собственные операторы портала: имена — в кавычках, типы — после сверки,
+            # значения — параметрами (§7.4, «Проверка на образце», шаг 4).
+            await self._guard(connection, schema)
+            try:
+                await self._create_sample(connection, schema, sample)
+            except asyncpg.PostgresError:
+                if connection.is_closed():
+                    raise
+                return SandboxSetupError()
+            except _UNSENDABLE:
+                if connection.is_closed():
+                    raise
+                return SandboxSetupError()
         for statement in setup:
             if await untrusted(partial(self._prepare, connection, statement)) is not True:
                 return SandboxSetupError()
         try:
             await self._guard(connection, schema)
-            fixture = await self._fixture(connection, schema)
+            fixture = await self._fixture(connection, schema, {item.name for item in samples})
         except _TooLargeError:
             raise SandboxSetupError from None
         except asyncpg.PostgresError:
@@ -388,7 +425,7 @@ class _Slot:
         except _UnreadableError:
             raise SandboxQueryError(_RESULT_UNREADABLE, fixture) from None
         if isinstance(rows, _Rejected):
-            return SandboxQueryError(rows.message, fixture)
+            return SandboxQueryError(rows.message, fixture, rows.sqlstate, rows.at_parse)
         await self._guard(connection, schema)
         result = await self._result(connection, rows) if rows.attributes else None
         return SandboxRun(fixture, result, rows.affected_rows)
@@ -401,6 +438,32 @@ class _Slot:
             f"{_ident(schema)}, {_ident(_POSTGIS_SCHEMA)}",
             f"{settings.statement_timeout_seconds}s",
             f"{settings.lock_timeout_seconds}s",
+        )
+
+    @staticmethod
+    async def _create_sample(connection: Any, schema: str, sample: SampleTable) -> None:
+        """Создать и заполнить таблицу образца; строки с `NULL` в ключе пропускаются."""
+        types = [sandbox_type(declared) for _, declared in sample.columns]
+        names = [_ident(name) for name, _ in sample.columns]
+        definition = [f"{name} {kind}" for name, kind in zip(names, types, strict=True)]
+        if sample.primary_key:
+            definition.append(f"PRIMARY KEY ({', '.join(_ident(k) for k in sample.primary_key)})")
+        table = f"{_ident(schema)}.{_ident(sample.name)}"
+        await connection.execute(f"CREATE TABLE {table} ({', '.join(definition)})")
+        positions = [
+            index for index, (name, _) in enumerate(sample.columns) if name in sample.primary_key
+        ]
+        rows = [
+            list(row) for row in sample.rows if all(row[index] is not None for index in positions)
+        ]
+        if not rows:
+            return
+        values = ", ".join(
+            f"(${position}::pg_catalog.text)::{kind}"
+            for position, kind in enumerate(types, start=1)
+        )
+        await connection.executemany(
+            f"INSERT INTO {table} ({', '.join(names)}) VALUES ({values})", rows
         )
 
     @staticmethod
@@ -425,7 +488,10 @@ class _Slot:
         """
         settings = self._settings
         try:
-            statement = await connection.prepare(text)
+            try:
+                statement = await connection.prepare(text)
+            except asyncpg.PostgresError as error:
+                raise _ParseFailedError(error) from None
             if statement.get_parameters():
                 return _Rejected(_HAS_PARAMETERS)
             attributes = statement.get_attributes()
@@ -447,9 +513,17 @@ class _Slot:
             raise _UnreadableError from error
         return _Rows(attributes, records, False, len(records))
 
-    async def _fixture(self, connection: Any, schema: str) -> list[SandboxTable]:
-        """Тестовые данные, как они легли в базу; таблицы и столбцы — из каталога."""
+    async def _fixture(
+        self, connection: Any, schema: str, samples: set[str] | frozenset[str] = frozenset()
+    ) -> list[SandboxTable]:
+        """Тестовые данные, как они легли в базу; таблицы и столбцы — из каталога.
+
+        Таблицы образца (`samples`) считаются отдельно: предел байт у них не роняет блок —
+        чтение этой и следующих таблиц образца останавливается, они получают `truncated`.
+        """
         settings = self._settings
+        sample_size = 0
+        samples_stopped = False
         columns: dict[str, list[tuple[str, str, str]]] = {}
         for row in await connection.fetch(_TABLE_COLUMNS, schema):
             columns.setdefault(row["relname"], []).append(
@@ -471,19 +545,29 @@ class _Slot:
             )
             source = f"{_ident(schema)}.{_ident(table)} LIMIT {settings.fixture_max_rows + 1}"
             rows: list[list[str | None]] = []
-            async for record in connection.cursor(
-                f"SELECT {cells} FROM (SELECT {values} FROM {source}) AS fixture", prefetch=1
-            ):
-                size += sum(_size(value) for value in record.values())
-                if size > settings.fixture_max_bytes:
-                    raise _TooLargeError
-                rows.append(list(record.values()))
+            sample = table in samples
+            cut = sample and samples_stopped
+            if not cut:
+                async for record in connection.cursor(
+                    f"SELECT {cells} FROM (SELECT {values} FROM {source}) AS fixture", prefetch=1
+                ):
+                    taken = sum(_size(value) for value in record.values())
+                    if sample:
+                        sample_size += taken
+                        if sample_size > settings.fixture_max_bytes:
+                            samples_stopped = cut = True
+                            break
+                    else:
+                        size += taken
+                        if size > settings.fixture_max_bytes:
+                            raise _TooLargeError
+                    rows.append(list(record.values()))
             tables.append(
                 SandboxTable(
                     table,
                     [name for name, _, _ in described],
                     rows[: settings.fixture_max_rows],
-                    len(rows) > settings.fixture_max_rows,
+                    cut or len(rows) > settings.fixture_max_rows,
                 )
             )
         return tables

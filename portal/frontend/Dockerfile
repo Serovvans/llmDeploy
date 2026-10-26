@@ -39,8 +39,10 @@ COPY <<'EOF' /etc/caddy/Caddyfile
 	# сайта хеша в имени нет, после обновления портала браузер должен получить новые.
 	header Cache-Control no-cache
 
+	# Страница предпросмотра — файлом, иначе она получила бы 404 с телом приложения;
+	# её заголовки безопасности ставит Caddy точки входа (docs/portal-api.md §7.5.17).
 	@static {
-		path /theme-init.js /fonts/* /favicon.svg /favicon.ico
+		path /theme-init.js /fonts/* /favicon.svg /favicon.ico /code-preview/frame.html
 		file
 	}
 	handle @static {
@@ -50,7 +52,7 @@ COPY <<'EOF' /etc/caddy/Caddyfile
 	# Адреса экранов — те же, что в маршрутах приложения (src/App.tsx). У разделов с
 	# историей допустим один сегмент — идентификатор диалога; глубже — уже 404. В разделе
 	# «Код» тот же сегмент — new или проект, а прежние диалоги лежат под /code/dialogs/.
-	@screen path_regexp ^/(login(/code)?|password|second-factor|knowledge|admin/users|profile|(chat|sql|cogis|documents)(/[^/]*)?|code(/dialogs)?(/[^/]*)?)?$
+	@screen path_regexp ^/(login(/code)?|password|second-factor|knowledge|admin/(users|databases)|profile|(chat|sql|cogis|documents)(/[^/]*)?|code(/dialogs)?(/[^/]*)?)?$
 	handle @screen {
 		rewrite * /index.html
 		file_server

@@ -7,6 +7,7 @@ import type {
   AnswerMode,
   Attachment,
   CodeTarget,
+  DbSelection,
   Dialog,
   DialogKind,
   DialogSummary,
@@ -144,6 +145,15 @@ interface ChatApi {
   addDialog: (dialog: Dialog) => void;
   /** Диалог удалён в другой вкладке: убрать его строку и ленту без запроса к серверу. */
   forgetDialog: (id: string) => void;
+  /**
+   * Создать диалог без вопроса — выбором подключения в SQL-помощнике (контракт §7.6.9): черновик переходит к нему,
+   * в истории он появится с первым вопросом.
+   */
+  createDialog: (key: string, onCreated: OnCreated) => Promise<string>;
+  /** Выбор подключения сохранён у диалога (ответ `PATCH`). */
+  showDb: (id: string, db: DbSelection | null) => void;
+  /** «Проверить снова» блока `index` ответа `messageId` (контракт §6.6): диалог занят до конца проверки. */
+  recheck: (id: string, messageId: string, index: number) => void;
 }
 
 const ChatContext = createContext<ChatApi | null>(null);
@@ -807,6 +817,66 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
 
   const stop = useCallback((id: string) => streams.current.get(id)?.abort(), []);
 
+  const createDialog = useCallback((key: string, onCreated: OnCreated) => ensureDialog(key, onCreated), [ensureDialog]);
+
+  const showDb = useCallback((id: string, db: DbSelection | null) => dispatch({ type: 'dbChanged', id, db }), []);
+
+  const recheck = useCallback(
+    (id: string, messageId: string, index: number) => {
+      const view = stateRef.current.dialogs[id];
+      const original = view?.messages.find((message) => message.id === messageId)?.sql_run?.blocks.find((block) => block.index === index);
+      if (!view || !original || view.generation || view.recheck || streams.current.has(id)) {
+        return;
+      }
+      const controller = new AbortController();
+      streams.current.set(id, controller);
+      dispatch({ type: 'recheckStarted', id, messageId, index });
+      dispatch({ type: 'recheckBlock', id, messageId, block: { ...original, status: 'pending' } });
+      // Остановка, обрыв и отказ сохранённый итог не меняют (контракт §6.6): блок возвращается к нему.
+      const restore = () => dispatch({ type: 'recheckBlock', id, messageId, block: original });
+      void (async () => {
+        let finished = false;
+        try {
+          for await (const event of api.recheckSqlRun(id, messageId, index, controller.signal)) {
+            if (event.type === 'sql_run') {
+              const block = event.blocks[0];
+              if (block) {
+                dispatch({ type: 'recheckBlock', id, messageId, block });
+              }
+            } else if (event.type === 'done') {
+              finished = true;
+            } else if (event.type === 'error') {
+              finished = true;
+              restore();
+              if (event.code === 'dialog_deleted') {
+                forgetDialog(id);
+                SingleToast.push(texts.dialogs.sql.removedElsewhere);
+              } else if (event.code !== 'session_ended') {
+                SingleToast.push(event.message, { use: 'error' });
+              }
+            }
+          }
+          if (!finished) {
+            restore();
+          }
+        } catch (error) {
+          restore();
+          if (isApiError(error, 'generation_in_progress')) {
+            SingleToast.push(texts.db.run.recheckWait);
+          } else if (!controller.signal.aborted && !isAbort(error) && !isApiError(error, 'unauthenticated')) {
+            SingleToast.push(errorText(error), { use: 'error' });
+          }
+        } finally {
+          if (streams.current.get(id) === controller) {
+            streams.current.delete(id);
+          }
+          dispatch({ type: 'recheckFinished', id });
+        }
+      })();
+    },
+    [forgetDialog],
+  );
+
   const rename = useCallback(async (id: string, title: string) => {
     dispatch({ type: 'dialogUpserted', dialog: await api.renameDialog(id, title), toTop: false });
   }, []);
@@ -848,6 +918,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       remove,
       addDialog,
       forgetDialog,
+      createDialog,
+      showDb,
+      recheck,
     }),
     [
       state,
@@ -876,6 +949,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       remove,
       addDialog,
       forgetDialog,
+      createDialog,
+      showDb,
+      recheck,
     ],
   );
 

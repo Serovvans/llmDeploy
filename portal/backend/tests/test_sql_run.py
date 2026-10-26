@@ -16,6 +16,7 @@ import pytest
 from portal.core.settings import Settings
 from portal.llm.ports import ContentDelta, Finished, ModelUnavailableError, TextPart
 from portal.tools.ports import (
+    SampleTable,
     SandboxQueryError,
     SandboxRun,
     SandboxSetupError,
@@ -59,6 +60,7 @@ class FakeSandbox:
     def __init__(self) -> None:
         self.script: list[Step] = []
         self.runs: list[tuple[list[str], str]] = []
+        self.samples: list[list[SampleTable]] = []
         self.users: list[UUID] = []
         self.unavailable = False
         self.started = asyncio.Event()
@@ -70,8 +72,11 @@ class FakeSandbox:
         self.users.append(user_id)
         yield self
 
-    async def run(self, setup: Sequence[str], query: str) -> SandboxRun:
+    async def run(
+        self, setup: Sequence[str], query: str, samples: Sequence[SampleTable] = ()
+    ) -> SandboxRun:
         self.runs.append((list(setup), query))
+        self.samples.append(list(samples))
         self.started.set()
         step = self.script.pop(0) if self.script else RUN
         if isinstance(step, asyncio.Event):
@@ -106,7 +111,9 @@ async def _check(
     reports: list[Mapping[str, Any]] = []
     try:
         runner = SqlTestRunner(sandbox, model, checker, config)
-        await runner.run(uuid4(), DDL, "postgres", content, reports.append)
+        await runner.run(
+            uuid4(), DDL, "postgres", content, lambda state: reports.append(state.event)
+        )
     finally:
         checker.close()
     return reports
@@ -149,9 +156,21 @@ async def test_only_single_select_or_dml_statement_is_executed(settings: Setting
     passed = reports[-1]["blocks"][12]
     assert (passed["index"], passed["affected_rows"], passed["error"]) == (12, 1, None)
     assert passed["fixture"] == [
-        {"table": "parcels", "columns": ["id", "area"], "rows": [["1", "5"]], "truncated": False}
+        {
+            "table": "parcels",
+            "columns": ["id", "area"],
+            "rows": [["1", "5"]],
+            "truncated": False,
+            "origin": "invented",
+            "invented_reason": None,
+        }
     ]
-    assert passed["result"] == {"columns": ["id"], "rows": [["1"]], "truncated": False}
+    assert passed["result"] == {
+        "columns": ["id"],
+        "rows": [["1"]],
+        "row_count": 1,
+        "truncated": False,
+    }
     # Каждое сообщение несёт все блоки; в последнем никто не ждёт и не идёт.
     assert all(len(report["blocks"]) == 14 for report in reports)
     assert [block["status"] for block in reports[0]["blocks"]].count("pending") == 1
@@ -221,9 +240,10 @@ async def test_fix_attempts_are_limited_and_unsafe_fix_is_not_executed(settings:
     block = reports[-1]["blocks"][0]
     assert (block["status"], block["error"], block["fixed_sql"]) == ("failed", "вторая", None)
     # Данные, на которых запрос не выполнился, — от попытки с последней ошибкой.
-    assert block["fixture"] == [
-        {"table": "parcels", "columns": ["id", "area"], "rows": [["1", "5"]], "truncated": False}
+    assert [(table["table"], table["rows"], table["origin"]) for table in block["fixture"]] == [
+        ("parcels", [["1", "5"]], "invented")
     ]
+    assert block["error_kind"] == "message"
     assert block["result"] is None
     assert [query for _, query in sandbox.runs] == ["SELECT 1", "SELECT 2"]
 
@@ -414,7 +434,9 @@ async def test_cancelled_check_reports_stopped_blocks(settings: Settings) -> Non
     checker = SqlSyntaxChecker(settings.sql.check_max_chars, settings.sql.check_timeout_seconds)
     runner = SqlTestRunner(sandbox, model, checker, settings.sql.sandbox)
     content = _sql("SELECT 1", "SELECT 2", "SELECT 3", "DROP TABLE t")
-    task = asyncio.create_task(runner.run(uuid4(), DDL, "postgres", content, reports.append))
+    task = asyncio.create_task(
+        runner.run(uuid4(), DDL, "postgres", content, lambda state: reports.append(state.event))
+    )
     try:
         async with asyncio.timeout(5):
             while len(sandbox.runs) < 2:

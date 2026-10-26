@@ -29,6 +29,12 @@ export type DraftEvent =
   | { type: 'done'; truncated: boolean }
   | { type: 'error'; code: string; message: string };
 
+/** Поток проверки запроса (контракт §6.6; 1.0): `sql_run`+ → `done` | `error`. */
+export type SqlRunStreamEvent =
+  | ({ type: 'sql_run' } & SqlRun)
+  | { type: 'done' }
+  | { type: 'error'; code: string; message: string };
+
 const KNOWN_EVENTS = new Set<string>([
   'start',
   'sql_question_check',

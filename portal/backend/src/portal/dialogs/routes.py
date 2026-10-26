@@ -17,7 +17,9 @@ from portal.core.errors import feature_disabled, field_error, not_found, validat
 from portal.core.sse import event_stream_response
 from portal.core.uploads import receive_recording
 from portal.core.validation import validation_failure
-from portal.dialogs.domain import DialogKind
+from portal.databases.domain import selection_of
+from portal.databases.schemas import DbSelectionOut
+from portal.dialogs.domain import Dialog, DialogKind
 from portal.dialogs.generation import UNSET, MemoryQuery, QuestionInput, _Unset
 from portal.dialogs.schemas import (
     AttachmentOut,
@@ -38,12 +40,16 @@ from portal.dialogs.schemas import (
     MessageListOut,
     MessageOut,
     RenameDialogRequest,
+    SqlDialogMemoryOut,
+    SqlDialogOut,
     SqlMemoryQuery,
     SqlMessageRequest,
+    SqlRecheckRequest,
     SqlRegenerateRequest,
     SummaryOut,
     SummaryRequest,
 )
+from portal.dialogs.service import UNSET as KEEP_SELECTION
 from portal.dialogs.service import CarriedInput
 from portal.files.ports import DOCX
 
@@ -127,18 +133,45 @@ async def create_dialog(
     return DialogOut.of(await container.dialogs.create(user.id, body.kind, carried))
 
 
+async def _selection_out(
+    dialog: Dialog, user_id: UUID, container: Container
+) -> DbSelectionOut | None:
+    """Выбор подключения диалога `sql`; при `db.enabled: false` — `null` (§7.6.9)."""
+    selection = selection_of(dialog.db_connection_id, dialog.db_connection_title, dialog.db_tables)
+    if not container.settings.db.enabled or selection is None:
+        return None
+    return DbSelectionOut.of(selection, await container.databases.available(user_id, selection))
+
+
 @router.get("/{id}", response_model=None)
 async def get_dialog(target: DialogId, user: Employee, container: ContainerDep) -> DialogMemoryOut:
     """Диалог владельца с пересказом и перенесённым; у разбора — и с его результатом."""
-    return DialogMemoryOut.of_details(await container.dialogs.details(user.id, target))
+    details = await container.dialogs.details(user.id, target)
+    out = DialogMemoryOut.of_details(details)
+    if details.dialog.kind != "sql":
+        return out
+    db = await _selection_out(details.dialog, user.id, container)
+    return SqlDialogMemoryOut(**out.model_dump(), db=db)
 
 
-@router.patch("/{id}")
+@router.patch("/{id}", response_model=None)
 async def rename_dialog(
-    body: RenameDialogRequest, target: DialogId, user: Employee, container: ContainerDep
+    body: dict[str, Any], target: DialogId, user: Employee, container: ContainerDep
 ) -> DialogOut:
-    """Переименовать диалог."""
-    return DialogOut.of(await container.dialogs.rename(user.id, target, body.title))
+    """Переименовать диалог; у `sql` — ещё выбор подключения (§7.6.9)."""
+    try:
+        request = RenameDialogRequest.model_validate(body)
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+    given = request.model_fields_set
+    if not given or ("title" in given and request.title is None):
+        raise validation_error([field_error("title", "required")])
+    db = request.selection() if "db" in given else KEEP_SELECTION
+    dialog = await container.dialogs.update(user, target, request.title, db)
+    if dialog.kind != "sql":
+        return DialogOut.of(dialog)
+    selection = await _selection_out(dialog, user.id, container)
+    return SqlDialogOut(**DialogOut.of(dialog).model_dump(), db=selection)
 
 
 @router.delete("/{id}", status_code=204)
@@ -189,15 +222,16 @@ async def _question(
         if kind == "sql":
             sql = SqlMessageRequest.model_validate(body)
             schema_id = None if sql.schema_id is None else str(sql.schema_id)
-            return QuestionInput(
-                sql.content,
-                {
-                    "action": sql.action,
-                    "dialect": sql.dialect,
-                    "schema_id": schema_id,
-                    "test_run": sql.test_run,
-                },
+            params = {
+                "action": sql.action,
+                "dialect": sql.dialect,
+                "schema_id": schema_id,
+                "test_run": sql.test_run,
+            }
+            params = await container.sql_tool.with_selection(
+                owner_id, dialog_id, params, question=True
             )
+            return QuestionInput(sql.content, params)
         if kind == "cogis":
             cogis = CogisMessageRequest.model_validate(body)
             return QuestionInput(cogis.content, {"action": cogis.action})
@@ -251,6 +285,22 @@ async def regenerate(
     return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
 
 
+@router.post("/{id}/messages/{message_id}/sql-run")
+async def recheck_sql(
+    body: SqlRecheckRequest,
+    target: DialogId,
+    message: MessageId,
+    user: Employee,
+    session: ReadySession,
+    container: ContainerDep,
+) -> StreamingResponse:
+    """«Проверить снова» один блок ответа `sql`; ответ — поток проверки (§6.6, §7.4)."""
+    channel = await container.generation.recheck(
+        user, session.session_id, target, message, body.index
+    )
+    return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
+
+
 async def _memory_query(
     container: Container, owner_id: UUID, dialog_id: UUID, kind: DialogKind, query: dict[str, str]
 ) -> MemoryQuery:
@@ -271,13 +321,14 @@ async def _memory_query(
         if kind == "sql":
             sql = SqlMemoryQuery.model_validate(query)
             schema_id = None if sql.schema_id is None else str(sql.schema_id)
+            params = {
+                "action": sql.action,
+                "dialect": sql.dialect,
+                "schema_id": schema_id,
+                "test_run": False,
+            }
             return MemoryQuery(
-                {
-                    "action": sql.action,
-                    "dialect": sql.dialect,
-                    "schema_id": schema_id,
-                    "test_run": False,
-                }
+                await container.sql_tool.with_selection(owner_id, dialog_id, params, question=False)
             )
         if kind == "cogis":
             return MemoryQuery({"action": CogisMemoryQuery.model_validate(query).action})

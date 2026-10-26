@@ -173,6 +173,28 @@ def code_system(
     return "\n\n".join(part.strip() for part in parts)
 
 
+def web_system(
+    action: CodeAction,
+    kind: str,
+    prompts: CodePrompts,
+    api_types: str,
+    *,
+    documented: bool | None,
+) -> str:
+    """Системное сообщение помощника веб-вида (§7.5.16): без правил GPTool и справочника SDK.
+
+    Описание `api` — текст портала (`api.d.ts`), а не данные пользователя.
+    """
+    web = prompts.web
+    parts = [getattr(web.system, action), getattr(web.kinds, kind)]
+    if action == "write":
+        parts.append(web.edit_format)
+    parts.append(data_block("описание_api", api_types))
+    if documented is False:
+        parts.append(prompts.no_documentation_notice)
+    return "\n\n".join(part.strip() for part in parts)
+
+
 def build_code_plan(
     action: CodeAction,
     content: str,
@@ -189,12 +211,18 @@ def build_code_plan(
     reference_always: Sequence[str],
     reference_max_tokens: int,
     build_messages_max: int,
+    api_types: str = "",
 ) -> CodePlan:
     """Системное сообщение и вопрос помощника (§7.5.9).
 
     `sent` — пути файлов, которые уходят модели (`None` — все); файл выделения в них уже
-    включён вызывающим. Найденное в документации добавляет к вопросу сценарий ответа.
+    включён вызывающим. Найденное в документации добавляет к вопросу сценарий ответа. У
+    веб-вида (`project.kind` не `gptool`) справочника и сборки нет, системное сообщение —
+    `web_system` с описанием `api` (§7.5.16).
     """
+    web = project.kind != "gptool"
+    if web:
+        reference, build = None, None
     wanted = None if sent is None else {path.lower() for path in sent}
     files = [file for file in project.files if wanted is None or file.path.lower() in wanted]
     blocks: list[str] = []
@@ -220,7 +248,12 @@ def build_code_plan(
         name = f"{target.path}, строки {target.start_line}–{target.end_line}"
         blocks.append(data_block("выделение", target.text, name))
     blocks.append(content)
-    system = code_system(action, prompts, reference=reference is not None, documented=documented)
+    if web:
+        system = web_system(action, project.kind, prompts, api_types, documented=documented)
+    else:
+        system = code_system(
+            action, prompts, reference=reference is not None, documented=documented
+        )
     without = [*blocks[:project_at], *blocks[project_at + 1 :]]
     return CodePlan(system, "\n\n".join(blocks), "\n\n".join(without))
 

@@ -52,6 +52,8 @@ from portal.dialogs.ports import (
     DialogTool,
     DialogUnitOfWork,
     DialogUnitOfWorkFactory,
+    RunReport,
+    SqlRechecker,
 )
 from portal.dialogs.service import MessageView, SummaryView
 from portal.dialogs.watch import (
@@ -235,6 +237,7 @@ class GenerationService:
         max_model_len: int,
         editors: Mapping[DialogKind, AnswerEditor] | None = None,
         history_views: Mapping[DialogKind, HistoryView] | None = None,
+        rechecker: SqlRechecker | None = None,
     ) -> None:
         """Получить зависимости явно.
 
@@ -268,6 +271,9 @@ class GenerationService:
         self._max_model_len = max_model_len
         self._tasks: set[asyncio.Task[None]] = set()
         self._active: set[UUID] = set()  # ответы, которые сейчас формируются
+        # Диалоги, в которых идёт «Проверить снова» (1.0, §7.4, А-143).
+        self._rechecking: set[UUID] = set()
+        self._rechecker = rechecker
 
     def is_forming(self, answer_id: UUID) -> bool:
         """Формируется ли этот ответ сейчас; процесс один, других источников нет."""
@@ -398,6 +404,11 @@ class GenerationService:
                         **question.params,
                         "schema_id": None if schema_id is None else str(schema_id),
                     }
+                    if self._rechecker is not None:
+                        # С телом — текущий выбор диалога вместо выбора вопроса (§7.6.9).
+                        question.params = await self._rechecker.with_selection(
+                            user.id, dialog_id, question.params, question=True
+                        )
                 await tool.accept(
                     user.id, dialog_id, question.content, question.params, regenerate=True
                 )
@@ -538,6 +549,8 @@ class GenerationService:
         """Под блокировкой строки диалога: свободен ли он; заодно — последнее сообщение."""
         if kind == "docparse" and await self._summary_blocks(uow, owner_id, dialog_id):
             return False, None
+        if dialog_id in self._rechecking:
+            return False, None  # идёт «Проверить снова»: диалог занят, как при ответе
         last = await uow.dialogs.last_message(owner_id, dialog_id)
         if last is not None and last.id in self._active:
             # Ответ ещё формируется либо уже сохранён, но идёт проверка SQL (§5.5).
@@ -810,9 +823,10 @@ class GenerationService:
         """
         latest: list[Mapping[str, Any]] = []
 
-        def report(state: Mapping[str, Any]) -> None:
-            latest[:] = [state]
-            job.channel.emit("sql_run", state)
+        def report(state: RunReport) -> None:
+            # В событии — строки и сообщение СУБД, в хранимой записи с подключением — нет.
+            latest[:] = [state.stored]
+            job.channel.emit("sql_run", state.event)
 
         watch = StreamWatch(
             job.channel,
@@ -837,6 +851,141 @@ class GenerationService:
                 lambda uow: uow.dialogs.set_sql_run(job.owner_id, job.answer_id, latest[0]),
             )
         return reason
+
+    # --- «Проверить снова» (1.0) ---
+
+    async def recheck(
+        self, user: CurrentUser, session_id: UUID, dialog_id: UUID, message_id: UUID, index: int
+    ) -> EventChannel:
+        """Проверить заново один блок ответа `sql` (§7.4, §6.6); поток — `sql_run`, `done`.
+
+        Ответ — этого диалога, с `sql_run`, где есть блок `index` (иначе `404`). Диалог на
+        время проверки занят (А-143): отметка ставится под блокировкой его строки.
+        """
+        tool = self._tools.get("sql")
+        if tool is None or self._rechecker is None:
+            raise not_found()
+        async with self._uow_factory() as uow:
+            dialog = await uow.dialogs.get_dialog(user.id, dialog_id)
+            answer = await uow.dialogs.get_message(user.id, dialog_id, message_id)
+            if dialog is None or dialog.kind != "sql" or answer is None:
+                raise not_found()
+            blocks = (answer.sql_run or {}).get("blocks") or []
+            if answer.role != "assistant" or all(item.get("index") != index for item in blocks):
+                raise not_found()
+            earlier = await uow.dialogs.history(user.id, dialog_id, answer.position)
+        if not earlier or earlier[-1].role != "user":
+            raise not_found()
+        plan = await self._rechecker.recheck_plan(user.id, earlier[-1].params)
+
+        async def attempt() -> bool | None:
+            marked = False
+            try:
+                async with self._uow_factory() as uow:
+                    if await uow.dialogs.get_dialog(user.id, dialog_id, lock=True) is None:
+                        raise not_found()
+                    idle, _ = await self._is_idle(uow, user.id, dialog_id, "sql")
+                    if not idle:
+                        return None
+                    # До фиксации, под блокировкой: как отметка ответа (§5.5).
+                    self._rechecking.add(dialog_id)
+                    marked = True
+            except BaseException:
+                if marked:
+                    self._rechecking.discard(dialog_id)
+                raise
+            return True
+
+        await self._when_idle(attempt)
+        channel = EventChannel()
+        task = asyncio.create_task(
+            self._recheck(
+                tool,
+                plan,
+                user.id,
+                session_id,
+                dialog_id,
+                message_id,
+                answer.content,
+                index,
+                channel,
+            )
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return channel
+
+    async def _recheck(
+        self,
+        tool: DialogTool,
+        plan: AnswerPlan,
+        owner_id: UUID,
+        session_id: UUID,
+        dialog_id: UUID,
+        answer_id: UUID,
+        content: str,
+        index: int,
+        channel: EventChannel,
+    ) -> None:
+        """Ход перепроверки и сохранение итога блока; отметка снимается при любом исходе."""
+        latest: list[Mapping[str, Any]] = []
+
+        def report(state: RunReport) -> None:
+            latest[:] = [state.stored]
+            channel.emit("sql_run", state.event)
+
+        async def exists() -> bool:
+            async with self._uow_factory() as uow:
+                return await uow.dialogs.message_exists(owner_id, answer_id)
+
+        try:
+            watch = StreamWatch(
+                channel, self._sessions, session_id, exists, math.inf, self._recheck_seconds
+            )
+            try:
+                _, reason = await watch.result(
+                    tool.test_run(owner_id, plan, content, report, only=index)
+                )
+            except Exception as error:
+                self._log_failure("sql recheck failed", error)
+                channel.emit(
+                    "error", {"code": "internal_error", "message": ERROR_MESSAGES["internal_error"]}
+                )
+                return
+            finally:
+                watch.close()
+            blocks = latest[0]["blocks"] if latest else []
+            final = blocks[0] if blocks else None
+            if reason != "dialog_deleted" and final is not None and final["status"] != "stopped":
+                await self._persist(
+                    "sql recheck not saved",
+                    lambda uow: self._replace_block(uow, owner_id, dialog_id, answer_id, final),
+                )
+            if reason is None:
+                channel.emit("done", {})
+            elif reason != "stopped":
+                channel.emit("error", {"code": reason, "message": ERROR_MESSAGES[reason]})
+        finally:
+            self._rechecking.discard(dialog_id)
+            channel.finish()
+
+    @staticmethod
+    async def _replace_block(
+        uow: DialogUnitOfWork,
+        owner_id: UUID,
+        dialog_id: UUID,
+        answer_id: UUID,
+        block: Mapping[str, Any],
+    ) -> None:
+        """Заменить запись блока в сохранённом `sql_run` ответа (А-139)."""
+        answer = await uow.dialogs.get_message(owner_id, dialog_id, answer_id)
+        if answer is None or answer.sql_run is None:
+            return
+        blocks = [
+            dict(block) if item.get("index") == block["index"] else item
+            for item in answer.sql_run.get("blocks") or []
+        ]
+        await uow.dialogs.set_sql_run(owner_id, answer_id, {**answer.sql_run, "blocks": blocks})
 
     async def _edit(self, job: _Job, editor: AnswerEditor) -> Interruption | None:
         """Правка по сохранённому ответу и цикл исправления (§5.5, шаг 6; §7.5.10–7.5.11).

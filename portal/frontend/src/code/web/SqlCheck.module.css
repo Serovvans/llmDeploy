@@ -1,0 +1,87 @@
+/* «Проверить запрос» (концепция §5.13.23): окно и вкладка «Проверка запроса» панели внизу. */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.label {
+  font-weight: 600;
+}
+
+.mono,
+.mono textarea {
+  font-family: var(--p-font-mono);
+}
+
+.muted {
+  margin: 0;
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.error {
+  margin: 4px 0 0;
+  color: var(--p-error-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.params {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.params legend {
+  margin-bottom: 8px;
+  padding: 0;
+}
+
+.param {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+
+.paramName {
+  padding-top: 6px;
+  font-family: var(--p-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 16px;
+}
+
+.resultHead {
+  display: flex;
+  font-size: 14px;
+  line-height: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.resultTitle {
+  margin: 0;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}

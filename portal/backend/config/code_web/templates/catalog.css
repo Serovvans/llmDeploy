@@ -1,0 +1,9 @@
+/* Блоки Каталога карт через один — на светлом фоне. */
+.catalog-items-container:nth-child(2n+1) {
+  background-color: #fffbe6;
+}
+
+/* Одна папка выделена цветом. Замените Folder_2 на ID своей папки из Каталога. */
+.catalog-items-container[data-block-id="Folder_2"] {
+  background-color: #d9f2c4;
+}

@@ -1,0 +1,72 @@
+/* Итог проверки подключения (концепция §5.14). Цвет — только у значков; рамки и фона нет (§7.3). */
+.check,
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.headline,
+.warningTitle,
+.lastFailed {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.headline {
+  font-weight: 500;
+}
+
+.warningTitle {
+  font-weight: 500;
+}
+
+.okIcon,
+.errorIcon,
+.warningIcon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 20px;
+}
+
+.okIcon {
+  color: var(--p-text);
+}
+
+.errorIcon {
+  color: var(--p-error-text);
+}
+
+.warningIcon {
+  color: var(--p-warning-icon);
+}
+
+.lastFailed,
+.muted {
+  color: var(--p-text-muted);
+}
+
+.findings {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finding {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.exact {
+  color: var(--p-text-muted);
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}

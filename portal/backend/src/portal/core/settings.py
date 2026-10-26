@@ -625,6 +625,30 @@ class CodeSystemPrompts(_Section):
     fix: str = Field(min_length=1)
 
 
+class CodeWebSystemPrompts(_Section):
+    """Системные сообщения помощника веб-видов по действиям (§7.5.16)."""
+
+    write: str = Field(min_length=1)
+    explain: str = Field(min_length=1)
+
+
+class CodeWebKindPrompts(_Section):
+    """Что такое веб-вид и где он работает в CoGIS (§7.5.16)."""
+
+    js_plugin: str = Field(min_length=1)
+    html_widget: str = Field(min_length=1)
+    catalog: str = Field(min_length=1)
+    card_hooks: str = Field(min_length=1)
+
+
+class CodeWebPrompts(_Section):
+    """Промпты помощника веб-видов (`code.prompts.web`, §7.5.16)."""
+
+    system: CodeWebSystemPrompts
+    kinds: CodeWebKindPrompts
+    edit_format: str = Field(min_length=1)
+
+
 class CodePrompts(_Section):
     """Промпты раздела «Код» (`code_prompts.yaml`, тексты — `codegen-evaluator`, §13.6)."""
 
@@ -635,6 +659,24 @@ class CodePrompts(_Section):
     no_sdk_notice: str = Field(min_length=1)
     no_documentation_notice: str = Field(min_length=1)
     wizard_request: str = Field(min_length=1)
+    web: CodeWebPrompts
+
+
+class CodeWebMemos(_Section):
+    """Тексты `Памятка.txt` выгрузки веб-видов (§7.5.16, ПИ §5.13.22)."""
+
+    js_plugin: str = Field(min_length=1)
+    html_widget: str = Field(min_length=1)
+    catalog: str = Field(min_length=1)
+    card_hooks: str = Field(min_length=1)
+
+
+class CodePreviewSettings(_Section):
+    """Предпросмотр веб-видов (§7.5.17)."""
+
+    enabled: bool
+    log_max_entries: int = Field(ge=1)
+    errors_max: int = Field(ge=1)
 
 
 class CodeSettings(_Section):
@@ -663,6 +705,9 @@ class CodeSettings(_Section):
     export_memo: str = Field(min_length=1)
     archive_memo: str = Field(min_length=1)
     prompts: CodePrompts
+    web_dir: Path
+    web_memos: CodeWebMemos
+    preview: CodePreviewSettings
 
     def package(self, package_id: str) -> CodePackage | None:
         """Пакет набора по `id` без учёта регистра."""
@@ -704,6 +749,37 @@ class CodeSettings(_Section):
         for name in depends:
             visit(name)
         return self
+
+
+class DbSettings(_Section):
+    """Подключения к базам заказчика (docs/portal-api.md §7.6, §13.6)."""
+
+    enabled: bool
+    application_name: str
+    tls_root_cert_file: Path
+    connect_timeout_seconds: float = Field(gt=0)
+    statement_timeout_seconds: int = Field(ge=1)
+    lock_timeout_seconds: int = Field(ge=1)
+    idle_in_transaction_timeout_seconds: int = Field(ge=1)
+    max_connections_per_server: int = Field(ge=1)
+    wait_seconds: float = Field(gt=0)
+    snapshot_refresh_minutes: int = Field(ge=0)
+    sample_rows_check: int = Field(ge=1)
+    sample_rows_preview: int = Field(ge=1)
+    value_max_bytes: int = Field(ge=1)
+    sample_max_bytes: int = Field(ge=1)
+    snapshot_max_tables: int = Field(ge=1)
+    snapshot_max_columns: int = Field(ge=1)
+    comment_max_chars: int = Field(ge=1)
+    max_selected_tables: int = Field(ge=1)
+
+    @field_validator("application_name")
+    @classmethod
+    def _check_application_name(cls, value: str) -> str:
+        """1…63 символа ASCII без управляющих (§13.6)."""
+        if not 1 <= len(value) <= 63 or any(not 0x20 <= ord(char) < 0x7F for char in value):
+            raise ValueError("db.application_name: 1…63 символа ASCII без управляющих")
+        return value
 
 
 class MediaFfmpegSettings(_Section):
@@ -773,6 +849,7 @@ class Settings(_Section):
     memory: MemorySettings
     media: MediaSettings
     code: CodeSettings
+    db: DbSettings
 
     common_passwords: frozenset[str] = Field(repr=False)
     db_password: SecretStr
@@ -855,6 +932,13 @@ class Settings(_Section):
                 "code.file_max_bytes / llm.chars_per_token не должно превышать "
                 "code.max_output_tokens / 2"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_db_wait(self) -> Self:
+        """Ожидание места у базы заказчика короче общего срока проверки SQL (§13.6)."""
+        if self.db.wait_seconds >= self.sql.sandbox.total_timeout_seconds:
+            raise ValueError("db.wait_seconds должно быть меньше sql.sandbox.total_timeout_seconds")
         return self
 
     def require_secret_key(self) -> bytes:

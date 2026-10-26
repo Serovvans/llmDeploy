@@ -43,6 +43,10 @@ def _project(row: _Row) -> Project:
         revision=row.revision,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        kind=row.kind,
+        db_connection_id=row.db_connection_id,
+        db_connection_title=row.db_connection_title,
+        db_tables=list(row.db_tables),
     )
 
 
@@ -167,13 +171,16 @@ class SqlCodeRepository:
         return found
 
     async def save_project(self, project: Project) -> None:
-        """Записать пакеты, схему, ревизию и время изменения проекта."""
+        """Записать пакеты, схему, выбор подключения, ревизию и время изменения проекта."""
         await self._connection.execute(
             sa.update(code_projects)
             .where(code_projects.c.id == project.id, code_projects.c.owner_id == project.owner_id)
             .values(
                 packages=project.packages,
                 schema_id=project.schema_id,
+                db_connection_id=project.db_connection_id,
+                db_connection_title=project.db_connection_title,
+                db_tables=project.db_tables,
                 revision=project.revision,
                 updated_at=project.updated_at,
             )
@@ -209,7 +216,7 @@ class SqlCodeRepository:
         )
 
     async def save_file(self, owner_id: UUID, file: ProjectFile) -> None:
-        """Записать путь, содержимое, размер, ревизию и время файла."""
+        """Записать путь, содержимое, размер, ревизию, время и настройки Каталога файла."""
         await self._connection.execute(
             sa.update(code_files)
             .where(code_files.c.id == file.id, code_files.c.project_id.in_(_owned(owner_id)))
@@ -219,6 +226,8 @@ class SqlCodeRepository:
                 size_bytes=file.size_bytes,
                 revision=file.revision,
                 updated_at=file.updated_at,
+                catalog_insertion=file.catalog_insertion,
+                catalog_clients=file.catalog_clients,
             )
         )
 

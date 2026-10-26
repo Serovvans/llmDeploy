@@ -103,6 +103,9 @@ services:
       - portal
       - sandbox
       - code-sandbox
+      # Тестовая база заказчика. На ВМ отдельной сети нет: к базам заказчика portal-api
+      # выходит через edge (docs/portal-api.md §13.5).
+      - customer-db
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
       interval: 10s
@@ -231,10 +234,34 @@ services:
       retries: 5
       start_period: 30s
 
+  # Тестовая «база заказчика» (docs/portal-api.md §13.5), только на стенде. portal-api от
+  # неё не зависит, как и от баз заказчика на ВМ.
+  customer-db:
+    build: ./customer-db
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_PASSWORD: ${CUSTOMER_DB_PASSWORD:?}
+      # Пароль ролей входа: init читает его через \getenv.
+      CUSTOMER_DB_PASSWORD: ${CUSTOMER_DB_PASSWORD:?}
+    volumes:
+      - customer-db-data:/var/lib/postgresql/data
+    networks:
+      - customer-db
+    healthcheck:
+      # По TCP: во время первой инициализации временный сервер слушает только сокет.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "cadastre"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
   # Песочница сборки — тот же образ и те же ограничения, что на ВМ (проверки изоляции,
   # CLAUDE.md, пайплайн «Код», правило 2), плюс заглушка SDK в /stub-sdk. Настоящие DLL
   # в deploy/cogis-sdk/ (вне git) важнее заглушки; выбор — один и тот же в обоих сервисах.
-  # Индекс строится заново при каждом запуске стенда — как make cogis-sdk на ВМ.
+  # Индекс строится заново при каждом запуске стенда — как make cogis-sdk на ВМ. Туда же
+  # в client/ кладутся библиотеки клиента CoGIS: из deploy/cogis-sdk/client/, если папка
+  # есть, иначе открытые выпуски стенда (docs/portal-api.md §7.5.16).
   code-sandbox-index:
     image: portal-dev-code-sandbox:stand
     build:
@@ -242,7 +269,7 @@ services:
       target: stand
     logging: *logging
     entrypoint: ["sh", "-c"]
-    command: ["if [ -f /sdk/eLiteGIS.Server.dll ]; then d=/sdk; else d=/stub-sdk; fi; exec /app/code-sandbox index --sdk \"$$d\" --out /index"]
+    command: ["if [ -f /sdk/eLiteGIS.Server.dll ]; then d=/sdk; else d=/stub-sdk; fi; /app/code-sandbox index --sdk \"$$d\" --out /index || exit; if [ -d /sdk/client ]; then c=/sdk/client; else c=/cogis-client; fi; rm -rf /index/client && mkdir /index/client && for f in jquery.js knockout.js leaflet.js leaflet.css; do if [ -f \"$$c/$$f\" ]; then cp \"$$c/$$f\" /index/client/ || exit; fi; done"]
     network_mode: none
     read_only: true
     tmpfs:
@@ -253,6 +280,7 @@ services:
       - no-new-privileges:true
     volumes:
       - ../../deploy/cogis-sdk:/sdk:ro
+      - ./cogis-client:/cogis-client:ro
       - cogis-sdk-index:/index
 
   code-sandbox:
@@ -307,6 +335,8 @@ networks:
     internal: true
   code-sandbox:
     internal: true
+  customer-db:
+    internal: true
 
 volumes:
   caddy-data:
@@ -316,3 +346,4 @@ volumes:
   asr-models:
   cogis-sdk-index:
   code-packages:
+  customer-db-data:

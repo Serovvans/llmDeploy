@@ -4,6 +4,8 @@
 проект владельца: чужой — `404`, как несуществующий.
 """
 
+import asyncio
+import hashlib
 import re
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -12,6 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import TypeAdapter, ValidationError
 from starlette.datastructures import UploadFile
+from starlette.responses import StreamingResponse
 
 from portal.code.schemas import (
     AddFileRequest,
@@ -27,11 +30,15 @@ from portal.code.schemas import (
     DecisionOut,
     DecisionRequest,
     PatchProjectRequest,
+    SqlCheckRequest,
+    TemplateProjectRequest,
     UpdateFileRequest,
     WizardProjectRequest,
 )
-from portal.code.service import UNSET, Created
-from portal.core.access import ContainerDep, Employee
+from portal.code.service import UNSET, Created, ProjectDetails
+from portal.code.web import LIBRARY_FILES
+from portal.core.access import ContainerDep, Employee, ReadySession
+from portal.core.container import Container
 from portal.core.errors import (
     feature_disabled,
     field_error,
@@ -39,7 +46,11 @@ from portal.core.errors import (
     not_found,
     validation_error,
 )
+from portal.core.ports import CurrentUser
+from portal.core.sse import event_stream_response
 from portal.core.validation import validation_failure
+from portal.databases.domain import selection_of
+from portal.databases.schemas import DbSelectionOut
 from portal.dialogs.service import CarriedInput
 
 router = APIRouter(prefix="/api/code")
@@ -108,11 +119,25 @@ def _zip(content: bytes, fallback: str, file_name: str) -> Response:
         media_type=_ZIP,
         headers={
             "Content-Disposition": (
-                f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(file_name)}"
+                f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(file_name, safe='')}"
             ),
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+async def _project_out(
+    details: ProjectDetails, user: CurrentUser, container: Container
+) -> CodeProjectOut:
+    """`CodeProject` с выбором подключения; при `db.enabled: false` — `db: null` (§7.6.9)."""
+    project = details.project
+    selection = selection_of(
+        project.db_connection_id, project.db_connection_title, project.db_tables
+    )
+    db = None
+    if container.settings.db.enabled and selection is not None:
+        db = DbSelectionOut.of(selection, await container.databases.available(user.id, selection))
+    return CodeProjectOut.of(details, db)
 
 
 def _created(created: Created) -> CreatedProjectOut:
@@ -154,6 +179,8 @@ async def create_project(
         request = _CREATE.validate_python(body)
     except ValidationError as error:
         raise validation_failure(error.errors()) from None
+    if isinstance(request, TemplateProjectRequest):
+        return _created(await container.code.create_template(user.id, request.kind, request.name))
     if not isinstance(request, WizardProjectRequest):
         return _created(await container.code.create_example(user.id, request.name))
     carried = None
@@ -199,20 +226,27 @@ async def import_project(
 @router.get("/projects/{id}")
 async def get_project(target: ProjectId, user: Employee, container: ContainerDep) -> CodeProjectOut:
     """Проект с файлами, последней сборкой и диалогом помощника."""
-    return CodeProjectOut.of(await container.code.get(user.id, target))
+    return await _project_out(await container.code.get(user.id, target), user, container)
 
 
 @router.patch("/projects/{id}")
 async def patch_project(
     body: dict[str, Any], target: ProjectId, user: Employee, container: ContainerDep
 ) -> CodeProjectOut:
-    """Пакеты и схема проекта; хотя бы одно поле."""
+    """Пакеты, схема, подключение и настройки Каталога проекта; хотя бы одно поле."""
     patch = _validated(PatchProjectRequest, body)
-    if not patch.model_fields_set:
+    given = patch.model_fields_set
+    if not given:
         raise validation_error([field_error("packages", "required")])
-    schema_id = patch.schema_id if "schema_id" in patch.model_fields_set else UNSET
-    details = await container.code.patch(user.id, target, patch.packages, schema_id)
-    return CodeProjectOut.of(details)
+    details = await container.code.patch(
+        user,
+        target,
+        patch.packages,
+        patch.schema_id if "schema_id" in given else UNSET,
+        patch.selection() if "db" in given else UNSET,
+        None if patch.catalog_files is None else [item.to_input() for item in patch.catalog_files],
+    )
+    return await _project_out(details, user, container)
 
 
 @router.delete("/projects/{id}", status_code=204)
@@ -262,7 +296,7 @@ async def delete_file(
 
 @router.get("/projects/{id}/export")
 async def export_project(target: ProjectId, user: Employee, container: ContainerDep) -> Response:
-    """Выгрузка проекта для Visual Studio (§7.5.5)."""
+    """Выгрузка проекта для Visual Studio (§7.5.5) или веб-вида с памяткой (§7.5.16)."""
     name, content = await container.code.export(user.id, target)
     return _zip(content, "project.zip", f"{name}.zip")
 
@@ -281,7 +315,8 @@ async def restore_snapshot(
     target: ProjectId, snapshot: SnapshotId, user: Employee, container: ContainerDep
 ) -> CodeProjectOut:
     """Вернуть проект к версии (§7.5.6)."""
-    return CodeProjectOut.of(await container.code.restore(user.id, target, snapshot))
+    details = await container.code.restore(user.id, target, snapshot)
+    return await _project_out(details, user, container)
 
 
 @router.post("/projects/{id}/build")
@@ -300,6 +335,41 @@ async def build_archive(
     """Архив для CoGIS последней успешной сборки (§7.5.7)."""
     name, content = await container.code.archive(user.id, target)
     return _zip(content, "project-cogis.zip", f"{name}-cogis.zip")
+
+
+@router.post("/projects/{id}/sql-check")
+async def sql_check(
+    body: dict[str, Any],
+    target: ProjectId,
+    user: Employee,
+    session: ReadySession,
+    container: ContainerDep,
+) -> StreamingResponse:
+    """«Проверить запрос»; ответ — поток проверки (§6.6, §7.5.18).
+
+    Тело разбирается после проверок песочницы, проекта и схемы: их порядок задан (§7.5.18).
+    """
+    source = await container.sql_check.source(user.id, target)
+    try:
+        request = SqlCheckRequest.model_validate(body)
+    except ValidationError as error:
+        raise validation_failure(error.errors()) from None
+    channel = container.sql_check.start(
+        user.id, session.session_id, target, source, request.sql, request.bound()
+    )
+    return event_stream_response(channel, container.settings.dialogs.keepalive_seconds)
+
+
+@router.get("/projects/{id}/preview-layer", response_model=None)
+async def preview_layer(
+    target: ProjectId,
+    user: Employee,
+    container: ContainerDep,
+    schema: Annotated[str, Query()],
+    table: Annotated[str, Query()],
+) -> dict[str, Any]:
+    """Слой предпросмотра из образца отмеченной таблицы (§7.5.18)."""
+    return await container.code.preview_layer(user.id, target, schema, table)
 
 
 @router.get("/projects/{id}/edits/{message_id}")
@@ -323,7 +393,7 @@ async def decide_edit(
     request = _validated(DecisionRequest, body)
     accept = [(item.path, item.revision) for item in request.accept]
     edit, details = await container.code.decide(user.id, target, message, accept)
-    return DecisionOut(edit=edit, project=CodeProjectOut.of(details))
+    return DecisionOut(edit=edit, project=await _project_out(details, user, container))
 
 
 def _etag_matches(header: str | None, etag: str) -> bool:
@@ -342,3 +412,31 @@ async def get_sdk(request: Request, _: Enabled, container: ContainerDep) -> Resp
     if _etag_matches(request.headers.get("if-none-match"), sdk.etag):
         return Response(status_code=304, headers=headers)
     return Response(sdk.body, media_type="application/json", headers=headers)
+
+
+_CACHED = {"Cache-Control": "private, no-cache"}
+
+
+@router.get("/web")
+async def get_web(request: Request, _: Enabled, container: ContainerDep) -> Response:
+    """Описание `api` и версии библиотек клиента CoGIS для веб-видов (§7.5.16)."""
+    web = await asyncio.to_thread(container.code_web.snapshot)
+    headers = {"ETag": web.etag, **_CACHED}
+    if _etag_matches(request.headers.get("if-none-match"), web.etag):
+        return Response(status_code=304, headers=headers)
+    return Response(web.body, media_type="application/json", headers=headers)
+
+
+@router.get("/web/libraries/{file}")
+async def get_library(file: str, request: Request, _: Enabled, container: ContainerDep) -> Response:
+    """Файл библиотеки клиента CoGIS — текстом, а не скриптом (§7.5.16)."""
+    if file not in LIBRARY_FILES:
+        raise not_found()
+    content = await asyncio.to_thread(container.code_web.read, file)
+    if content is None:
+        raise not_found()
+    etag = '"' + hashlib.sha256(content).hexdigest()[:32] + '"'
+    headers = {"ETag": etag, "X-Content-Type-Options": "nosniff", **_CACHED}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    return Response(content, media_type="text/plain; charset=utf-8", headers=headers)

@@ -1,0 +1,115 @@
+import { describe, expect, it } from 'vitest';
+
+import { texts } from '../../texts';
+import { appendMessage, EMPTY_LOG, errorCount, type FrameMessage, logResult, MAX_TEXT, notInserted, parseFrameMessage } from './preview';
+import { sqlParameters, stripQuotes } from './sqlParams';
+import { extractHtml, fixQuestion, languageOf } from './webRules';
+
+const LIMITS = { log_max_entries: 2, errors_max: 2 };
+
+describe('сообщения фрейма предпросмотра — недоверенные данные', () => {
+  it('неизвестный тип и поля не своих типов отбрасываются', () => {
+    expect(parseFrameMessage('ready')).toBeNull();
+    expect(parseFrameMessage({ type: 'init' })).toBeNull();
+    expect(parseFrameMessage({ type: 'log', fn: 'getLayer', args: [1], known: true, count: null })).toBeNull();
+    expect(parseFrameMessage({ type: 'log', fn: 'getLayer', args: [], known: 'yes', count: null })).toBeNull();
+    expect(parseFrameMessage({ type: 'error', file: null, line: 0, column: null, message: 'x' })).toBeNull();
+    expect(parseFrameMessage({ type: 'blocked', url: 'https://example.com' })).toBeNull();
+  });
+
+  it('длинные строки обрезаются, аргументов — не больше двадцати', () => {
+    const long = 'x'.repeat(MAX_TEXT + 10);
+    const parsed = parseFrameMessage({ type: 'log', fn: long, args: Array.from({ length: 30 }, () => long), known: false, count: 3 });
+    expect(parsed).toMatchObject({ type: 'log', known: false, count: 3 });
+    if (parsed?.type !== 'log') {
+      throw new Error('ожидалась запись журнала');
+    }
+    expect(parsed.fn).toHaveLength(MAX_TEXT);
+    expect(parsed.args).toHaveLength(20);
+    expect(parsed.args.every((arg) => arg.length === MAX_TEXT)).toBe(true);
+  });
+
+  it('журнал и ошибки — в пределах; запрет картинки ошибкой кода не считается', () => {
+    const log: FrameMessage = { type: 'log', fn: 'showAlert', args: ['a'], known: true, count: null };
+    let state = appendMessage(EMPTY_LOG, log, LIMITS);
+    state = appendMessage(state, log, LIMITS);
+    state = appendMessage(state, log, LIMITS);
+    expect(state.entries).toHaveLength(2);
+    expect(state.overflow).toBe(true);
+
+    state = appendMessage(state, { type: 'blocked', url: 'https://tiles.example/1.png', directive: 'img-src' }, LIMITS);
+    state = appendMessage(state, { type: 'error', file: 'widget.html', line: 3, column: 5, message: 'boom' }, LIMITS);
+    state = appendMessage(state, { type: 'blocked', url: 'https://api.example', directive: 'connect-src' }, LIMITS);
+    expect(state.problems.map((item) => item.kind)).toEqual(['image', 'error']);
+    expect(errorCount(state)).toBe(1);
+  });
+
+  it('«что сделано» — по функции; слой из образца называет таблицу и число объектов', () => {
+    const r = texts.workshop.web.pane.results;
+    expect(logResult({ fn: 'nope', args: [], known: false, count: null }, { table: null, rows: 0 })).toBe(r.unknown);
+    expect(logResult({ fn: 'getLayer', args: [], known: true, count: 7 }, { table: 'cadastre.parcels', rows: 50 })).toBe(
+      r.layerSample('cadastre.parcels', 7),
+    );
+    expect(logResult({ fn: 'generateReport', args: [], known: true, count: null }, { table: null, rows: 0 })).toBe(r.notRun);
+  });
+
+  it('файлы Каталога, не вставленные для типа клиента', () => {
+    const files = [
+      { path: 'a.css', catalog: { insertion: 'head_end' as const, clients: ['desktop' as const] } },
+      { path: 'b.js', catalog: { insertion: 'body_end' as const, clients: ['desktop' as const, 'smartphone' as const] } },
+    ];
+    expect(notInserted(files, 'smartphone')).toEqual(['a.css']);
+  });
+});
+
+describe('параметры «Проверить запрос» — правило сервера', () => {
+  it.each<[string, string[]]>([
+    ['SELECT * FROM t WHERE id = @id AND s = @status OR id = @id', ['@id', '@status']],
+    ['WHERE (@x) AND y=@y', ['@x', '@y']],
+    ['SELECT @ x, abs(x), a@b, 1@2, <@c', []],
+    ["SELECT '@no', \"@quoted\" -- @comment\n/* @block */ FROM t WHERE a = $1 AND b = $2 AND c = $1", ['$1', '$2']],
+    ['SELECT $body$ @inside $1 $body$, $$ @x $$, x$1', []],
+    ["WHERE name = 'O''Brien' AND id = @id", ['@id']],
+  ])('%s', (sql, expected) => {
+    expect(sqlParameters(sql)).toEqual(expected);
+  });
+
+  it('кавычки вокруг выделения убираются, только парные', () => {
+    expect(stripQuotes(' "SELECT 1" ')).toBe('SELECT 1');
+    expect(stripQuotes('@"SELECT 1"')).toBe('SELECT 1');
+    expect(stripQuotes("'SELECT 1'")).toBe('SELECT 1');
+    expect(stripQuotes('`SELECT 1`')).toBe('SELECT 1');
+    expect(stripQuotes('"SELECT 1\'')).toBe('"SELECT 1\'');
+  });
+});
+
+describe('JavaScript внутри HTML', () => {
+  it('смещения кода совпадают с исходными; разметка и шаблоны Knockout — пробелы', () => {
+    const html = '<div>\n<script>let a = 1;</script>\n<script type="text/html">x</script><script>b()</script>';
+    const { script, scripts } = extractHtml(html);
+    expect(script).toHaveLength(html.length);
+    expect(scripts).toHaveLength(2);
+    const [first] = scripts;
+    expect(first && script.slice(first[0], first[1])).toBe('let a = 1;');
+    expect(script.indexOf('x')).toBe(-1);
+    expect(script.split('\n')).toHaveLength(html.split('\n').length);
+  });
+
+  it('значение data-bind — выражение, знаки которого указывают в исходный текст', () => {
+    const html = '<input data-bind="value: name, click: save">';
+    const { bindings } = extractHtml(html);
+    const index = bindings.text.indexOf('save');
+    expect(html.slice(bindings.map[index], (bindings.map[index] ?? 0) + 4)).toBe('save');
+  });
+
+  it('язык редактора — по расширению', () => {
+    expect(['a.cs', 'b.JS', 'c.html', 'd.css', 'e.txt'].map(languageOf)).toEqual(['csharp', 'javascript', 'html', 'css', 'plaintext']);
+  });
+
+  it('вопрос «Исправить с помощником» — не больше десяти строк и «и ещё N»', () => {
+    const items = Array.from({ length: 12 }, (_, i) => ({ path: 'widget.html', line: i + 1, message: `ошибка ${i}` }));
+    const text = fixQuestion('syntax', items).split('\n');
+    expect(text).toHaveLength(12);
+    expect(text.at(-1)).toBe(texts.workshop.web.route.fixMore(2));
+  });
+});

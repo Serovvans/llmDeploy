@@ -5,6 +5,7 @@ import { texts } from '../texts';
 import type { ResolvedTheme } from '../theme/preference';
 import styles from './CodeEditor.module.css';
 import type { Monaco } from './monaco/setup';
+import { languageOf, type SyntaxMessage } from './web/webRules';
 
 const t = texts.workshop.editor;
 type Setup = typeof import('./monaco/setup');
@@ -45,6 +46,10 @@ interface Props {
   onFocused: () => void;
   onExplain: (fragment: Fragment | null) => void;
   onChangeSelection: (fragment: Fragment) => void;
+  /** Ошибки синтаксиса JS, HTML и CSS (1.0, §5.13.19): подчёркивания по всем открытым файлам. */
+  syntax?: SyntaxMessage[] | null;
+  /** «Проверить запрос» в меню (1.0, §5.13.23): только при включённой проверке SQL. */
+  onCheckSql?: (text: string, fragment: Fragment) => void;
 }
 
 const URI_PREFIX = 'portal-file:/';
@@ -80,6 +85,19 @@ function markersFor(monaco: Monaco, build: CodeBuild | null, path: string, model
       message: t.rulePrefix + item.message,
     }));
   return [...diagnostics, ...findings];
+}
+
+function syntaxMarkers(monaco: Monaco, syntax: readonly SyntaxMessage[] | null | undefined, path: string) {
+  return (syntax ?? [])
+    .filter((item) => item.path === path)
+    .map((item) => ({
+      startLineNumber: item.line,
+      startColumn: item.column,
+      endLineNumber: item.endLine,
+      endColumn: item.endColumn,
+      severity: monaco.MarkerSeverity.Error,
+      message: item.message,
+    }));
 }
 
 /**
@@ -203,9 +221,10 @@ export function CodeEditor(props: Props) {
     }
     let model = models.current.get(fileId);
     if (!model) {
-      model = monaco.editor.createModel(latest.current.text(fileId), 'csharp', monaco.Uri.parse(URI_PREFIX + fileId));
+      model = monaco.editor.createModel(latest.current.text(fileId), languageOf(pathOf(fileId)), monaco.Uri.parse(URI_PREFIX + fileId));
       models.current.set(fileId, model);
       monaco.editor.setModelMarkers(model, 'build', markersFor(monaco, latest.current.build, pathOf(fileId), model));
+      monaco.editor.setModelMarkers(model, 'syntax', syntaxMarkers(monaco, latest.current.syntax, pathOf(fileId)));
     }
     if (previous !== model) {
       current.setModel(model);
@@ -231,10 +250,15 @@ export function CodeEditor(props: Props) {
       if (model.getValue() !== text) {
         model.pushEditOperations([], [{ range: model.getFullModelRange(), text }], () => null);
       }
+      // Переименование с другим расширением (у «Каталога карт») меняет язык файла.
+      const language = languageOf(pathOf(id));
+      if (model.getLanguageId() !== language) {
+        monaco.editor.setModelLanguage(model, language);
+      }
     }
     editor.current?.updateOptions({ ariaLabel: t.label(pathOf(latest.current.fileId)) });
      
-  }, [files]);
+  }, [files, monaco]);
 
   // Новая сборка — подчёркивания заменяются во всех открытых файлах.
   useEffect(() => {
@@ -248,6 +272,41 @@ export function CodeEditor(props: Props) {
     }
      
   }, [build, monaco]);
+
+  // Новый итог проверки синтаксиса — подчёркивания заменяются во всех открытых файлах.
+  const { syntax } = props;
+  useEffect(() => {
+    for (const [id, model] of models.current) {
+      monaco.editor.setModelMarkers(model, 'syntax', syntaxMarkers(monaco, syntax, pathOf(id)));
+    }
+  }, [syntax, monaco]);
+
+  // «Проверить запрос» — третьим пунктом меню, только при выделении и включённой проверке SQL.
+  const checkSql = Boolean(props.onCheckSql);
+  useEffect(() => {
+    const current = editor.current;
+    if (!current || !checkSql) {
+      return;
+    }
+    const action = current.addAction({
+      id: 'portal.checkSql',
+      label: texts.workshop.web.sqlCheck.menu,
+      contextMenuGroupId: '0_portal',
+      contextMenuOrder: 3,
+      precondition: 'editorHasSelection',
+      run: () => {
+        const selected = fragment();
+        const selection = current.getSelection();
+        const model = current.getModel();
+        if (selected && selection && model) {
+          latest.current.onCheckSql?.(model.getValueInRange(selection), selected);
+        }
+      },
+    });
+    return () => action.dispose();
+    // `fragment` reads `latest`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkSql]);
 
   useEffect(() => {
     editor.current?.updateOptions({ readOnly });
@@ -288,10 +347,11 @@ export function CodeEditor(props: Props) {
   }, [focus, onFocused]);
 
   // The host is the skip link's target (§9): focusing it hands focus over to Monaco.
+  // `monaco-component` gives the context menu (rendered next to `.monaco-editor`) the theme's colour variables.
   return (
     <div
       ref={host}
-      className={styles.editor}
+      className={`${styles.editor} monaco-component`}
       data-testid="code-editor"
       data-skip-target=""
       tabIndex={-1}

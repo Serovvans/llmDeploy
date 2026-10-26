@@ -22,8 +22,10 @@ _SAFE_METHODS = frozenset({"GET", "HEAD"})
 _API_PREFIX = "/api/"
 _UNAVAILABLE = (OperationalError, InterfaceError, OSError, TimeoutError)
 BODY_REFUSAL_KEY = "portal.body_refusal"
-# Единственное исключение из `no-store`: справочник SDK со своим `ETag` (§1.1, §7.5.14).
-_OWN_CACHE_PATHS = frozenset({"/api/code/sdk"})
+# Исключения из `no-store` со своим `ETag` (§1.1): справочник SDK (§7.5.14), описание `api`
+# и библиотеки клиента CoGIS (§7.5.16).
+_OWN_CACHE_PATHS = frozenset({"/api/code/sdk", "/api/code/web"})
+_OWN_CACHE_PREFIX = "/api/code/web/libraries/"
 
 
 @dataclass(frozen=True)
@@ -99,7 +101,9 @@ class PortalMiddleware:
             if message["type"] == "http.response.start":
                 status["code"] = message["status"]
                 headers = MutableHeaders(scope=message)
-                own_cache = scope["path"] in _OWN_CACHE_PATHS and "cache-control" in headers
+                own_cache = (
+                    scope["path"] in _OWN_CACHE_PATHS or scope["path"].startswith(_OWN_CACHE_PREFIX)
+                ) and "cache-control" in headers
                 if is_api and not own_cache:
                     headers["Cache-Control"] = "no-store"
             await send(message)

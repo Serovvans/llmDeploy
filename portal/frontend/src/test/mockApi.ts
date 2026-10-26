@@ -94,6 +94,22 @@ export const CONFIG = {
         { id: 'bool', title: 'Да или нет', csharp: 'bool', input: true, output: false },
       ],
     },
+    kinds: [
+      { id: 'gptool', extensions: ['.cs'], single_file: false },
+      { id: 'js_plugin', extensions: ['.js'], single_file: true },
+      { id: 'html_widget', extensions: ['.html'], single_file: true },
+      { id: 'catalog', extensions: ['.css', '.html', '.js'], single_file: false },
+      { id: 'card_hooks', extensions: ['.html'], single_file: true },
+    ],
+    preview: { enabled: true, log_max_entries: 500, errors_max: 100 },
+  },
+  // Выключены: остальные тесты проверяют портал как до подключений к базам (ПД §7); их тесты включают сами.
+  db: {
+    enabled: false,
+    tls_verify_available: true,
+    sample_rows_check: 50,
+    sample_rows_preview: 50,
+    max_selected_tables: 200,
   },
 } satisfies PortalConfig;
 

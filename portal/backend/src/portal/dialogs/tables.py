@@ -21,6 +21,10 @@ dialogs = sa.Table(
     sa.Column("carried_source_title", sa.Text),
     # С 0.9: проект диалога помощника `code` (§9.6); таблица — модуль `portal/code`.
     sa.Column("project_id", sa.Uuid, sa.ForeignKey("code_projects.id", ondelete="CASCADE")),
+    # С 1.0: выбор подключения диалога `sql` (§7.6.9); таблица — модуль `portal/databases`.
+    sa.Column("db_connection_id", sa.Uuid, sa.ForeignKey("db_connections.id", ondelete="SET NULL")),
+    sa.Column("db_connection_title", sa.Text),
+    sa.Column("db_tables", postgresql.JSONB, nullable=False, server_default=sa.text("'[]'")),
 )
 
 messages = sa.Table(

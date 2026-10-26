@@ -16,6 +16,11 @@ code_projects = sa.Table(
     sa.Column("revision", sa.BigInteger, nullable=False, server_default="1"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    # С 1.0 (§9.23): вид проекта и выбор подключения (§7.6.9).
+    sa.Column("kind", sa.Text, nullable=False, server_default="gptool"),
+    sa.Column("db_connection_id", sa.Uuid, sa.ForeignKey("db_connections.id", ondelete="SET NULL")),
+    sa.Column("db_connection_title", sa.Text),
+    sa.Column("db_tables", postgresql.JSONB, nullable=False, server_default=sa.text("'[]'")),
 )
 
 code_files = sa.Table(
@@ -33,6 +38,9 @@ code_files = sa.Table(
     sa.Column("size_bytes", sa.Integer, nullable=False),
     sa.Column("revision", sa.Integer, nullable=False, server_default="1"),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    # С 1.0 (§9.24): место вставки и клиенты файла кастомизации Каталога.
+    sa.Column("catalog_insertion", sa.Text),
+    sa.Column("catalog_clients", postgresql.ARRAY(sa.Text)),
 )
 
 code_snapshots = sa.Table(

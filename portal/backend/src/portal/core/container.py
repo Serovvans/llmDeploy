@@ -23,12 +23,19 @@ from portal.code.reference import SdkIndex
 from portal.code.repositories import SqlCodeUnitOfWorkFactory
 from portal.code.sandbox import HttpCodeSandbox
 from portal.code.service import CodeService
+from portal.code.sql_check import SqlCheckService
 from portal.code.templates import load_templates
+from portal.code.web import ClientLibraries, load_web_assets
 from portal.code.zipio import ZipProjectArchives
 from portal.core.clock import SystemClock
 from portal.core.db import create_engine
 from portal.core.ports import Clock, SessionAuthenticator
 from portal.core.settings import Settings
+from portal.databases.crypto import AesPasswordCipher
+from portal.databases.customer import AsyncpgCustomerDatabase, root_certificate_readable
+from portal.databases.ports import CustomerDatabase
+from portal.databases.repositories import SqlDbUnitOfWorkFactory
+from portal.databases.service import DbService
 from portal.dialogs.domain import DialogKind
 from portal.dialogs.drafts import SummaryDrafts
 from portal.dialogs.export import DocxExporter
@@ -115,6 +122,12 @@ class Container(AdminContainer):
     media_storage: MediaStorage
     code: CodeService
     code_tool: CodeTool
+    databases: DbService
+    sql_tool: SqlTool
+    # «Проверить запрос» проекта «Код» (§7.5.18).
+    sql_check: SqlCheckService
+    # Библиотеки клиента CoGIS и тело `GET /api/code/web` (§7.5.16).
+    code_web: ClientLibraries
 
 
 @dataclass(frozen=True)
@@ -216,6 +229,7 @@ def _code(
     model: ChatModel,
     max_model_len: int,
     code_sandbox: CodeSandbox | None,
+    databases: DbService | None,
 ) -> tuple[CodeService, CodeTool]:
     """Раздел «Код»: проекты и помощник; шаблоны мастера проверяются здесь (§7.5.4)."""
     code_settings = settings.code
@@ -236,13 +250,23 @@ def _code(
         ),
         clock,
         code_settings,
+        web=load_web_assets(code_settings.web_dir),
+        databases=databases,
         message_max_chars=settings.dialogs.message_max_chars,
         carried_max_chars=settings.memory.max_chars,
         zip_max_directory_bytes=settings.files.zip_max_directory_bytes,
     )
     estimator = RatioTokenEstimator(settings.llm.chars_per_token, settings.llm.tokens_per_image)
     tool = CodeTool(
-        code_uow, code, sql_schemas, knowledge, model, estimator, settings, max_model_len
+        code_uow,
+        code,
+        sql_schemas,
+        knowledge,
+        model,
+        estimator,
+        settings,
+        max_model_len,
+        databases,
     )
     return code, tool
 
@@ -295,6 +319,7 @@ def build_code_eval_container(
         model,
         max_model_len,
         code_sandbox,
+        None,
     )
     return CodeEvalContainer(
         settings=settings,
@@ -315,6 +340,7 @@ def build_container(
     sql_sandbox: SqlSandbox | None = None,
     transcription_queue: TranscriptionQueue | None = None,
     code_sandbox: CodeSandbox | None = None,
+    customer_database: CustomerDatabase | None = None,
 ) -> Container:
     """Собрать все зависимости API.
 
@@ -322,7 +348,8 @@ def build_container(
     сборка отказывает (§13.5); при включённом `sql.sandbox.enabled` — и без паролей
     песочницы. `chat_model`, `knowledge`, `qdrant`, `sql_sandbox` и `transcription_queue`
     подменяют клиент Bifrost, базу знаний, клиент Qdrant, песочницу SQL и очередь
-    расшифровки вложений в тестах; `code_sandbox` — песочницу сборки C#. Шаблоны мастера
+    расшифровки вложений в тестах; `code_sandbox` — песочницу сборки C#,
+    `customer_database` — обращения к базам заказчика (§7.6). Шаблоны мастера
     читаются и проверяются здесь же: ошибка в них — отказ запуска (§7.5.6).
     """
     clock = clock or SystemClock()
@@ -366,6 +393,14 @@ def build_container(
         settings.kb,
     )
     sql_schemas = SqlSchemaService(SqlSchemaStoreFactory(base.engine), clock, settings.sql)
+    databases = DbService(
+        SqlDbUnitOfWorkFactory(base.engine, clock),
+        customer_database or AsyncpgCustomerDatabase(settings.db),
+        AesPasswordCipher(secret_key),
+        clock,
+        settings.db,
+        partial(root_certificate_readable, settings.db.tls_root_cert_file),
+    )
     sql_checker = SqlSyntaxChecker(settings.sql.check_max_chars, settings.sql.check_timeout_seconds)
     docparse = DocparseService(
         dialog_uow,
@@ -397,9 +432,18 @@ def build_container(
         model,
         max_model_len,
         code_sandbox,
+        databases,
+    )
+    sql_tool = SqlTool(
+        sql_schemas,
+        sql_checker,
+        settings.sql,
+        sql_runner,
+        databases=databases,
+        dialogs=dialog_uow,
     )
     tools: dict[DialogKind, DialogTool] = {
-        "sql": SqlTool(sql_schemas, sql_checker, settings.sql, sql_runner),
+        "sql": sql_tool,
         "cogis": CogisTool(knowledge, settings.cogis),
         "docparse": DocparseDialogTool(dialog_uow, settings.docparse),
         "code": code_tool,
@@ -422,6 +466,7 @@ def build_container(
         max_model_len,
         editors={"code": code_tool},
         history_views=history_views,
+        rechecker=sql_tool,
     )
     return Container(
         settings=settings,
@@ -450,6 +495,7 @@ def build_container(
             docparse.is_forming,
             DocxExporter(),
             settings.code.enabled,
+            databases,
         ),
         sql_schemas=sql_schemas,
         sql_checker=sql_checker,
@@ -482,6 +528,20 @@ def build_container(
         media_storage=media_storage,
         code=code,
         code_tool=code_tool,
+        databases=databases,
+        sql_tool=sql_tool,
+        sql_check=SqlCheckService(
+            code,
+            sql_schemas,
+            sql_tool,
+            sql_runner,
+            databases,
+            auth,
+            dialect=settings.sql.sandbox.dialect,
+            sql_max_chars=settings.dialogs.message_max_chars,
+            recheck_seconds=settings.auth.session.stream_recheck_seconds,
+        ),
+        code_web=ClientLibraries(settings.code.sdk_index_dir / "client", code.web),
     )
 
 

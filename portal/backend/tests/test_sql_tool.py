@@ -180,6 +180,7 @@ async def test_write_action_uses_dialect_and_schema_and_checks_the_answer(portal
     stored = await portal.rows("SELECT params FROM messages WHERE role = 'user'")
     assert stored[0].params == {
         "action": "write", "dialect": "postgres", "schema_id": schema_id, "test_run": False,
+        "db": None,
     }  # fmt: skip
     assert (await client.get(f"/api/dialogs/{dialog_id}")).json()["title"] == "Название от модели"
 

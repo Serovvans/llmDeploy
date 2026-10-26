@@ -37,6 +37,20 @@ class SandboxRun:
     affected_rows: int | None
 
 
+@dataclass(frozen=True)
+class SampleTable:
+    """Таблица образца базы заказчика для песочницы (§7.4, «Проверка на образце»).
+
+    `name` — без схемы; `columns` — `(имя, тип в песочнице)` из снимка (§7.6.7);
+    `primary_key` — пусто, если ключа нет; `rows` — значения текстом СУБД, `None` — `NULL`.
+    """
+
+    name: str
+    columns: Sequence[tuple[str, str]]
+    primary_key: Sequence[str]
+    rows: Sequence[Sequence[str | None]]
+
+
 class SandboxUnavailableError(Exception):
     """Проверить негде: нет соединения, место не выдано либо оператор завершил транзакцию."""
 
@@ -49,23 +63,39 @@ class SandboxQueryError(Exception):
     """Ошибка исполнения запроса либо результат больше предела; `message` уже обрезано.
 
     `fixture` — тестовые данные, прочитанные перед запросом: они есть при любой причине.
+    `message` — только основное сообщение СУБД (поле `M`); `sqlstate` — его код, `None` —
+    сообщение портала; `at_parse` — сервер отверг запрос на шаге `Parse`/`Describe`, до
+    исполнения (1.0, §13.3).
     """
 
-    def __init__(self, message: str, fixture: Sequence[SandboxTable]) -> None:
-        """Запомнить сообщение СУБД (недоверенный текст) и тестовые данные."""
+    def __init__(
+        self,
+        message: str,
+        fixture: Sequence[SandboxTable],
+        sqlstate: str | None = None,
+        at_parse: bool = False,
+    ) -> None:
+        """Запомнить сообщение СУБД (недоверенный текст), его код и тестовые данные."""
         super().__init__()
         self.message = message
         self.fixture = fixture
+        self.sqlstate = sqlstate
+        self.at_parse = at_parse
 
 
 class SandboxSlot(Protocol):
     """Место песочницы со своей ролью входа."""
 
-    async def run(self, setup: Sequence[str], query: str) -> SandboxRun:
+    async def run(
+        self, setup: Sequence[str], query: str, samples: Sequence[SampleTable] = ()
+    ) -> SandboxRun:
         """Одна попытка: новое соединение и транзакция, которая всегда откатывается.
 
-        Имена схем в текстах уже сняты сценарием. Отмена задачи (общий срок, остановка,
-        потеря сессии) принудительно завершает сеанс на сервере. Исключения:
+        Имена схем в текстах уже сняты сценарием. `samples` создаются и заполняются до
+        `setup` (имена — идентификаторами в кавычках, типы — после сверки §7.6.7,
+        значения — параметрами) и читаются в `fixture` вместе с прочими; предел
+        `fixture_max_bytes` у них — `truncated`, а не отказ. Отмена задачи (общий срок,
+        остановка, потеря сессии) принудительно завершает сеанс на сервере. Исключения:
         `SandboxUnavailableError`, `SandboxSetupError`, `SandboxQueryError`.
         """
         ...

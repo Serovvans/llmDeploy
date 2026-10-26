@@ -40,9 +40,11 @@ from portal.code.prompt import CodePlan, build_code_plan, fix_attempt_messages, 
 from portal.code.service import CodeService
 from portal.core.errors import field_error, not_found, validation_error
 from portal.core.settings import Settings
+from portal.databases.domain import selection_of
+from portal.databases.service import DbService
 from portal.dialogs import errors as dialog_errors
 from portal.dialogs.context import Turn, fit_memory, head_turn, with_head_rules
-from portal.dialogs.ports import AnswerPlan
+from portal.dialogs.ports import AnswerPlan, RunReport
 from portal.kb.ports import KnowledgeBase, KnowledgeSelection, KnowledgeUnavailableError
 from portal.llm.ports import (
     ChatModel,
@@ -265,8 +267,13 @@ class CodeTool:
         estimator: TokenEstimator,
         settings: Settings,
         max_model_len: int,
+        databases: DbService | None = None,
     ) -> None:
-        """Получить зависимости явно; `max_model_len` — контекст модели (§7.5.9)."""
+        """Получить зависимости явно; `max_model_len` — контекст модели (§7.5.9).
+
+        `databases` — `None` у прогона контрольного набора: выбора подключения там нет.
+        """
+        self._databases = databases
         self._uow_factory = uow_factory
         self._projects = projects
         self._schemas = schemas
@@ -282,12 +289,34 @@ class CodeTool:
 
     # --- разбор тела запроса (§7.5.8, §5.10.3) ---
 
-    async def _project_files(self, owner_id: UUID, dialog_id: UUID) -> list[ProjectFile]:
+    async def _project_files(
+        self, owner_id: UUID, dialog_id: UUID, action: CodeAction
+    ) -> list[ProjectFile]:
+        """Файлы проекта диалога; у веб-вида действия `fix` нет (§7.5.16)."""
         async with self._uow_factory() as uow:
             project = await uow.code.project_by_dialog(owner_id, dialog_id)
             if project is None:
                 raise not_found()
+            if project.web and action == "fix":
+                raise validation_error([field_error("action", "unknown_value")])
             return await uow.code.files(owner_id, project.id)
+
+    async def schema(self, owner_id: UUID, project: Project) -> SchemaView | None:
+        """Блок `<схема>`: отмеченные таблицы выбора подключения или схема «Мои схемы».
+
+        При `db.enabled: false` выбор не читается (§7.6.10); недоступный выбор или выбор
+        без таблиц в снимке — блока нет.
+        """
+        selection = selection_of(
+            project.db_connection_id, project.db_connection_title, project.db_tables
+        )
+        if selection is not None and self._databases is not None and self._databases.enabled:
+            text = await self._databases.schema_text(owner_id, selection)
+            return None if text is None else SchemaView(selection.title, text)
+        if project.schema_id is None:
+            return None
+        found = await self._schemas.find(owner_id, project.schema_id)
+        return None if found is None else SchemaView(found.name, found.content)
 
     async def question_params(
         self,
@@ -298,7 +327,7 @@ class CodeTool:
         target: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         """Проверить `file_ids` и `target` по файлам проекта; параметры вопроса для хранения."""
-        files = {file.id: file for file in await self._project_files(owner_id, dialog_id)}
+        files = {file.id: file for file in await self._project_files(owner_id, dialog_id, action)}
         if file_ids is not None:
             if len(set(file_ids)) != len(file_ids):
                 raise validation_error([field_error("file_ids", "invalid_format")])
@@ -330,7 +359,7 @@ class CodeTool:
         self, owner_id: UUID, dialog_id: UUID, action: CodeAction, files: str | None
     ) -> dict[str, Any]:
         """Строка запроса оценки: `files` нет — все, пустая — ни одного, иначе через запятую."""
-        known = {str(file.id) for file in await self._project_files(owner_id, dialog_id)}
+        known = {str(file.id) for file in await self._project_files(owner_id, dialog_id, action)}
         chosen = None
         if files is not None:
             chosen = [item.strip() for item in files.split(",")] if files else []
@@ -376,12 +405,9 @@ class CodeTool:
                 raise not_found()
             files = await uow.code.files(owner_id, project.id)
             build = await uow.code.build(owner_id, project.id)
-        schema = None
-        if project.schema_id is not None:
-            found = await self._schemas.find(owner_id, project.schema_id)
-            schema = None if found is None else SchemaView(found.name, found.content)
+        schema = await self.schema(owner_id, project)
         target = target_view(params)
-        sdk = await self._projects.sdk()
+        types = None if project.web else (await self._projects.sdk()).types
         try:
             documented: bool | None = await self._knowledge.has_cogis_documentation()
         except KnowledgeUnavailableError:
@@ -389,12 +415,12 @@ class CodeTool:
         plan = self.build(
             params["action"],
             content,
-            ProjectView(project.name, files),
+            ProjectView(project.name, files, project.kind),
             sent_paths(files, params["file_ids"], target),
             target,
             build_view(build, project.revision),
             schema,
-            sdk.types,
+            types,
             documented,
         )
         self.check_fits(plan, head_turn(dialog))
@@ -449,6 +475,7 @@ class CodeTool:
             reference_always=self._code.reference_always,
             reference_max_tokens=self._code.reference_max_tokens,
             build_messages_max=self._code.build_messages_max,
+            api_types=self._projects.web.api_types,
         )
 
     async def review(self, plan: AnswerPlan, content: str) -> Mapping[str, Any] | None:
@@ -460,7 +487,9 @@ class CodeTool:
         owner_id: UUID,
         plan: AnswerPlan,
         content: str,
-        report: Callable[[Mapping[str, Any]], None],
+        report: Callable[[RunReport], None],
+        *,
+        only: int | None = None,
     ) -> None:
         """Проверки на тестовых данных у этого вида нет."""
 
@@ -520,12 +549,12 @@ class CodeTool:
             if project is None:
                 return None
             files = await uow.code.files(owner_id, project.id)
-        view = ProjectView(project.name, files)
-        parsed = parse_edit(content, view, self._projects.limits, status)
+        view = ProjectView(project.name, files, project.kind)
+        parsed = parse_edit(content, view, self._projects.limits_of(project), status)
         if not parsed.files and not parsed.rejected:
             return None
         chosen, rejected, checked = parsed.files, parsed.rejected, None
-        if action == "fix" and parsed.files:
+        if action == "fix" and parsed.files and not project.web:
             loop = await self._fix(project, view, parsed, report)
             chosen, rejected, checked = list(loop.edit.values()), loop.rejected, loop.verification
         summary = edit_summary(chosen, rejected, parsed.incomplete, checked)

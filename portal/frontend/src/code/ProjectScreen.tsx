@@ -1,12 +1,13 @@
 import { IconCommentRectTextRegular16 } from '@skbkontur/icons/IconCommentRectTextRegular16';
+import { IconMediaUiAPlayRegular16 } from '@skbkontur/icons/IconMediaUiAPlayRegular16';
 import { IconSettingsGearRegular16 } from '@skbkontur/icons/IconSettingsGearRegular16';
 import { IconTimeClockMoveBackRegular16 } from '@skbkontur/icons/IconTimeClockMoveBackRegular16';
 import { Button, Hint, Kebab, Link, Loader, MenuItem, MenuSeparator, SingleToast } from '@skbkontur/react-ui';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 
 import { api, isApiError } from '../api/client';
-import type { CodeConfig, CodeProject, CodeTarget } from '../api/types';
+import type { CodeConfig, CodeFile, CodeProject, CodeTarget, CodeWeb } from '../api/types';
 import { useChat } from '../chat/ChatProvider';
 import { EmptyState } from '../components/EmptyState';
 import { Notice } from '../components/Notice';
@@ -27,6 +28,7 @@ import { EditTab, type Decision } from './EditTab';
 import { EDIT_TAB, EditorTabs, TAB_PANEL_ID, tabElementId } from './EditorTabs';
 import { ProjectFiles } from './FileTree';
 import { useMonaco } from './monaco/loader';
+import { isWebKind, kindOf, kindTexts } from './kinds';
 import { useProjectActions } from './projectActions';
 import panelStyles from './ProjectPanel.module.css';
 import styles from './ProjectScreen.module.css';
@@ -36,8 +38,18 @@ import { SettingsModal } from './SettingsModal';
 import { readAssistantOpen, readTabs, storeAssistantOpen, storeTabs } from './storage';
 import { BUILD_POLL_MS, type ProjectApi, useProject } from './useProject';
 import { VersionsPanel } from './VersionsPanel';
+import type { PreviewProblem } from './web/preview';
+import { PreviewPane } from './web/PreviewPane';
+import { useSqlCheck } from './web/SqlCheck';
+import { WebExportModal } from './web/WebExportModal';
+import { WebRoutePanel, type PreviewStation, type WebTab } from './web/WebRoutePanel';
+import { fixQuestion, type SyntaxMessage } from './web/webRules';
 
 const w = texts.workshop;
+/** Проверка синтаксиса — через 500 мс после последнего нажатия (§5.13.19). */
+const SYNTAX_DELAY_MS = 500;
+
+type Column = 'assistant' | 'preview' | null;
 
 /** Главный файл при первом открытии: первый файл не фабрики, иначе первый (§5.13.6). */
 function mainFile(files: readonly { id: string; path: string }[]): string | null {
@@ -101,7 +113,10 @@ interface ViewProps {
 }
 
 function ProjectView({ id, state, project, codeConfig }: ViewProps) {
-  const { reloadConfig } = useSession();
+  const { reloadConfig, config: portal } = useSession();
+  const kind = kindOf(project);
+  const isWeb = isWebKind(kind);
+  const previewEnabled = isWeb && codeConfig.preview?.enabled === true;
   const { sdk, sectionOff, touchProject, forgetProject } = useCode();
   const navigate = useNavigate();
   const location = useLocation();
@@ -114,19 +129,34 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
   const [tabs, setTabs] = useState<string[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [editMessage, setEditMessage] = useState<string | null>(null);
-  const [assistantOpen, setAssistantOpen] = useState(readAssistantOpen);
+  // «Помощник» и «Предпросмотр» — два вида одной колонки (§5.13.21); предпросмотр не запоминается.
+  const [chosenColumn, setColumn] = useState<Column>(() => (readAssistantOpen() ? 'assistant' : null));
+  const column = chosenColumn === 'preview' && !(isWeb && codeConfig.preview?.enabled === true) ? null : chosenColumn;
+  const assistantOpen = column === 'assistant';
+  const previewOpen = column === 'preview';
+  const setAssistantOpen = (open: boolean) => setColumn(open ? 'assistant' : null);
   const [expanded, setExpanded] = useState(false);
   const [buildTab, setBuildTab] = useState<BuildTab>('errors');
   const [buildPending, setBuildPending] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
   const [jump, setJump] = useState<Jump | null>(null);
-  const [modal, setModal] = useState<'archive' | 'settings' | 'versions' | null>(null);
+  const [modal, setModal] = useState<'archive' | 'settings' | 'versions' | 'webExport' | null>(null);
   const rememberOpener = useFocusReturn(modal !== null);
   /** Окно открывается с кнопки или ссылки внутри `[data-opener=…]`: после закрытия фокус вернётся на неё (§9). */
-  const openModal = (kind: 'archive' | 'settings' | 'versions', opener: string) => {
+  const openModal = (which: 'archive' | 'settings' | 'versions' | 'webExport', opener: string) => {
     rememberOpener(`[data-opener="${opener}"] :is(a, button)`);
-    setModal(kind);
+    setModal(which);
   };
+  const [webTab, setWebTab] = useState<WebTab>('syntax');
+  const [codeWeb, setCodeWeb] = useState<CodeWeb | null>(null);
+  const [syntax, setSyntax] = useState<SyntaxMessage[] | null>(null);
+  const [edits, bumpEdits] = useReducer((n: number) => n + 1, 0);
+  const syntaxSeq = useRef(0);
+  const [runKey, setRunKey] = useState(0);
+  const [previewExpanded, setPreviewExpanded] = useState(false);
+  const [previewRun, setPreviewRun] = useState<Map<string, string> | null>(null);
+  const [previewProblems, setPreviewProblems] = useState<PreviewProblem[]>([]);
+  const [focusPreview, setFocusPreview] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
   const [decisionPending, setDecisionPending] = useState<string | null>(null);
   const [report, setReport] = useState(created?.importReport ?? null);
@@ -255,6 +285,102 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
     storeAssistantOpen(true);
   };
 
+  // Описание `api` и библиотеки клиента CoGIS — один запрос при открытии проекта веб-вида (§7.5.16).
+  useEffect(() => {
+    if (!isWeb) {
+      return;
+    }
+    let cancelled = false;
+    api.getCodeWeb().then(
+      (loaded) => !cancelled && setCodeWeb(loaded),
+      (error: unknown) => {
+        sectionOff(error);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [isWeb, sectionOff]);
+
+  useEffect(() => {
+    if (monaco.status === 'ready' && codeWeb) {
+      void monaco.setup.configureWeb(codeWeb);
+      monaco.setup.registerHtmlScriptHints();
+    }
+  }, [codeWeb, monaco]);
+
+  const filesRef = useRef(files);
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+  const { text: textOf } = state;
+
+  // Проверка синтаксиса всех файлов проекта по мере набора (§5.13.19).
+  const syntaxReady = syntax !== null;
+  useEffect(() => {
+    if (!isWeb || monaco.status !== 'ready') {
+      return;
+    }
+    const setup = monaco.setup;
+    const timer = window.setTimeout(
+      () => {
+        const seq = ++syntaxSeq.current;
+        const current = filesRef.current.map((file) => ({ path: file.path, content: textOf(file.id) }));
+        setup.checkSyntax(current).then(
+          (result) => seq === syntaxSeq.current && setSyntax(result),
+          () => undefined,
+        );
+      },
+      syntaxReady ? SYNTAX_DELAY_MS : 0,
+    );
+    return () => window.clearTimeout(timer);
+  }, [edits, files, isWeb, monaco, syntaxReady, textOf]);
+
+  const onTextChange = (fileId: string, text: string) => {
+    state.setText(fileId, text);
+    if (isWeb) {
+      bumpEdits();
+    }
+  };
+
+  /** Сохранённые файлы с текстами редактора: несохранённая правка сначала сохраняется (§5.13.21–5.13.22). */
+  const savedFiles = useCallback(async (): Promise<CodeFile[]> => {
+    await state.flush();
+    return filesRef.current.map((file) => ({ ...file, content: textOf(file.id) }));
+  }, [state, textOf]);
+
+  const showPreview = () => {
+    if (previewOpen) {
+      return;
+    }
+    setColumn('preview');
+    setFocusPreview(true);
+  };
+
+  const runPreview = () => {
+    if (previewOpen) {
+      setRunKey((key) => key + 1);
+    } else {
+      showPreview();
+    }
+  };
+
+  const previewOff = useCallback(() => {
+    SingleToast.push(w.web.pane.off);
+    setColumn((current) => (current === 'preview' ? null : current));
+    setPreviewExpanded(false);
+    reloadConfig();
+  }, [reloadConfig]);
+
+  // Предпросмотр выключили в настройках портала, пока колонка открыта (§5.13.21): колонка закрывается.
+  const previewWasOpen = useRef(false);
+  useEffect(() => {
+    if (previewWasOpen.current && !previewEnabled) {
+      SingleToast.push(w.web.pane.off);
+    }
+    previewWasOpen.current = previewEnabled && column === 'preview';
+  }, [column, previewEnabled]);
+
   const decide = async (messageId: string, accept: { path: string; revision: number | null }[], total: number): Promise<Decision> => {
     setDecisionPending(messageId);
     setReadOnly(true);
@@ -338,7 +464,8 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
     activeFile,
     text: state.text,
     flush: state.flush,
-    revision: state.revision,
+    // Схема и база из настроек проекта входят в оценку памяти: после «Сохранить» она пересчитывается (§5.13.23).
+    revision: `${state.revision}:${project?.schema_id ?? ''}:${JSON.stringify(project?.db ?? null)}`,
     visible: assistantOpen,
     show: showAssistant,
     reloadProject: () => void reload(),
@@ -351,6 +478,41 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
     onAnswerFinished: answerFinished,
     sectionOff,
   });
+
+  const sqlCheck = useSqlCheck({
+    project,
+    config: portal,
+    sectionOff,
+    reloadConfig,
+    onOpenSettings: () => openModal('settings', 'settings'),
+    onShowResult: () => {
+      setExpanded(true);
+      if (isWeb) {
+        setWebTab('sql');
+      } else {
+        setBuildTab('sql');
+      }
+    },
+  });
+
+  const fixSyntax = () =>
+    assistant.ask({ kind: 'write', content: fixQuestion('syntax', (syntax ?? []).map((item) => ({ path: item.path, line: item.line, message: item.message }))) });
+  const previewErrors = previewProblems.filter((problem) => problem.kind !== 'image');
+  const fixPreview = () =>
+    assistant.ask({
+      kind: 'write',
+      content: fixQuestion(
+        'preview',
+        previewErrors.map((problem) => ({
+          path: problem.file,
+          line: problem.line,
+          message: problem.kind === 'network' ? w.web.pane.network(problem.text) : problem.text,
+        })),
+      ),
+    });
+  const previewChanged = previewRun !== null && (previewRun.size !== files.length || files.some((file) => previewRun.get(file.path) !== textOf(file.id)));
+  const previewStation: PreviewStation =
+    previewRun === null ? 'none' : previewChanged ? 'changed' : previewErrors.length > 0 ? 'errors' : 'ok';
 
   // Мастер с описаниями: вопрос помощнику уходит сам один раз; адрес забывает его (§5.13.4).
   const wizardRequest = created?.assistantRequest ?? null;
@@ -458,8 +620,14 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
               files={files}
               fileId={activeFile.id}
               text={state.text}
-              onChange={state.setText}
+              onChange={onTextChange}
               build={project.build}
+              syntax={isWeb ? syntax : undefined}
+              onCheckSql={
+                sqlCheck.enabled
+                  ? (selected, fragment) => sqlCheck.open(selected, { path: fragment.path, startLine: fragment.start_line, endLine: fragment.end_line })
+                  : undefined
+              }
               readOnly={readOnly}
               jump={jump}
               focus={focusAfter === 'editor'}
@@ -475,7 +643,12 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
     );
   }
 
-  const layout = assistantOpen ? `${styles.project} ${styles.withAssistant}` : styles.project;
+  const layout =
+    previewOpen && previewExpanded
+      ? `${styles.project} ${styles.previewExpanded}`
+      : column !== null
+        ? `${styles.project} ${styles.withAssistant}`
+        : styles.project;
 
   return (
     <div className={layout}>
@@ -494,6 +667,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
         <ProjectFiles
           files={files}
           config={codeConfig}
+          kind={kind}
           activeFileId={activeFile?.id ?? null}
           errors={errorsByPath}
           onOpen={openFile}
@@ -509,6 +683,13 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
           <TitleHint text={project.name} className={styles.titleWrap}>
             <h1 className={codeStyles.title}>{project.name}</h1>
           </TitleHint>
+          {isWeb && (
+            <Hint text={w.web.where(kindTexts(kind).where)}>
+              <span className={styles.kind} tabIndex={0}>
+                · {kindTexts(kind).title}
+              </span>
+            </Hint>
+          )}
         </div>
         <div className={styles.headerActions}>
           <span data-opener="versions">
@@ -521,6 +702,27 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
               {w.project.settings}
             </Button>
           </span>
+          {previewEnabled && (
+            <Hint text={previewOpen ? w.web.hidePreview : w.web.showPreview}>
+              <Button
+                size="small"
+                icon={<IconMediaUiAPlayRegular16 />}
+                active={previewOpen}
+                aria-expanded={previewOpen}
+                aria-controls={previewOpen ? 'preview-pane' : undefined}
+                onClick={() => {
+                  if (previewOpen) {
+                    setColumn(null);
+                    setPreviewExpanded(false);
+                  } else {
+                    showPreview();
+                  }
+                }}
+              >
+                {w.web.preview}
+              </Button>
+            </Hint>
+          )}
           <Hint text={assistantOpen ? w.project.hideAssistant : w.project.showAssistant}>
             <Button
               size="small"
@@ -530,6 +732,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
               onClick={() => {
                 setAssistantOpen(!assistantOpen);
                 storeAssistantOpen(!assistantOpen);
+                setPreviewExpanded(false);
               }}
             >
               {w.project.assistant}
@@ -538,10 +741,14 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
           <span data-opener="project-header">
             <Hint text={texts.users.actions} pos="left">
               <Kebab aria-label={`${texts.users.actions}: ${project.name}`}>
-                <MenuItem onClick={() => actions.exportProject(project.id, project.name)}>{w.exportVs}</MenuItem>
+                {isWeb ? (
+                  <MenuItem onClick={() => openModal('webExport', 'project-header')}>{w.web.exportCogis}</MenuItem>
+                ) : (
+                  <MenuItem onClick={() => actions.exportProject(project.id, project.name)}>{w.exportVs}</MenuItem>
+                )}
                 <MenuSeparator />
                 <MenuItem
-                  onClick={() => actions.askRemove({ id: project.id, name: project.name }, '[data-opener="project-header"] [tabindex="0"]')}
+                  onClick={() => actions.askRemove({ id: project.id, name: project.name, kind }, '[data-opener="project-header"] [tabindex="0"]')}
                 >
                   {w.removeProject}
                 </MenuItem>
@@ -602,39 +809,110 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
           <div className={styles.editorArea}>{editorArea}</div>
         )}
       </div>
-      <BuildPanel
-        state={route}
-        build={project.build}
-        expanded={expanded}
-        tab={buildTab}
-        paths={new Set(files.map((file) => file.path))}
-        onToggle={(tab) => {
-          if (tab) {
-            setExpanded(true);
-            setBuildTab(tab);
-          } else {
-            if (!expanded) {
-              setBuildTab(firstTab(project.build));
+      {isWeb ? (
+        <WebRoutePanel
+          syntax={syntax}
+          previewEnabled={previewEnabled}
+          preview={previewStation}
+          previewErrors={previewErrors.length}
+          previewOpen={previewOpen}
+          expanded={expanded}
+          tab={webTab}
+          hasHtml={files.some((file) => file.path.toLowerCase().endsWith('.html'))}
+          libraries={codeWeb?.libraries ?? null}
+          sqlTab={sqlCheck.tab}
+          paths={new Set(files.map((file) => file.path))}
+          onToggle={(tab) => {
+            if (tab) {
+              setExpanded(true);
+              setWebTab(tab);
+            } else {
+              setExpanded(!expanded);
             }
-            setExpanded(!expanded);
-          }
-        }}
-        onTab={setBuildTab}
-        onBuild={() => void runBuild()}
-        onFix={() => assistant.ask({ kind: 'fix' })}
-        onDownload={() => openModal('archive', 'archive')}
-        onExportVs={() => actions.exportProject(project.id, project.name)}
-        onJump={(path, line, column) => {
-          const file = files.find((item) => item.path === path);
-          if (file) {
-            jumpTo(file.id, line, column);
-          }
-        }}
-      />
+          }}
+          onTab={setWebTab}
+          onFixSyntax={fixSyntax}
+          onFixPreview={fixPreview}
+          onRunPreview={runPreview}
+          onShowPreview={showPreview}
+          onExport={() => openModal('webExport', 'web-export')}
+          onJump={(path, line, column) => {
+            const file = files.find((item) => item.path === path);
+            if (file) {
+              jumpTo(file.id, line, column);
+            }
+          }}
+        />
+      ) : (
+        <BuildPanel
+          state={route}
+          build={project.build}
+          expanded={expanded}
+          tab={buildTab}
+          paths={new Set(files.map((file) => file.path))}
+          onToggle={(tab) => {
+            if (tab) {
+              setExpanded(true);
+              setBuildTab(tab);
+            } else {
+              if (!expanded) {
+                setBuildTab(firstTab(project.build));
+              }
+              setExpanded(!expanded);
+            }
+          }}
+          onTab={setBuildTab}
+          onBuild={() => void runBuild()}
+          onFix={() => assistant.ask({ kind: 'fix' })}
+          onDownload={() => openModal('archive', 'archive')}
+          onExportVs={() => actions.exportProject(project.id, project.name)}
+          sqlTab={sqlCheck.tab}
+          onJump={(path, line, column) => {
+            const file = files.find((item) => item.path === path);
+            if (file) {
+              jumpTo(file.id, line, column);
+            }
+          }}
+        />
+      )}
+      {previewOpen && previewEnabled && (
+        <PreviewPane
+          project={project}
+          web={codeWeb}
+          limits={{ log_max_entries: codeConfig.preview?.log_max_entries ?? 500, errors_max: codeConfig.preview?.errors_max ?? 100 }}
+          db={portal?.db ?? { enabled: false, tls_verify_available: false, sample_rows_check: 0, sample_rows_preview: 0, max_selected_tables: 0 }}
+          runKey={runKey}
+          prepare={async () => {
+            try {
+              return await savedFiles();
+            } catch {
+              return null;
+            }
+          }}
+          changed={previewChanged}
+          expanded={previewExpanded}
+          onExpand={setPreviewExpanded}
+          onRun={(ran) => setPreviewRun(new Map(ran.map((file) => [file.path, file.content])))}
+          onProblems={setPreviewProblems}
+          onJump={(path, line, column) => {
+            const file = files.find((item) => item.path === path);
+            if (file) {
+              setPreviewExpanded(false);
+              jumpTo(file.id, line, column);
+            }
+          }}
+          onFeatureOff={previewOff}
+          focusTitle={focusPreview}
+        />
+      )}
       {assistant.element}
       {assistant.viewer}
       {assistant.dialogs}
       {actions.modal}
+      {sqlCheck.modal}
+      {modal === 'webExport' && (
+        <WebExportModal project={project} syntaxErrors={syntax?.length} savedFiles={savedFiles} onClose={() => setModal(null)} sectionOff={sectionOff} />
+      )}
       {modal === 'archive' && project.build && (
         <ArchiveModal
           projectId={id}
@@ -659,6 +937,7 @@ function ProjectView({ id, state, project, codeConfig }: ViewProps) {
         <VersionsPanel
           projectId={id}
           max={codeConfig.max_snapshots}
+          web={isWebKind(kindOf(project))}
           onClose={() => setModal(null)}
           beforeRestore={state.flush}
           onPending={setReadOnly}

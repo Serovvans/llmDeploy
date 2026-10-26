@@ -81,24 +81,38 @@ function sourceMarks() {
 const PLUGINS = [remarkGfm, sourceMarks];
 
 /** Проверки блоков `sql` ответа: синтаксис с опасными операциями и исполнение на тестовых данных. */
-const SqlChecksContext = createContext<{ check: SqlCheck | null; run: SqlRun | null }>({ check: null, run: null });
+interface SqlChecks {
+  check: SqlCheck | null;
+  run: SqlRun | null;
+  /** «Проверить снова» блока `index` (проверка на образце, концепция §5.7); нет — у ответа без этой возможности. */
+  onRecheck?: (index: number) => void;
+  recheckWait?: string | null;
+}
+
+const SqlChecksContext = createContext<SqlChecks>({ check: null, run: null });
 
 /** Блок кода с итогами проверок, если это блок `sql` проверенного ответа: синтаксис, под ним — тестовые данные. */
 function CheckedCodeBlock({ code, language, line }: { code: string; language: string | null; line?: number }) {
-  const { check, run } = useContext(SqlChecksContext);
+  const { check, run, onRecheck, recheckWait } = useContext(SqlChecksContext);
   const block = check?.blocks.find((item) => item.line === Number(line));
   const runBlock = run?.blocks.find((item) => item.line === Number(line));
   return (
     <>
       <CodeBlock code={code} language={language} check={block} superseded={runBlock?.status === 'fixed'} />
-      {runBlock && <SqlRunResult block={runBlock} />}
+      {runBlock && (
+        <SqlRunResult
+          block={runBlock}
+          onRecheck={onRecheck && (() => onRecheck(runBlock.index))}
+          recheckWait={recheckWait}
+        />
+      )}
     </>
   );
 }
 
 /** Итоги записей, для которых на их строке блока кода нет: они не теряются и стоят под текстом ответа. */
 function SqlOrphans({ lines }: { lines: string }) {
-  const { check, run } = useContext(SqlChecksContext);
+  const { check, run, onRecheck, recheckWait } = useContext(SqlChecksContext);
   const drawn = new Set(lines.split(',').map(Number));
   return (
     <>
@@ -112,7 +126,7 @@ function SqlOrphans({ lines }: { lines: string }) {
         .map((block) => (
           <div key={block.index} className={styles.orphanRun}>
             <p className={styles.orphanNote}>{texts.sql.check.orphan}</p>
-            <SqlRunResult block={block} />
+            <SqlRunResult block={block} onRecheck={onRecheck && (() => onRecheck(block.index))} recheckWait={recheckWait} />
           </div>
         ))}
     </>
@@ -177,6 +191,8 @@ interface MarkdownViewProps {
   sqlCheck?: SqlCheck | null;
   /** Проверка блоков `sql` на тестовых данных — только у ответа на вопрос с включённой проверкой. */
   sqlRun?: SqlRun | null;
+  onRecheck?: (index: number) => void;
+  recheckWait?: string | null;
 }
 
 /**
@@ -220,13 +236,24 @@ function SourceMark({ n }: { n: number }) {
 
 const COMPONENTS_WITH_MARKS = { ...COMPONENTS, 'source-mark': SourceMark, 'sql-orphans': SqlOrphans } as Components;
 
-export function MarkdownView({ text, streaming = false, links, sqlCheck = null, sqlRun = null }: MarkdownViewProps) {
+export function MarkdownView({
+  text,
+  streaming = false,
+  links,
+  sqlCheck = null,
+  sqlRun = null,
+  onRecheck,
+  recheckWait = null,
+}: MarkdownViewProps) {
   const numbers = links?.sources.map((source) => source.n).join(',') ?? '';
   const marked = useMemo(
     () => (numbers ? markFootnotes(text, new Set(numbers.split(',').map(Number))) : text),
     [text, numbers],
   );
-  const checks = useMemo(() => ({ check: sqlCheck, run: sqlRun }), [sqlCheck, sqlRun]);
+  const checks = useMemo(
+    () => ({ check: sqlCheck, run: sqlRun, onRecheck, recheckWait }),
+    [sqlCheck, sqlRun, onRecheck, recheckWait],
+  );
 
   return (
     <SourceLinksContext.Provider value={links ?? null}>

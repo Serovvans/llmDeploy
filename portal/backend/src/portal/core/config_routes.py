@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from portal.code.kinds import kinds
 from portal.core.access import AnySession, ContainerDep
 from portal.core.container import Container
 
@@ -79,6 +80,13 @@ async def get_config(_: AnySession, container: ContainerDep) -> dict[str, Any]:
             "max_chars": settings.memory.max_chars,
         },
         "code": _code(container),
+        "db": {
+            "enabled": settings.db.enabled,
+            "tls_verify_available": container.databases.tls_verify_available(),
+            "sample_rows_check": settings.db.sample_rows_check,
+            "sample_rows_preview": settings.db.sample_rows_preview,
+            "max_selected_tables": settings.db.max_selected_tables,
+        },
     }
 
 
@@ -109,5 +117,14 @@ def _code(container: Container) -> dict[str, Any]:
                 }
                 for item in container.code.templates.types
             ],
+        },
+        "kinds": [
+            {"id": kind.id, "extensions": list(kind.extensions), "single_file": kind.single_file}
+            for kind in kinds(code.file_extensions).values()
+        ],
+        "preview": {
+            "enabled": code.preview.enabled,
+            "log_max_entries": code.preview.log_max_entries,
+            "errors_max": code.preview.errors_max,
         },
     }

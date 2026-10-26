@@ -275,7 +275,7 @@ async def test_migration_converts_saved_question_params(portal: Portal) -> None:
         {"mode": "fast", "collections": ["shared", "personal"], "tags": []},
     ]
     assert [row.params for row in stored if (row.kind, row.role) == ("sql", "user")] == [
-        {**sql_params, "test_run": False}
+        {**sql_params, "test_run": False, "db": None}
     ]
     assert all(row.params == {} for row in stored if row.role == "assistant")
     # Старый вопрос после миграции годен для повторной генерации — с прежним выбором.

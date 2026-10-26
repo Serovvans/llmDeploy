@@ -1,6 +1,6 @@
 """Сущности диалогов (docs/portal-api.md §5.1, §9.6–9.8)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -25,7 +25,9 @@ class Dialog:
     кончается пересказанная часть; оба есть или оба `None` (§5.10.6). `carried_text` —
     перенесённое при создании; `carried_source_id` — исходный диалог того же владельца
     (`None` — удалён), `carried_source_title` — его название на момент переноса (§5.10.7).
-    `project_id` — проект, которому принадлежит диалог `code` (§7.5.8).
+    `project_id` — проект, которому принадлежит диалог `code` (§7.5.8). С 1.0 у `sql` —
+    выбор подключения: `db_connection_title` — название на момент выбора, `None` — выбора
+    нет (§7.6.9).
     """
 
     id: UUID
@@ -40,6 +42,9 @@ class Dialog:
     carried_source_id: UUID | None = None
     carried_source_title: str | None = None
     project_id: UUID | None = None
+    db_connection_id: UUID | None = None
+    db_connection_title: str | None = None
+    db_tables: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass

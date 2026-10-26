@@ -24,11 +24,24 @@ class Project:
     revision: int
     created_at: datetime
     updated_at: datetime
+    # С 1.0: вид проекта и выбор подключения (§7.5.16, §7.6.9).
+    kind: str = "gptool"
+    db_connection_id: UUID | None = None
+    db_connection_title: str | None = None
+    db_tables: list[dict[str, str]] = field(default_factory=list)
+
+    @property
+    def web(self) -> bool:
+        """Веб-вид: любой, кроме `gptool`."""
+        return self.kind != "gptool"
 
 
 @dataclass
 class ProjectFile:
-    """Файл проекта; `revision` — номер изменения файла, с 1."""
+    """Файл проекта; `revision` — номер изменения файла, с 1.
+
+    `catalog_insertion` и `catalog_clients` — только у файлов кастомизации Каталога (1.0).
+    """
 
     id: UUID
     project_id: UUID
@@ -37,6 +50,15 @@ class ProjectFile:
     size_bytes: int
     revision: int
     updated_at: datetime
+    catalog_insertion: str | None = None
+    catalog_clients: list[str] | None = None
+
+    @property
+    def catalog(self) -> dict[str, Any] | None:
+        """`CodeFile.catalog` — `{insertion, clients}` или `None`."""
+        if self.catalog_insertion is None:
+            return None
+        return {"insertion": self.catalog_insertion, "clients": list(self.catalog_clients or [])}
 
 
 @dataclass(frozen=True)
@@ -46,7 +68,7 @@ class Snapshot:
     id: UUID
     project_id: UUID
     reason: SnapshotReason
-    files: list[dict[str, str]]
+    files: list[dict[str, Any]]
     project_revision: int
     accepted_files: int | None
     restored_from: datetime | None
@@ -111,6 +133,7 @@ class CodeLimits:
     file_max_bytes: int
     project_max_bytes: int
     extensions: tuple[str, ...]
+    single_file: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,6 +142,7 @@ class ProjectView:
 
     name: str
     files: list[ProjectFile] = field(default_factory=list)
+    kind: str = "gptool"
 
 
 @dataclass(frozen=True)
@@ -213,6 +237,15 @@ class ImportResult:
             "skipped_total": self.skipped_total,
             "unmatched_packages": self.unmatched_packages,
         }
+
+
+@dataclass(frozen=True)
+class WebAssets:
+    """Шаблоны веб-видов по имени файла и описание `api` (§7.5.16)."""
+
+    templates: dict[str, str]
+    api_types: str
+    api_functions: tuple[str, ...]
 
 
 @dataclass(frozen=True)

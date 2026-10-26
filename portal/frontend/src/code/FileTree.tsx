@@ -5,11 +5,12 @@ import { IconXCircleRegular16 } from '@skbkontur/icons/IconXCircleRegular16';
 import { Button, Input, Kebab, Link, MenuItem, ScrollContainer, SingleToast } from '@skbkontur/react-ui';
 import { Fragment, useId, useMemo, useRef, useState } from 'react';
 
-import type { CodeConfig, CodeFile } from '../api/types';
+import type { CodeConfig, CodeFile, CodeKind } from '../api/types';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { TitleHint } from '../components/TitleHint';
 import { texts } from '../texts';
 import styles from './FileTree.module.css';
+import { kindRules } from './kinds';
 import { buildTree, filePathError, splitPath, type TreeNode } from './rules';
 
 const t = texts.workshop.files;
@@ -37,6 +38,7 @@ interface NameFieldProps {
   initial: string;
   files: readonly CodeFile[];
   config: CodeConfig;
+  kind: CodeKind;
   self?: string;
   level: number;
   /** Ошибка сервера — текст под полем; файл — готово. */
@@ -45,7 +47,7 @@ interface NameFieldProps {
 }
 
 /** Поле имени прямо в дереве: Enter сохраняет, Esc отменяет, потеря фокуса сохраняет (§5.13.5). */
-function NameField({ initial, files, config, self, level, onSave, onDone }: NameFieldProps) {
+function NameField({ initial, files, config, kind, self, level, onSave, onDone }: NameFieldProps) {
   const [value, setValue] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -67,7 +69,7 @@ function NameField({ initial, files, config, self, level, onSave, onDone }: Name
       onDone(null);
       return;
     }
-    const problem = filePathError(path, files, config, self);
+    const problem = filePathError(path, files, config, self, kind);
     if (problem) {
       // Ошибка видна справа от поля; потеря фокуса с ошибкой поле не закрывает — иначе текст пропал бы.
       setError(problem);
@@ -98,7 +100,7 @@ function NameField({ initial, files, config, self, level, onSave, onDone }: Name
         selectAllOnFocus={self !== undefined}
         aria-label={t.label}
         aria-describedby={error ? errorId : undefined}
-        placeholder={t.placeholder}
+        placeholder={kind === 'gptool' ? t.placeholder : texts.workshop.web.files.placeholder}
         className={styles.input}
         error={error !== null}
         disabled={pending}
@@ -131,6 +133,8 @@ function NameField({ initial, files, config, self, level, onSave, onDone }: Name
 interface ProjectFilesProps {
   files: readonly CodeFile[];
   config: CodeConfig;
+  /** Вид проекта (1.0): у однофайловых видов нет «+ Файл» и «Удалить файл» (§5.13.17). */
+  kind?: CodeKind;
   activeFileId: string | null;
   /** Ошибок последней сборки по пути файла. */
   errors: ReadonlyMap<string, number>;
@@ -145,6 +149,8 @@ interface ProjectFilesProps {
 /** «Файлы», «+ Файл» и дерево проекта (концепция §5.13.5). */
 export function ProjectFiles(props: ProjectFilesProps) {
   const { files, config, activeFileId, errors } = props;
+  const kind = props.kind ?? 'gptool';
+  const singleFile = kindRules(config, kind).singleFile;
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [editing, setEditing] = useState<'new' | string | null>(null);
   const [focusKey, setFocusKey] = useState<string | null>(null);
@@ -246,6 +252,7 @@ export function ProjectFiles(props: ProjectFilesProps) {
         initial={self?.path ?? ''}
         files={files}
         config={config}
+        kind={kind}
         self={self?.id}
         level={level}
         onSave={(path) => (self ? props.rename(self.id, path) : props.create(path))}
@@ -266,16 +273,18 @@ export function ProjectFiles(props: ProjectFilesProps) {
     <>
       <div className={styles.head}>
         <h2 className={styles.title}>{t.title}</h2>
-        <Button size="small" icon={<IconPlusRegular16 />} onClick={() => setEditing('new')}>
-          {t.add}
-        </Button>
+        {!singleFile && (
+          <Button size="small" icon={<IconPlusRegular16 />} onClick={() => setEditing('new')}>
+            {t.add}
+          </Button>
+        )}
       </div>
       <div className={styles.scroll}>
         <ScrollContainer>
           {files.length === 0 && editing !== 'new' ? (
             <div className={styles.empty}>
               <p>{t.empty}</p>
-              <Link component="button" onClick={() => setEditing('new')}>{t.addFirst}</Link>
+              {!singleFile && <Link component="button" onClick={() => setEditing('new')}>{t.addFirst}</Link>}
             </div>
           ) : (
             <ul ref={treeRef} role="tree" aria-label={t.title} className={styles.tree}>
@@ -318,7 +327,7 @@ export function ProjectFiles(props: ProjectFilesProps) {
                       <span className={styles.kebab}>
                         <Kebab size="small" aria-label={`${texts.workshop.actions}: ${node.name}`}>
                           <MenuItem onClick={() => setEditing(node.file.id)}>{t.rename}</MenuItem>
-                          <MenuItem onClick={() => setRemoving(node.file)}>{t.remove}</MenuItem>
+                          {!singleFile && <MenuItem onClick={() => setRemoving(node.file)}>{t.remove}</MenuItem>}
                         </Kebab>
                       </span>
                     )}

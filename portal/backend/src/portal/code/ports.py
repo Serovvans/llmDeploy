@@ -351,6 +351,10 @@ class ProjectArchives(Protocol):
         """Проект в папке `<name>/` с `.csproj` и памяткой."""
         ...
 
+    def web_zip(self, files: Sequence[tuple[str, str]], memo: str, moment: datetime) -> bytes:
+        """Выгрузка веб-вида: файлы по путям и `Памятка.txt` (§7.5.16)."""
+        ...
+
     def cogis_archive(
         self,
         name: str,
