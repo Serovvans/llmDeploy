@@ -2,7 +2,7 @@
 
 Self-hosted мультимодальная LLM для сотрудников и приложений компании:
 vLLM (Qwen3.8-27B-FP8) → Bifrost (API-ключи, лимиты) → Caddy (HTTPS), и портал
-сотрудников на той же ВМ: чат, база знаний, SQL-помощник, раздел «Код» (инструменты CoGIS на C#), разбор
+сотрудников на той же ВМ: чат, база знаний, SQL-помощник, раздел «Код» (инструменты CoGIS на C#, JS и HTML; базы заказчика только для чтения), разбор
 документов.
 
 Документы:
@@ -54,7 +54,7 @@ make backup DIR=<каталог вне репозитория>      # резер
 ```
 
 Обновление работающего сервиса до новой версии портала — не повтор этапа, а порядок релиза
-(по шагам: 0.5 — [`docs/release-0.5.md`](docs/release-0.5.md), 0.6 — [`docs/release-0.6.md`](docs/release-0.6.md); пояснения — runbook §4.6): `make release-prepare`, `make release-rehearse`, `make release-backup`,
+(по шагам: 0.5 — [`docs/release-0.5.md`](docs/release-0.5.md), 0.6 — [`docs/release-0.6.md`](docs/release-0.6.md), 1.0 — [`docs/release-1.0.md`](docs/release-1.0.md); пояснения — runbook §4.6): `make release-prepare`, `make release-rehearse`, `make release-backup`,
 `make portal`, при сбое — `make release-rollback`; затем переобработка документов —
 `make portal-reprocess-start` (runbook §3.10).
 
