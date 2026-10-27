@@ -21,6 +21,7 @@ from portal.databases.domain import (
     InventedReason,
     StoredSnapshot,
     copy_plan,
+    exclusion_map,
     quote_ident,
     resolve_table,
     sample_origin,
@@ -141,12 +142,14 @@ class DbCheck:
     """Проверка с подключением (§7.4, «Проверка на образце»).
 
     `title` — название подключения на момент вопроса; `sample_rows` — `db.sample_rows_check`;
-    `source` — `None`, когда выбор недоступен: блоки получают `unavailable`.
+    `source` — `None`, когда выбор недоступен: блоки получают `unavailable`;
+    `max_tables` — `db.sample_max_tables`, таблиц образца в одной проверке блока.
     """
 
     title: str
     sample_rows: int
     source: SampleSource | None
+    max_tables: int
 
 
 @dataclass(frozen=True)
@@ -421,6 +424,7 @@ class SqlTestRunner:
         # Поиск по словарю и учёт повторов множеством: запрос сотрудника может назвать
         # тысячи таблиц, а работа идёт в единственном цикле событий `portal-api`.
         index = table_index(source.connection, source.snapshot)
+        exclusions = exclusion_map(source.connection.sample_exclusions)
         seen: set[tuple[str, str]] = set()
         chosen: list[tuple[Mapping[str, Any], Any]] = []
         for schema_name, name in block.tables:
@@ -432,8 +436,11 @@ class SqlTestRunner:
             if key in seen:
                 continue
             seen.add(key)
-            plan = copy_plan(source.connection, table)
+            plan = copy_plan(source.connection, table, exclusions)
             why = sample_origin(source.connection, table, plan)
+            if why is None and len(chosen) >= db.max_tables:
+                # Пригодных таблиц больше предела (А-149): остальным — придуманные данные.
+                why = "table_limit"
             if why is not None:
                 block.reasons[name] = why
                 continue

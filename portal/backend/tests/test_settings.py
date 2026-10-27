@@ -90,6 +90,16 @@ def test_override_merges_dicts_and_replaces_lists(tmp_path: Path) -> None:
         },
         {"docparse": {"templates": [{"id": "x", "title": "Имя", "fields": [
             {"name": "кириллица", "title": "A"}]}]}},
+        {"db": {"sample_max_tables": 0}},
+        {"db": {"client_timeout_seconds": 10}},
+        {"db": {"lock_timeout_seconds": 20, "statement_timeout_seconds": 5}},
+        {"db": {"access_timeout_seconds": 20}},
+        {"db": {"forbidden_hosts": ["Portal-DB"]}},
+        {"db": {"allowed_internal_hosts": ["customer-db."]}},
+        {"db": {"allowed_internal_hosts": ["portal-db"]}},
+        {"code": {"preview_fix": {"header": "Ошибки {path}:"}}},
+        {"code": {"preview_fix": {"network": "сеть ({what})"}}},
+        {"code": {"preview_fix": {"more": ""}}},
     ],
 )  # fmt: skip
 def test_invalid_configuration_stops_startup(tmp_path: Path, content: dict[str, object]) -> None:

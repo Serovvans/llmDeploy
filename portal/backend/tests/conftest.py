@@ -6,7 +6,7 @@
 
 import base64
 import shutil
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from portal.code.ports import CodeSandbox
 from portal.core.app import create_app
 from portal.core.container import build_container
 from portal.core.settings import Settings, load_settings
+from portal.databases.hosts import IpNetwork
 from portal.databases.ports import CustomerDatabase
 from portal.tools.ports import SqlSandbox
 from tests.kb_support import KbBench, kb_settings, make_bench
@@ -101,6 +102,7 @@ async def make_portal(
     sql_sandbox: SqlSandbox | None = None,
     code_sandbox: CodeSandbox | None = None,
     customer_database: CustomerDatabase | None = None,
+    portal_subnets: Sequence[IpNetwork] = (),
 ) -> Portal:
     """Приложение на чистой базе с подменными часами.
 
@@ -109,7 +111,7 @@ async def make_portal(
     локальный режим для стенда базы знаний. `sql_sandbox` — песочница проверки SQL вместо
     настоящей (нужна при включённом `sql.sandbox.enabled`); `code_sandbox` — песочница
     сборки C# (нужна при включённом `code.build.enabled`); `customer_database` — обращения
-    к базам заказчика (§7.6).
+    к базам заказчика (§7.6); `portal_subnets` — подсети интерфейсов портала (§7.6.5).
     """
     clock = FakeClock(START)
     model = ScriptedModel()
@@ -125,6 +127,7 @@ async def make_portal(
         transcriptions,
         code_sandbox,
         customer_database,
+        portal_subnets,
     )
     shutil.rmtree(settings.files.root, ignore_errors=True)
     async with container.engine.begin() as connection:

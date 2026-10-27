@@ -3,7 +3,15 @@
  * фрейма, придуманный слой, тексты журнала. Сообщения фрейма — недоверенные данные: принимаются только
  * известные типы с полями своих типов, строки обрезаются и показываются только как текст.
  */
-import type { CatalogClient, CatalogPlacement, CodeKind, GeoJsonFeatureCollection } from '../../api/types';
+import {
+  type CatalogClient,
+  type CatalogPlacement,
+  type CodeKind,
+  type GeoJsonFeatureCollection,
+  PREVIEW_ERROR_TYPES,
+  type PreviewErrorType,
+  type PreviewFix,
+} from '../../api/types';
 import { texts } from '../../texts';
 
 const p = texts.workshop.web.pane;
@@ -23,8 +31,36 @@ const cut = (value: string) => value.slice(0, MAX_TEXT);
 const isCount = (value: unknown): value is number | null => value === null || (typeof value === 'number' && Number.isInteger(value) && value >= 0);
 const isLine = (value: unknown): value is number | null => value === null || (typeof value === 'number' && Number.isInteger(value) && value > 0);
 
-/** Сообщение фрейма или `null`, если тип неизвестен или поля не своих типов — такое отбрасывается. */
-export function parseFrameMessage(data: unknown): FrameMessage | null {
+/**
+ * Директивы CSP страницы предпросмотра — закрытый список «Директивы» контракта (§7.5.17, 0.25), один с сервером:
+ * свободное имя, даже по шаблону, было бы каналом для значений строк базы в вопрос помощнику.
+ */
+export const PREVIEW_DIRECTIVES: ReadonlySet<string> = new Set([
+  'default-src',
+  'script-src',
+  'script-src-elem',
+  'script-src-attr',
+  'style-src',
+  'style-src-elem',
+  'style-src-attr',
+  'img-src',
+  'font-src',
+  'connect-src',
+  'media-src',
+  'object-src',
+  'frame-src',
+  'worker-src',
+  'manifest-src',
+  'form-action',
+  'base-uri',
+]);
+
+/**
+ * Сообщение фрейма или `null`, если тип неизвестен или поля не своих типов — такое отбрасывается. Сверх типов
+ * (§7.5.17, 0.25): `file` ошибки — `null` или точно путь файла из `init` (`paths`), `directive` запрета — из
+ * закрытого списка; иначе сообщение подделал код проекта и оно отбрасывается целиком.
+ */
+export function parseFrameMessage(data: unknown, paths: ReadonlySet<string>): FrameMessage | null {
   if (!isObject(data)) {
     return null;
   }
@@ -40,17 +76,17 @@ export function parseFrameMessage(data: unknown): FrameMessage | null {
     }
     case 'error': {
       const { file, line, column, message } = data;
-      if ((file !== null && typeof file !== 'string') || !isLine(line) || !isLine(column) || typeof message !== 'string') {
+      if ((file !== null && (typeof file !== 'string' || !paths.has(file))) || !isLine(line) || !isLine(column) || typeof message !== 'string') {
         return null;
       }
-      return { type: 'error', file: file === null ? null : cut(file), line, column, message: cut(message) };
+      return { type: 'error', file, line, column, message: cut(message) };
     }
     case 'blocked': {
       const { url, directive } = data;
-      if (typeof url !== 'string' || typeof directive !== 'string') {
+      if (typeof url !== 'string' || typeof directive !== 'string' || !PREVIEW_DIRECTIVES.has(directive)) {
         return null;
       }
-      return { type: 'blocked', url: cut(url), directive: cut(directive) };
+      return { type: 'blocked', url: cut(url), directive };
     }
     default:
       return null;
@@ -143,7 +179,7 @@ export function appendMessage(log: PreviewLog, message: FrameMessage, limits: { 
     message.type === 'error'
       ? { kind: 'error', file: message.file, line: message.line, column: message.column, text: message.message, directive: null }
       : {
-          kind: message.directive.startsWith('img-src') ? 'image' : 'network',
+          kind: message.directive === 'img-src' ? 'image' : 'network',
           file: null,
           line: null,
           column: null,
@@ -153,26 +189,44 @@ export function appendMessage(log: PreviewLog, message: FrameMessage, limits: { 
   return { ...log, problems: [...log.problems, problem] };
 }
 
-/** Тип ошибки браузера из её текста («Uncaught TypeError: …» → `TypeError`); не распознан — `Error`. */
-export function errorName(text: string): string {
-  return /^(?:Uncaught (?:\(in promise\) )?)?([A-Za-z_$][\w$]*(?:Error|Exception))\b/.exec(text)?.[1] ?? 'Error';
+const ERROR_TYPES: ReadonlySet<string> = new Set(PREVIEW_ERROR_TYPES);
+
+/**
+ * Тип ошибки браузера из начала её текста («Uncaught TypeError: …» → `TypeError`). Имя вне закрытого списка
+ * контракта — `Error`: свободное имя было бы каналом для значений строк базы (§7.5.16).
+ */
+export function errorName(text: string): PreviewErrorType {
+  const name = /^(?:Uncaught (?:\(in promise\) )?)?([A-Za-z_$][\w$]*)\b/.exec(text)?.[1] ?? '';
+  return ERROR_TYPES.has(name) ? (name as PreviewErrorType) : 'Error';
 }
 
 /**
- * Строки вопроса «Исправить с помощником» по ошибкам предпросмотра (§5.13.20). Слой из образца базы
- * заказчика — только файл, строка, тип ошибки и директива запрета: текст ошибки и адрес могут нести
- * значения строк базы, а вопрос уходит модели и в историю (ПД §5.8, §8.6).
+ * Тело `preview_fix` вопроса «Исправить с помощником» по ошибкам предпросмотра (§7.5.16, концепция §5.13.20):
+ * записи в порядке вкладки «Ошибки», без запретов картинок. `layer` — источник слоя, который интерфейс сам
+ * передал во фрейм; при слое из образца текста ошибки и адреса нет — в них могут быть значения строк базы.
  */
-export function previewFixItems(problems: readonly PreviewProblem[], fromSample: boolean): { path: string | null; line: number | null; message: string }[] {
-  const pane = texts.workshop.web.pane;
-  return problems
-    .filter((problem) => problem.kind !== 'image')
-    .map((problem) => {
-      if (problem.kind === 'network') {
-        return { path: problem.file, line: problem.line, message: fromSample ? pane.networkDirective(problem.directive ?? '') : pane.network(problem.text) };
-      }
-      return { path: problem.file, line: problem.line, message: fromSample ? errorName(problem.text) : problem.text };
-    });
+export function previewFix(problems: readonly PreviewProblem[], layer: PreviewFix['layer']): PreviewFix {
+  const invented = layer === 'invented';
+  return {
+    layer,
+    problems: problems
+      .filter((problem) => problem.kind !== 'image')
+      .map((problem) => {
+        if (problem.kind === 'network') {
+          const directive = problem.directive ?? '';
+          // Пустой адрес контракт не принимает (`text` — 1…2000): тогда вместо него — имя директивы.
+          return { kind: 'network', path: null, line: null, directive, ...(invented ? { text: problem.text || directive } : {}) };
+        }
+        const type = errorName(problem.text);
+        return {
+          kind: 'error',
+          path: problem.file,
+          line: problem.file ? problem.line : null,
+          type,
+          ...(invented ? { text: problem.text || type } : {}),
+        };
+      }),
+  };
 }
 
 /** Ошибки кода — то, что считается на вкладке и на станции; запрет картинки ошибкой не считается (§5.13.21). */

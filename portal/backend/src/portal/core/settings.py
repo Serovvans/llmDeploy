@@ -679,6 +679,36 @@ class CodePreviewSettings(_Section):
     errors_max: int = Field(ge=1)
 
 
+class CodePreviewFixTexts(_Section):
+    """Текст вопроса «Исправить с помощником» по ошибкам предпросмотра (§7.5.16, §13.6)."""
+
+    header: str = Field(min_length=1)
+    header_sample: str = Field(min_length=1)
+    item: str = Field(min_length=1)
+    item_no_line: str = Field(min_length=1)
+    item_no_place: str = Field(min_length=1)
+    network: str = Field(min_length=1)
+    more: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_placeholders(self) -> Self:
+        """Подстановки только свои: у заголовков их нет (§13.6)."""
+        allowed = {
+            "header": set(),
+            "header_sample": set(),
+            "item": {"path", "line", "what"},
+            "item_no_line": {"path", "what"},
+            "item_no_place": {"what"},
+            "network": {"target"},
+            "more": {"n"},
+        }
+        for name, own in allowed.items():
+            used = set(re.findall(r"\{([^{}]*)\}", getattr(self, name)))
+            if used - own:
+                raise ValueError(f"code.preview_fix.{name}: чужие подстановки {sorted(used - own)}")
+        return self
+
+
 class CodeSettings(_Section):
     """Раздел «Код» (docs/portal-api.md §7.5, §13.6)."""
 
@@ -708,6 +738,7 @@ class CodeSettings(_Section):
     web_dir: Path
     web_memos: CodeWebMemos
     preview: CodePreviewSettings
+    preview_fix: CodePreviewFixTexts
 
     def package(self, package_id: str) -> CodePackage | None:
         """Пакет набора по `id` без учёта регистра."""
@@ -772,6 +803,44 @@ class DbSettings(_Section):
     snapshot_max_columns: int = Field(ge=1)
     comment_max_chars: int = Field(ge=1)
     max_selected_tables: int = Field(ge=1)
+    sample_max_tables: int = Field(ge=1)
+    client_timeout_seconds: float = Field(gt=0)
+    access_timeout_seconds: float = Field(gt=0)
+    forbidden_hosts: tuple[str, ...]
+    allowed_internal_hosts: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _check_timeouts(self) -> Self:
+        """Сроки портала длиннее пределов сервера и соединения (§7.6.5, §13.6)."""
+        if self.client_timeout_seconds <= max(
+            self.statement_timeout_seconds, self.lock_timeout_seconds
+        ):
+            raise ValueError(
+                "db.client_timeout_seconds должен быть больше db.statement_timeout_seconds "
+                "и db.lock_timeout_seconds"
+            )
+        if (
+            self.access_timeout_seconds
+            <= self.connect_timeout_seconds + self.client_timeout_seconds
+        ):
+            raise ValueError(
+                "db.access_timeout_seconds должен быть больше суммы "
+                "db.connect_timeout_seconds и db.client_timeout_seconds"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_hosts(self) -> Self:
+        """Имена в нижнем регистре без точки в конце; списки не пересекаются (§13.6)."""
+        for name in (*self.forbidden_hosts, *self.allowed_internal_hosts):
+            if not name or name != name.lower() or name.endswith("."):
+                raise ValueError(
+                    "db.forbidden_hosts и db.allowed_internal_hosts: имена в нижнем регистре "
+                    "без точки в конце"
+                )
+        if set(self.forbidden_hosts) & set(self.allowed_internal_hosts):
+            raise ValueError("db.forbidden_hosts и db.allowed_internal_hosts пересекаются")
+        return self
 
     @field_validator("application_name")
     @classmethod

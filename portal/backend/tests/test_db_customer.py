@@ -2,11 +2,14 @@
 
 Роли с разными правами создаёт фикстура в тестовом сервере (`CLAUDE.md`, пайплайн «Код»,
 правило 21); PostGIS здесь нет — геометрия проверяется на стенде
-(`portal/dev/stand/test_customer_db.py`).
+(`portal/dev/stand/test_customer_db.py`). Тестовый сервер слушает только сокет: имя
+подключения разрешается подменой в адрес из TEST-NET, а соединение на этот адрес ведётся
+в сокет (§13.3) — проверка адреса при этом не обходится.
 """
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -15,6 +18,7 @@ import pytest
 
 from portal.core.settings import DbSettings, Settings
 from portal.databases.customer import AsyncpgCustomerDatabase, sandbox_type
+from portal.databases.hosts import HostPolicy
 from portal.databases.ports import (
     DbRightsExcessError,
     DbTarget,
@@ -69,7 +73,74 @@ ROLES: dict[str, tuple[str, str | None]] = {
         "write",
     ),
     "definer": ("GRANT EXECUTE ON FUNCTION shop.recalc() TO {r}", None),
+    "grant_table": ("GRANT SELECT ON shop.items TO {r} WITH GRANT OPTION", "grant_option"),
+    "grant_column": ("GRANT SELECT (name) ON shop.items TO {r} WITH GRANT OPTION", "grant_option"),
+    "grant_schema": ("GRANT USAGE ON SCHEMA shop TO {r} WITH GRANT OPTION", "grant_option"),
+    "grant_group": (
+        "ALTER ROLE {r} NOINHERIT; CREATE ROLE {r}_g NOLOGIN;"
+        " GRANT SELECT ON shop.items TO {r}_g WITH GRANT OPTION; GRANT {r}_g TO {r}",
+        "grant_option",
+    ),
+    "admin_direct": (
+        "CREATE ROLE {r}_g NOLOGIN; GRANT {r}_g TO {r} WITH ADMIN OPTION",
+        "admin_option",
+    ),
+    "admin_group": (
+        "CREATE ROLE {r}_g1 NOLOGIN; CREATE ROLE {r}_g2 NOLOGIN;"
+        " GRANT {r}_g2 TO {r}_g1 WITH ADMIN OPTION; GRANT {r}_g1 TO {r}",
+        "admin_option",
+    ),
+    "alter_system": ("GRANT ALTER SYSTEM ON PARAMETER work_mem TO {r}", "server_settings"),
+    # log_statement — параметр уровня суперпользователя.
+    "set_parameter": ("GRANT SET ON PARAMETER log_statement TO {r}", "server_settings"),
+    "set_group": (
+        "CREATE ROLE {r}_g NOLOGIN; GRANT SET ON PARAMETER log_min_duration_statement TO {r}_g;"
+        " GRANT {r}_g TO {r}",
+        "server_settings",
+    ),
+    # `lower(text)` открыта `PUBLIC` изначально — выданное ей не находка (запрос 11).
+    "files": (
+        "GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO {r};"
+        " GRANT EXECUTE ON FUNCTION pg_catalog.lower(text) TO {r}",
+        "catalog_function",
+    ),
+    "files_group": (
+        "CREATE ROLE {r}_g NOLOGIN;"
+        " GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO {r}_g; GRANT {r}_g TO {r}",
+        "catalog_function",
+    ),
+    "lower": ("GRANT EXECUTE ON FUNCTION pg_catalog.lower(text) TO {r}", None),
+    # `pg_ls_logdir()` открыт `pg_monitor` при `initdb`, а саму роль разрешает запрос 5.
+    "monitor": ("GRANT pg_monitor TO {r}", None),
+    "monitor_direct": (
+        "GRANT pg_monitor TO {r}; GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_logdir() TO {r}",
+        "catalog_function",
+    ),
+    "lo_update": (
+        "DO $$ BEGIN EXECUTE pg_catalog.format("
+        "'GRANT UPDATE ON LARGE OBJECT %s TO {r}', pg_catalog.lo_create(0)); END $$",
+        "large_object",
+    ),
+    "lo_select": (
+        "DO $$ BEGIN EXECUTE pg_catalog.format("
+        "'GRANT SELECT ON LARGE OBJECT %s TO {r}', pg_catalog.lo_create(0)); END $$",
+        None,
+    ),
+    "lo_compat": ("ALTER ROLE {r} SET lo_compat_privileges = on", "lo_compat_privileges"),
 }
+# Объекты находок запросов 11–13 (`total` — 1).
+FILE_OBJECTS = {
+    "files": ("catalog_function", ("EXECUTE",), [("function", "lo_export(oid,text)")]),
+    "files_group": ("catalog_function", ("EXECUTE",), [("function", "lo_export(oid,text)")]),
+    "lo_compat": ("lo_compat_privileges", (), [("parameter", "lo_compat_privileges")]),
+}
+# Права на параметр у находки `server_settings`.
+PARAMETER_PRIVILEGES = {
+    "alter_system": ("ALTER SYSTEM",),
+    "set_parameter": ("SET",),
+    "set_group": ("SET",),
+}
+ADDRESS = "192.0.2.10"
 
 
 def _role(name: str) -> str:
@@ -111,16 +182,47 @@ async def prepared(settings: Settings) -> AsyncIterator[None]:
     yield
 
 
+@pytest.fixture(autouse=True)
+def socket_route(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Соединение на проверенный адрес `ADDRESS` ведётся в сокет тестового сервера.
+
+    Соединения фикстур (сразу в сокет) проходят как есть.
+    """
+    connect = asyncpg.connect
+    hosts: list[str] = []
+
+    async def routed(*args: Any, host: str, **kwargs: Any) -> Any:
+        hosts.append(host)
+        return await connect(
+            *args, host=settings.database.host if host == ADDRESS else host, **kwargs
+        )
+
+    monkeypatch.setattr(asyncpg, "connect", routed)
+    return hosts
+
+
+async def _resolve(host: str, port: int) -> list[str]:
+    return [ADDRESS]
+
+
 def _target(settings: Settings, role: str) -> DbTarget:
     db = settings.database
     return DbTarget(
-        uuid4(), db.host, db.port, DATABASE, role, "unused", "disable", ("shop", "public")
+        uuid4(),
+        "db.customer.test",
+        db.port,
+        DATABASE,
+        role,
+        "unused",
+        "disable",
+        ("shop", "public"),
     )
 
 
 def _adapter(settings: Settings, **update: Any) -> AsyncpgCustomerDatabase:
     config: DbSettings = settings.db.model_copy(update={"enabled": True, **update})
-    return AsyncpgCustomerDatabase(config)
+    policy = HostPolicy.of(config.forbidden_hosts, config.allowed_internal_hosts, ())
+    return AsyncpgCustomerDatabase(config, policy, _resolve)
 
 
 @pytest.mark.parametrize("name", list(ROLES))
@@ -132,8 +234,154 @@ async def test_rights_of_each_role(settings: Settings, prepared: None, name: str
         assert kinds == []
     else:
         assert expected in kinds
+    if name in PARAMETER_PRIVILEGES:
+        (found,) = [item for item in report.findings if item.kind == "server_settings"]
+        assert found.privileges == PARAMETER_PRIVILEGES[name]
+        assert all(kind == "parameter" for kind, _ in found.objects)
+    if name in FILE_OBJECTS:
+        kind, privileges, objects = FILE_OBJECTS[name]
+        (found,) = [item for item in report.findings if item.kind == kind]
+        assert (found.privileges, list(found.objects), found.total) == (privileges, objects, 1)
+    if name == "lo_update":
+        (found,) = [item for item in report.findings if item.kind == "large_object"]
+        assert found.privileges == ("UPDATE",)
+        assert [kind for kind, _ in found.objects] == ["large object"]
     definers = [name for item in report.warnings for _, name in item.objects]
     assert definers == (["shop.recalc"] if name == "definer" else [])
+
+
+async def test_parameter_right_of_public_is_found_for_every_role(
+    settings: Settings, prepared: None
+) -> None:
+    admin = await _admin(settings, DATABASE)
+    try:
+        await admin.execute("GRANT SET ON PARAMETER log_temp_files TO PUBLIC")
+        report = await _adapter(settings).check(_target(settings, _role("reader")))
+    finally:
+        await admin.execute("REVOKE SET ON PARAMETER log_temp_files FROM PUBLIC")
+        await admin.close()
+    (found,) = [item for item in report.findings if item.kind == "server_settings"]
+    assert (found.privileges, found.objects) == (("SET",), (("parameter", "log_temp_files"),))
+
+
+@pytest.mark.parametrize(
+    ("grant", "revoke", "kind"),
+    [
+        (
+            "GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO PUBLIC",
+            "REVOKE EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) FROM PUBLIC",
+            "catalog_function",
+        ),
+        (
+            "GRANT UPDATE ON LARGE OBJECT {oid} TO PUBLIC",
+            "REVOKE UPDATE ON LARGE OBJECT {oid} FROM PUBLIC",
+            "large_object",
+        ),
+    ],
+)
+async def test_file_rights_of_public_are_found_for_every_role(
+    settings: Settings, prepared: None, grant: str, revoke: str, kind: str
+) -> None:
+    """Выданное `PUBLIC` есть у любой роли — находка и у роли только с `SELECT` (§7.6.6)."""
+    admin = await _admin(settings, DATABASE)
+    try:
+        oid = await admin.fetchval("SELECT pg_catalog.lo_create(0)")
+        await admin.execute(grant.format(oid=oid))
+        report = await _adapter(settings).check(_target(settings, _role("reader")))
+    finally:
+        await admin.execute(revoke.format(oid=oid))
+        await admin.execute("SELECT pg_catalog.lo_unlink($1)", oid)
+        await admin.close()
+    assert [item.kind for item in report.findings] == [kind]
+
+
+# Как функции расширений (`dblink_connect_u`, `pg_surgery`): закрыта для `PUBLIC` скриптом
+# расширения — начальные права записаны в `pg_init_privs` (запрос 11, решение 44).
+EXTENSION_CONTROL = "default_version = '1.0'\nrelocatable = false\nschema = public\n"
+EXTENSION_SCRIPT = """
+CREATE FUNCTION @extschema@.ext_danger() RETURNS int LANGUAGE sql AS 'SELECT 1';
+REVOKE EXECUTE ON FUNCTION @extschema@.ext_danger() FROM PUBLIC;
+"""
+
+
+async def test_function_closed_by_extension_is_found_in_any_schema(
+    settings: Settings, prepared: None, tmp_path: Path
+) -> None:
+    """`EXECUTE` на функцию расширения в `public`, закрытую при `CREATE EXTENSION`, — находка
+    с именем со схемой; своя функция с отозванным у `PUBLIC` правом — не находка (§7.6.6)."""
+    admin = await _admin(settings, DATABASE)
+    try:
+        if await admin.fetchval("SELECT current_setting('server_version_num')::int") < 180000:
+            pytest.skip("extension_control_path есть только в PostgreSQL 18+")
+        folder = tmp_path / "extension"
+        folder.mkdir()
+        (folder / "probe_closed.control").write_text(EXTENSION_CONTROL)
+        (folder / "probe_closed--1.0.sql").write_text(EXTENSION_SCRIPT)
+        await admin.execute(f"SET extension_control_path = '{tmp_path}:$system'")
+        await admin.execute("CREATE EXTENSION probe_closed")
+        await admin.execute(
+            "CREATE FUNCTION public.own_closed() RETURNS int LANGUAGE sql AS 'SELECT 1';"
+            " REVOKE EXECUTE ON FUNCTION public.own_closed() FROM PUBLIC;"
+            " GRANT EXECUTE ON FUNCTION public.own_closed() TO cust_reader"
+        )
+        clean = await _adapter(settings).check(_target(settings, _role("reader")))
+        await admin.execute("GRANT EXECUTE ON FUNCTION public.ext_danger() TO cust_reader")
+        report = await _adapter(settings).check(_target(settings, _role("reader")))
+    finally:
+        await admin.execute("DROP EXTENSION IF EXISTS probe_closed")
+        await admin.execute("DROP FUNCTION IF EXISTS public.own_closed()")
+        await admin.close()
+    assert clean.findings == []
+    (found,) = report.findings
+    assert (found.kind, found.objects) == (
+        "catalog_function",
+        (("function", "public.ext_danger()"),),
+    )
+
+
+async def test_maintain_is_found_on_postgresql_17(settings: Settings, prepared: None) -> None:
+    admin = await _admin(settings, DATABASE)
+    try:
+        if await admin.fetchval("SELECT current_setting('server_version_num')::int") < 170000:
+            pytest.skip("MAINTAIN есть только в PostgreSQL 17+ (проверить на ВМ)")
+        await admin.execute("GRANT MAINTAIN ON shop.items TO cust_reader")
+        report = await _adapter(settings).check(_target(settings, _role("reader")))
+    finally:
+        await admin.execute("REVOKE ALL ON shop.items FROM cust_reader")
+        await admin.execute("GRANT SELECT ON shop.items TO cust_reader")
+        await admin.close()
+    assert [item.kind for item in report.findings] == ["maintain"]
+
+
+class _OldServer:
+    """Соединение с сервером PostgreSQL 14: запоминает операторы, каталоги пусты."""
+
+    def __init__(self, version: int) -> None:
+        self.version = version
+        self.statements: list[str] = []
+
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        self.statements.append(query)
+        return self.version if "server_version_num" in query else False
+
+    async def fetch(self, query: str, *args: Any) -> list[Any]:
+        self.statements.append(query)
+        return []
+
+
+@pytest.mark.parametrize(("version", "sent"), [(140000, False), (150000, True)])
+async def test_parameter_catalog_only_from_postgresql_15(
+    settings: Settings, version: int, sent: bool
+) -> None:
+    """На PostgreSQL ≤ 14 нет `pg_parameter_acl`: запрос 10 не идёт, у запроса 8 нет ветви."""
+    connection = _OldServer(version)
+    report = await _adapter(settings)._rights(connection)
+    assert report.findings == []
+    with_catalog = [query for query in connection.statements if "pg_parameter_acl" in query]
+    grant_option = [query for query in connection.statements if "is_grantable" in query]
+    assert len(grant_option) == 1
+    assert ("pg_parameter_acl" in grant_option[0]) is sent
+    assert len(with_catalog) == (2 if sent else 0)
 
 
 async def test_definer_warning_does_not_block_reading(settings: Settings, prepared: None) -> None:
@@ -202,6 +450,122 @@ async def test_slow_read_times_out_and_closes_the_connection(
                 await asyncio.sleep(0.05)
     finally:
         await admin.close()
+
+
+class _Proxy:
+    """TCP-посредник к сокету тестового сервера: вход проходит, ответы на запросы — нет.
+
+    `delay is None` — сервер «молчит»: ответы после входа теряются. Иначе первый ответ на
+    каждую операцию задерживается на `delay` секунд — сервер отвечает, но медленно.
+    """
+
+    def __init__(self, path: str, delay: float | None) -> None:
+        self.path = path
+        self.delay = delay
+        self.port = 0
+        self._server: asyncio.Server | None = None
+
+    async def __aenter__(self) -> "_Proxy":
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        assert self._server is not None
+        self._server.close()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        upstream_reader, upstream_writer = await asyncio.open_unix_connection(self.path)
+        asked = asyncio.Event()
+        sent = 0
+
+        async def to_server() -> None:
+            nonlocal sent
+            while chunk := await reader.read(65536):
+                sent += 1
+                if sent > 1:
+                    asked.set()
+                upstream_writer.write(chunk)
+            upstream_writer.close()
+
+        async def to_client() -> None:
+            while chunk := await upstream_reader.read(65536):
+                if sent > 1:
+                    if self.delay is None:
+                        continue
+                    if asked.is_set():
+                        asked.clear()
+                        await asyncio.sleep(self.delay)
+                writer.write(chunk)
+            writer.close()
+
+        tasks = [asyncio.create_task(to_server()), asyncio.create_task(to_client())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            upstream_writer.close()
+            writer.close()
+
+
+async def _sessions_gone(settings: Settings, role: str) -> None:
+    admin = await _admin(settings)
+    try:
+        async with asyncio.timeout(5):
+            while await admin.fetchval(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename = $1", role
+            ):
+                await asyncio.sleep(0.05)
+    finally:
+        await admin.close()
+
+
+# Задержка 0.2 с на каждый ответ: вызов asyncpg с подготовкой — два обмена, 0.4 < 0.5 с.
+@pytest.mark.parametrize(("delay", "ends_by"), [(None, "client"), (0.2, "access")])
+async def test_server_that_stops_answering_is_cut_off_by_portal_timeouts(
+    settings: Settings,
+    prepared: None,
+    monkeypatch: pytest.MonkeyPatch,
+    delay: float | None,
+    ends_by: str,
+) -> None:
+    """Сервер принял соединение и запрос и молчит (или отвечает чуть быстрее срока на
+    операцию): обращение кончается сроком портала с `timeout`, соединение разорвано,
+    место `host:port` свободно (§7.6.5, «Сроки на стороне портала»)."""
+    timeouts = {"client": 0.5, "access": 1.5}
+    adapter = _adapter(
+        settings,
+        client_timeout_seconds=timeouts["client"],
+        access_timeout_seconds=timeouts["access"],
+        max_connections_per_server=1,
+        wait_seconds=0.2,
+    )
+    target = _target(settings, _role("reader"))
+    db = settings.database
+    routed = asyncpg.connect
+    proxied = True
+
+    async def through_proxy(*args: Any, host: str, port: int, **kwargs: Any) -> Any:
+        if proxied and host == ADDRESS:
+            host, port = "127.0.0.1", proxy.port
+        return await routed(*args, host=host, port=port, **kwargs)
+
+    monkeypatch.setattr(asyncpg, "connect", through_proxy)
+    async with _Proxy(f"{db.host}/.s.PGSQL.{db.port}", delay) as proxy:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(DbUnavailableError) as raised:
+            await adapter.check(target)
+        elapsed = loop.time() - started
+        assert raised.value.reason == "timeout"
+        if ends_by == "client":
+            assert timeouts["client"] <= elapsed < timeouts["access"]
+        else:
+            assert timeouts["access"] <= elapsed < timeouts["access"] + timeouts["client"]
+        await _sessions_gone(settings, _role("reader"))
+    proxied = False
+    assert (await adapter.check(target)).findings == []
 
 
 async def test_third_access_to_one_server_waits_then_is_busy(

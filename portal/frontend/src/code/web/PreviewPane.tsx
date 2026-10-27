@@ -8,7 +8,7 @@ import { Button, Hint, Link, Loader, MenuItem, Select, Spinner, Tabs } from '@sk
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api, isApiError } from '../../api/client';
-import type { CatalogClient, ClientLibraryFile, CodeFile, CodeProject, CodeWeb, DbConfig, PreviewLayerSample } from '../../api/types';
+import type { CatalogClient, ClientLibraryFile, CodeFile, CodeProject, CodeWeb, DbConfig, PreviewFix, PreviewLayerSample } from '../../api/types';
 import { Notice } from '../../components/Notice';
 import { dbRefusal } from '../../db/refusal';
 import { texts } from '../../texts';
@@ -77,8 +77,8 @@ interface Props {
   expanded: boolean;
   onExpand: (expanded: boolean) => void;
   onRun: (files: CodeFile[]) => void;
-  /** `fromSample` — слой запуска взят из образца базы заказчика (вопрос помощнику без текста ошибок). */
-  onProblems: (problems: PreviewProblem[], fromSample: boolean) => void;
+  /** `layer` — источник слоя этого запуска, как он передан во фрейм (у слоя из образца вопрос помощнику без текста ошибок). */
+  onProblems: (problems: PreviewProblem[], layer: PreviewFix['layer']) => void;
   onJump: (path: string, line: number, column: number) => void;
   /** Предпросмотр или подключения выключили, пока колонка открыта. */
   onFeatureOff: () => void;
@@ -159,6 +159,9 @@ export function PreviewPane(props: Props) {
   const [sample, setSample] = useState<PreviewLayerSample | null>(null);
   const [sampleLoading, setSampleLoading] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
+  // Образец уже загружается у сотрудника (429 `db_sample_in_progress`): таблица остаётся выбранной.
+  const [sampleBusy, setSampleBusy] = useState(false);
+  const [runLayer, setRunLayer] = useState<PreviewFix['layer']>('invented');
   const [samplesAllowed, setSamplesAllowed] = useState<boolean | null>(null);
   const [ran, setRan] = useState(false);
   const frame = useRef<HTMLIFrameElement>(null);
@@ -211,6 +214,7 @@ export function PreviewPane(props: Props) {
   const sampleFor = useCallback(async (projectId: string, table: string, fresh: boolean): Promise<PreviewLayerSample | null | undefined> => {
     const key = `${projectId}:${table}`;
     setRefusal(null);
+    setSampleBusy(false);
     const cached = fresh ? undefined : sampleCache.get(key);
     if (cached) {
       setSample(cached);
@@ -229,11 +233,16 @@ export function PreviewPane(props: Props) {
         latest.current.onFeatureOff();
         return undefined;
       }
+      setSample(null);
+      sampleRef.current = null;
+      if (isApiError(error, 'db_sample_in_progress')) {
+        // Предпросмотр идёт на придуманных объектах; запрос интерфейс сам не повторяет (§5.13.21).
+        setSampleBusy(true);
+        return null;
+      }
       setRefusal(dbRefusal(error) ?? texts.common.actionFailed);
       setLayerTable(null);
       storePreviewLayer(projectId, null);
-      setSample(null);
-      sampleRef.current = null;
       return null;
     } finally {
       setSampleLoading(false);
@@ -247,9 +256,12 @@ export function PreviewPane(props: Props) {
   const run = useCallback(
     async (load?: { table: string; fresh: boolean }) => {
       const current = latest.current;
+      // The previous frame's `init` must not reach the next one, and its messages are not taken any more.
+      sent.current = false;
+      init.current = null;
       setStatus('loading');
       setLog(EMPTY_LOG);
-      current.onProblems([], false);
+      current.onProblems([], 'invented');
       setFrameKey(null);
       const files = await current.prepare();
       if (!files) {
@@ -290,8 +302,8 @@ export function PreviewPane(props: Props) {
         api_functions: current.web?.api_functions ?? [],
         limits: current.limits,
       };
+      setRunLayer(init.current.layer.source);
       loads.current = 0;
-      sent.current = false;
       setRan(true);
       current.onRun(files);
       setFrameKey((key) => (key ?? 0) + 1);
@@ -306,7 +318,7 @@ export function PreviewPane(props: Props) {
       if (!target || event.source !== target) {
         return;
       }
-      const message = parseFrameMessage(event.data);
+      const message = parseFrameMessage(event.data, new Set(init.current?.files.map((file) => file.path)));
       if (!message) {
         return;
       }
@@ -318,6 +330,10 @@ export function PreviewPane(props: Props) {
         }
         return;
       }
+      // До отправки `init` этому фрейму от него принимается только `ready` (§7.5.17).
+      if (!sent.current) {
+        return;
+      }
       setLog((current) => appendMessage(current, message, latest.current.limits));
     };
     window.addEventListener('message', listener);
@@ -327,8 +343,8 @@ export function PreviewPane(props: Props) {
   // Ошибки — в строку «Путь до CoGIS» и в вопрос «Исправить с помощником».
   const { onProblems } = props;
   useEffect(() => {
-    onProblems(log.problems, init.current?.layer.source === 'sample');
-  }, [log.problems, onProblems]);
+    onProblems(log.problems, runLayer);
+  }, [log.problems, runLayer, onProblems]);
 
   useEffect(() => {
     if (status !== 'loading' || frameKey === null) {
@@ -361,6 +377,7 @@ export function PreviewPane(props: Props) {
       setSample(null);
       sampleRef.current = null;
       setRefusal(null);
+      setSampleBusy(false);
       void run();
     }
   };
@@ -538,6 +555,14 @@ export function PreviewPane(props: Props) {
           {refusal}
         </p>
       )}
+      {sampleBusy && layerTable && (
+        <p className={styles.refusal} role="alert">
+          {p.sampleBusy}{' '}
+          <Link component="button" onClick={() => void run({ table: layerTable, fresh: true })}>
+            {p.reloadSample}
+          </Link>
+        </p>
+      )}
       <Notice kind="info">
         {sample ? p.notCogisSample : p.notCogis}{' '}
         <Link component="button" aria-expanded={more} onClick={() => setMore(!more)}>
@@ -564,7 +589,7 @@ export function PreviewPane(props: Props) {
             logContent
           ) : (
             <>
-              <p className={styles.note}>{p.errorsNote}</p>
+              <p className={styles.note}>{runLayer === 'sample' ? p.errorsNoteSample : p.errorsNote}</p>
               {log.problems.length === 0 ? (
                 <p className={styles.note}>{p.errorsEmpty}</p>
               ) : (

@@ -176,15 +176,16 @@ def test_prompts_name_untrusted_blocks_as_data() -> None:
 
 def test_system_message_fits_budget() -> None:
     """The longest system message stays within its share of the budget."""
-    # §7.5.9 reckons ~3000 estimated tokens for the whole system message; ~1000 of them are
-    # left to the knowledge-base and head rules.
+    # §7.5.9 reckons ~3000 estimated tokens for the whole system message. Besides these
+    # prompts it only gets the head rule (~100 tokens); knowledge-base fragments and their
+    # answer scenario go in the user message. ~700 tokens stay as a margin.
     prompts = CODE.prompts
     longest = max(
         len(getattr(prompts.system, action)) + len(prompts.gptool_rules) + len(prompts.edit_format)
         for action in ("write", "fix")
     )
     notices = len(prompts.no_sdk_notice) + len(prompts.no_documentation_notice)
-    assert (longest + notices) / SETTINGS.llm.chars_per_token <= 2000
+    assert (longest + notices) / SETTINGS.llm.chars_per_token <= 2300
 
 
 def test_shares_count_groups_and_total() -> None:

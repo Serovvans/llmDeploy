@@ -101,6 +101,10 @@ CREATE ROLE portal_writeall LOGIN PASSWORD :'customer_password';
 CREATE ROLE portal_super LOGIN SUPERUSER PASSWORD :'customer_password';
 CREATE ROLE portal_setrole LOGIN NOINHERIT PASSWORD :'customer_password';
 CREATE ROLE portal_definer LOGIN PASSWORD :'customer_password';
+CREATE ROLE portal_grantor LOGIN PASSWORD :'customer_password';
+CREATE ROLE portal_admin LOGIN PASSWORD :'customer_password';
+CREATE ROLE portal_settings LOGIN PASSWORD :'customer_password';
+CREATE ROLE portal_files LOGIN PASSWORD :'customer_password';
 
 -- У всех ролей входа — чтение обеих схем.
 DO $$
@@ -109,7 +113,8 @@ DECLARE
 BEGIN
     FOREACH role_name IN ARRAY ARRAY[
         'portal_reader', 'portal_writer', 'portal_owner', 'portal_writeall',
-        'portal_super', 'portal_setrole', 'portal_definer'
+        'portal_super', 'portal_setrole', 'portal_definer', 'portal_grantor',
+        'portal_admin', 'portal_settings', 'portal_files'
     ] LOOP
         EXECUTE format('GRANT CONNECT ON DATABASE cadastre TO %I', role_name);
         EXECUTE format('GRANT USAGE ON SCHEMA cadastre, public TO %I', role_name);
@@ -129,3 +134,16 @@ GRANT UPDATE ON cadastre.parcels TO app_rw;
 GRANT app_rw TO portal_setrole;
 
 GRANT EXECUTE ON FUNCTION cadastre.recalc_area() TO portal_definer;
+
+-- Права передавать права и менять настройки сервера (§7.6.6, запросы 8–10).
+GRANT SELECT ON cadastre.parcels TO portal_grantor WITH GRANT OPTION;
+
+CREATE ROLE app_ro NOLOGIN;
+GRANT USAGE ON SCHEMA cadastre TO app_ro;
+GRANT SELECT ON cadastre.parcels TO app_ro;
+GRANT app_ro TO portal_admin WITH ADMIN OPTION;
+
+GRANT ALTER SYSTEM ON PARAMETER work_mem TO portal_settings;
+
+-- Запись файлов на сервере базы (§13.5): закрытая функция pg_catalog, выданная роли.
+GRANT EXECUTE ON FUNCTION pg_catalog.lo_export(oid, text) TO portal_files;

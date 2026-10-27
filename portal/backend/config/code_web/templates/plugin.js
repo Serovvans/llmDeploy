@@ -3,6 +3,7 @@
 // и сообщает, сколько объектов нашлось.
 
 // Замените на свои: адрес сервиса карты и номер слоя в нём.
+// Номер слоя может измениться при правке проекта, если в проекте QGIS у слоя не задана переменная elitegis_layer_id.
 var serviceUrl = "https://cogis.example/arcgis/rest/services/Parcels/MapServer";
 var layerId = 0;
 

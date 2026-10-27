@@ -172,7 +172,7 @@ function changedFields(next: DbConnectionInput, saved: AdminDbConnection): Parti
 }
 
 /** Ошибки сервера по полям (контракт §7.6.2) — на тексты под полями. */
-function serverErrors(error: unknown, values: Values): Errors | null {
+export function serverErrors(error: unknown, values: Values): Errors | null {
   if (isApiError(error, 'db_connection_title_taken')) {
     return { title: e.titleTaken };
   }
@@ -186,7 +186,7 @@ function serverErrors(error: unknown, values: Values): Errors | null {
     } else if (field === 'description') {
       errors.description = e.descriptionLong;
     } else if (field === 'host') {
-      errors.host = e.host;
+      errors.host = code === 'host_forbidden' ? e.hostForbidden : e.host;
     } else if (field === 'port') {
       errors.port = e.port;
     } else if (field === 'database') {

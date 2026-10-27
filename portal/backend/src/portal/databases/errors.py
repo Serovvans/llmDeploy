@@ -72,3 +72,8 @@ def samples_not_allowed() -> AppError:
 def schema_required() -> AppError:
     """У проекта нет схемы и выбора подключения (§7.5.18)."""
     return AppError(422, "schema_required", "Выберите схему базы в настройках проекта.")
+
+
+def sample_in_progress() -> AppError:
+    """У сотрудника уже идёт загрузка слоя предпросмотра из образца (§7.5.18)."""
+    return AppError(429, "db_sample_in_progress", "Образец уже загружается. Дождитесь окончания.")

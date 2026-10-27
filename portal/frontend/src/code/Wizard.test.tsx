@@ -24,7 +24,7 @@ describe('раздел «Код»: мастер «Новый GPTool»', () => {
     });
     renderApp('/code/new');
     const user = userEvent.setup();
-    const add = await screen.findByRole('button', { name: tw.addInput }, { timeout: 5000 });
+    const add = await screen.findByRole('button', { name: tw.addInput });
 
     await user.click(add);
     expect(nameInput(1)).toHaveFocus();

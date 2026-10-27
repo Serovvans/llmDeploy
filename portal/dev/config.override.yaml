@@ -39,3 +39,8 @@ code:
   # сборки на настоящих DLL.
   build:
     enabled: true
+
+db:
+  # customer-db стоит во внутренней сети стенда, в которую входит portal-api, — в подсети
+  # портала (docs/portal-api.md §7.6.5, шаг 2; §13.5). На ВМ список пуст.
+  allowed_internal_hosts: ["customer-db"]

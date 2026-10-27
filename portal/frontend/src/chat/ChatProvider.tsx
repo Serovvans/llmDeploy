@@ -15,6 +15,7 @@ import type {
   MemoryMode,
   Message,
   PortalConfig,
+  PreviewFix,
   QuestionParams,
 } from '../api/types';
 import { errorText, texts } from '../texts';
@@ -34,6 +35,7 @@ import {
   INITIAL_STATE,
   isTranscribing,
   newDialogKey,
+  type ChatAction,
   type ChatState,
   type Draft,
   type DraftAttachment,
@@ -85,11 +87,36 @@ type OnRefused = (error: unknown) => boolean;
 
 /**
  * Вопрос, текст которого строит интерфейс (помощник проекта, концепция §5.13.10): `content` уходит вместо
- * текста поля, поле не трогается; `codeTarget` — фрагмент для показа у вопроса в ленте.
+ * текста поля, поле не трогается; `codeTarget` — фрагмент для показа у вопроса в ленте. `previewFix` — вместо
+ * текста: его собирает сервер (контракт §7.5.16), лента берёт сохранённый текст после события `start`.
  */
 export interface SendOptions {
   content?: string;
   codeTarget?: CodeTarget | null;
+  previewFix?: PreviewFix;
+}
+
+/**
+ * Поток вопроса `preview_fix` как есть; после `start` (вопрос сохранён) лента берёт его текст с сервера: его
+ * собрал сервер, а показать нужно таким, каким он ушёл помощнику (концепция §5.13.20). Не прочитался —
+ * вопрос остаётся без текста до следующего чтения ленты.
+ */
+async function* withSavedQuestion(id: string, events: AsyncGenerator<StreamEvent>, dispatch: (action: ChatAction) => void) {
+  for await (const event of events) {
+    yield event;
+    if (event.type === 'start') {
+      const messageId = event.user_message_id;
+      api.listMessages(id, null).then(
+        (page) => {
+          const saved = page.items.find((message) => message.id === messageId);
+          if (saved) {
+            dispatch({ type: 'questionSaved', id, messageId, content: saved.content });
+          }
+        },
+        () => undefined,
+      );
+    }
+  }
 }
 
 const NEW_PREFIX = 'new:';
@@ -695,8 +722,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
     ) => {
       const fieldDraft = stateRef.current.drafts[key] ?? EMPTY_DRAFT;
       // Текст, построенный интерфейсом, уходит вместо поля: поле и его вложения остаются как были.
-      const built = options?.content !== undefined;
-      const draft = built ? { ...EMPTY_DRAFT, text: options.content ?? '' } : fieldDraft;
+      const previewFix = options?.previewFix;
+      const built = options?.content !== undefined || previewFix !== undefined;
+      const draft = built ? { ...EMPTY_DRAFT, text: options?.content ?? '' } : fieldDraft;
       // Вложения, режим ответа и база знаний — только у чата (контракт §5.3).
       const isChat = 'mode' in params;
       const composer = texts.chat.composer;
@@ -712,7 +740,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
         refusal = composer.mediaFailed;
       } else if (draft.attachments.some(isTranscribing)) {
         refusal = composer.transcribing;
-      } else if (!draft.text.trim() && ready.length === 0) {
+      } else if (!previewFix && !draft.text.trim() && ready.length === 0) {
         refusal = composer.enterQuestion;
       } else if (config && draft.text.length > config.dialogs.message_max_chars) {
         refusal = composer.messageTooLong(config.dialogs.message_max_chars);
@@ -755,12 +783,17 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
           if (!built) {
             updateDraft(id, () => EMPTY_DRAFT);
           }
-          const body = { content, ...params, ...(isChat ? { attachment_ids: ready.map((a) => a.id) } : {}) };
+          const body = {
+            ...(previewFix ? { preview_fix: previewFix } : { content }),
+            ...params,
+            ...(isChat ? { attachment_ids: ready.map((a) => a.id) } : {}),
+          };
           void runStream(
             kind,
             id,
-            (signal) => api.sendMessage(id, body, signal),
-            content,
+            (signal) => (previewFix ? withSavedQuestion(id, api.sendMessage(id, body, signal), dispatch) : api.sendMessage(id, body, signal)),
+            // Текста вопроса `preview_fix` интерфейс не знает: при обрыве лента показывается как на сервере.
+            previewFix ? null : content,
             () => {
               // Вопрос и вложения возвращаются в панель запроса; построенный интерфейсом — нет: его не набирали.
               dispatch({ type: 'generationRejected', id, messages: before });

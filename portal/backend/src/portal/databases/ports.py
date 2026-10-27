@@ -30,6 +30,7 @@ DbReason = Literal[
     "tls_required",
     "busy",
     "schemas_unavailable",
+    "host_forbidden",
     "other",
 ]
 
@@ -70,7 +71,7 @@ class SampleRows:
 
 @dataclass(frozen=True)
 class RightsReport:
-    """Итог запросов §7.6.6: находки 1–5 (непусто — `excess`) и предупреждения 6."""
+    """Итог запросов §7.6.6: находки 1–5 и 7–10 (непусто — `excess`), предупреждения 6."""
 
     findings: Sequence[RightsFinding]
     warnings: Sequence[RightsFinding]

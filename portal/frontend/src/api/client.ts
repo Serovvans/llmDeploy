@@ -38,6 +38,7 @@ import type {
   FieldError,
   Page,
   PortalConfig,
+  PreviewFix,
   PreviewLayerSample,
   Role,
   SecondFactorConfirmResult,
@@ -412,8 +413,11 @@ export const api = {
   /** «Отменить сжатие» (контракт §5.10.6). */
   deleteSummary: (id: string) => request<undefined>('DELETE', `/api/dialogs/${id}/memory/summary`),
 
-  /** Вопрос в диалоге любого вида: `content` и параметры этого вида (контракт §5.3). */
-  sendMessage: (id: string, body: { content: string } & Record<string, unknown>, signal: AbortSignal) =>
+  /**
+   * Вопрос в диалоге любого вида: `content` и параметры этого вида (контракт §5.3); у «Исправить с помощником»
+   * по ошибкам предпросмотра вместо `content` — `preview_fix` (§7.5.16).
+   */
+  sendMessage: (id: string, body: ({ content: string } | { preview_fix: PreviewFix }) & Record<string, unknown>, signal: AbortSignal) =>
     stream(`/api/dialogs/${id}/messages`, { json: body }, signal),
 
   /** `body` — только для `sql`: `{ schema_id }` взамен удалённой схемы вопроса (контракт §5.6). */

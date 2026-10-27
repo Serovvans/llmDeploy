@@ -8,9 +8,11 @@
 """
 
 import asyncio
+import ipaddress
 import re
+import socket
 import ssl
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,8 @@ from typing import Any
 import asyncpg
 
 from portal.core.settings import DbSettings
-from portal.databases.domain import RightsFinding, finding
+from portal.databases.domain import FINDING_KINDS, RightsFinding, finding
+from portal.databases.hosts import HostPolicy
 from portal.databases.ports import (
     DbReason,
     DbRightsExcessError,
@@ -122,6 +125,142 @@ ORDER BY name
 LIMIT 3
 """  # noqa: E501
 )
+_VERSION = "SELECT pg_catalog.current_setting('server_version_num')::pg_catalog.int4"
+# С этой версии есть `pg_parameter_acl` — права на параметры сервера (§7.6.6, запросы 8, 10).
+_PARAMETER_ACL_VERSION = 150000
+# Запрос 7: по спискам прав, а не `has_table_privilege` — на PostgreSQL ≤ 16 права
+# `MAINTAIN` нет, функция с ним дала бы ошибку, а сравнение строки — нет.
+_MAINTAIN = (
+    _ROLES
+    + """
+SELECT c.relkind, pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname) AS name,
+       count(*) OVER () AS total
+FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(c.relacl) AS a
+              WHERE a.privilege_type = 'MAINTAIN'
+                AND (a.grantee = 0::pg_catalog.oid OR a.grantee IN (SELECT oid FROM r)))
+ORDER BY name
+LIMIT 3
+"""  # noqa: E501
+)
+# Запрос 8: ветви по каталогам со списками прав — (класс, таблица, oid, столбец прав).
+_GRANTABLE_CATALOGS = (
+    ("pg_namespace", "pg_namespace", "oid", "nspacl"),
+    ("pg_proc", "pg_proc", "oid", "proacl"),
+    ("pg_type", "pg_type", "oid", "typacl"),
+    ("pg_language", "pg_language", "oid", "lanacl"),
+    ("pg_foreign_data_wrapper", "pg_foreign_data_wrapper", "oid", "fdwacl"),
+    ("pg_foreign_server", "pg_foreign_server", "oid", "srvacl"),
+    ("pg_largeobject", "pg_largeobject_metadata", "oid", "lomacl"),
+    ("pg_database", "pg_database", "oid", "datacl"),
+    ("pg_tablespace", "pg_tablespace", "oid", "spcacl"),
+)
+_PARAMETER_CATALOG = ("pg_parameter_acl", "pg_parameter_acl", "oid", "paracl")
+
+
+def _grant_option_query(parameters: bool) -> str:
+    """Запрос 8 одного из двух постоянных видов: с ветвью `pg_parameter_acl` или без."""
+    branches = [
+        "SELECT 'pg_catalog.pg_class'::pg_catalog.regclass AS classid, c.oid AS objid,"
+        " 0 AS objsubid, a.privilege_type\n"
+        "FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a\n"
+        "WHERE a.is_grantable AND a.grantee IN (SELECT oid FROM r)",
+        "SELECT 'pg_catalog.pg_class'::pg_catalog.regclass, t.attrelid, t.attnum,"
+        " a.privilege_type\n"
+        "FROM pg_catalog.pg_attribute t CROSS JOIN LATERAL pg_catalog.aclexplode(t.attacl) AS a\n"
+        "WHERE t.attacl IS NOT NULL AND a.is_grantable AND a.grantee IN (SELECT oid FROM r)",
+    ]
+    catalogs = _GRANTABLE_CATALOGS + ((_PARAMETER_CATALOG,) if parameters else ())
+    for klass, table, key, acl in catalogs:
+        branches.append(
+            f"SELECT 'pg_catalog.{klass}'::pg_catalog.regclass, x.{key}, 0, a.privilege_type\n"
+            f"FROM pg_catalog.{table} x CROSS JOIN LATERAL pg_catalog.aclexplode(x.{acl}) AS a\n"
+            "WHERE a.is_grantable AND a.grantee IN (SELECT oid FROM r)"
+        )
+    union = "\n  UNION ALL\n".join(branches)
+    return (
+        _ROLES
+        + f""", g AS (
+{union}
+)
+SELECT o.type, o.identity AS name,
+       pg_catalog.array_agg(DISTINCT g.privilege_type ORDER BY g.privilege_type) AS privileges,
+       count(*) OVER () AS total
+FROM g CROSS JOIN LATERAL pg_catalog.pg_identify_object(g.classid, g.objid, g.objsubid) AS o
+GROUP BY o.type, o.identity
+ORDER BY o.identity
+LIMIT 3
+"""
+    )
+
+
+_GRANT_OPTION = {True: _grant_option_query(True), False: _grant_option_query(False)}
+# Запрос 9: прямо по `pg_auth_members` — `admin_option` есть во всех версиях.
+_ADMIN_OPTION = (
+    _ROLES
+    + """
+SELECT DISTINCT g.rolname
+FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles g ON g.oid = m.roleid
+WHERE m.admin_option AND m.member IN (SELECT oid FROM r)
+ORDER BY g.rolname
+"""
+)
+# Запрос 10: только на PostgreSQL 15+ — раньше каталога `pg_parameter_acl` нет.
+_SERVER_SETTINGS = (
+    _ROLES
+    + """
+SELECT p.parname AS name,
+       pg_catalog.array_agg(DISTINCT a.privilege_type ORDER BY a.privilege_type) AS privileges,
+       count(*) OVER () AS total
+FROM pg_catalog.pg_parameter_acl p CROSS JOIN LATERAL pg_catalog.aclexplode(p.paracl) AS a
+WHERE a.privilege_type IN ('ALTER SYSTEM', 'SET')
+  AND (a.grantee = 0::pg_catalog.oid OR a.grantee IN (SELECT oid FROM r))
+GROUP BY p.parname
+ORDER BY p.parname
+LIMIT 3
+"""
+)
+# Запрос 11 (А-153, решение 44): `EXECUTE` на функцию любой схемы, закрытую для `PUBLIC`
+# начальными правами (`pg_init_privs` от `initdb` и `CREATE EXTENSION`, нет строки —
+# `acldefault`), выданный роли из `R` или `PUBLIC` сверх начального списка. Штатного списка
+# функций нет — он разошёлся бы с версиями. `search_path` обращения — `pg_catalog`, поэтому
+# `regprocedure` пишет имя вне `pg_catalog` со схемой (`public.dblink_connect_u(text)`).
+_CATALOG_FUNCTION = (
+    _ROLES
+    + """
+SELECT p.oid::pg_catalog.regprocedure::pg_catalog.text AS name, count(*) OVER () AS total
+FROM pg_catalog.pg_proc p
+LEFT JOIN pg_catalog.pg_init_privs i
+  ON i.objoid = p.oid AND i.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND i.objsubid = 0
+CROSS JOIN LATERAL (SELECT COALESCE(i.initprivs, pg_catalog.acldefault('f', p.proowner)) AS init,
+                           COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner)) AS cur) AS d
+WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(d.init) AS b
+                  WHERE b.privilege_type = 'EXECUTE' AND b.grantee = 0::pg_catalog.oid)
+  AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(d.cur) AS a
+              WHERE a.privilege_type = 'EXECUTE'
+                AND (a.grantee = 0::pg_catalog.oid OR a.grantee IN (SELECT oid FROM r))
+                AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(d.init) AS b
+                                WHERE b.privilege_type = 'EXECUTE' AND b.grantee = a.grantee))
+ORDER BY name
+LIMIT 3
+"""
+)
+# Запрос 12: по умолчанию `UPDATE` на большой объект только у владельца (его ловит запрос 2).
+_LARGE_OBJECT = (
+    _ROLES
+    + """
+SELECT l.oid::pg_catalog.text AS name, count(*) OVER () AS total
+FROM pg_catalog.pg_largeobject_metadata l
+WHERE EXISTS (SELECT 1 FROM pg_catalog.aclexplode(l.lomacl) AS a
+              WHERE a.privilege_type = 'UPDATE'
+                AND (a.grantee = 0::pg_catalog.oid OR a.grantee IN (SELECT oid FROM r)))
+ORDER BY l.oid
+LIMIT 3
+"""
+)
+# Запрос 13: значение в сеансе обращения, с учётом `ALTER ROLE … SET` и `ALTER DATABASE … SET`.
+_LO_COMPAT = "SELECT pg_catalog.current_setting('lo_compat_privileges')::pg_catalog.bool"
 _LIMITS = (
     "SELECT pg_catalog.set_config('statement_timeout', $1, true),"
     " pg_catalog.set_config('lock_timeout', $2, true),"
@@ -293,50 +432,107 @@ def column_types(row: Any, postgis: str | None) -> tuple[str, dict[str, Any] | N
     return type_text, None, _TEXT, False
 
 
+Resolver = Callable[[str, int], Awaitable[Sequence[str]]]
+
+
+async def resolve_host(host: str, port: int) -> list[str]:
+    """Адреса имени для TCP — один `getaddrinfo`; адрес как есть — он сам (§7.6.5, шаг 2)."""
+    found = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return [str(sockaddr[0]) for *_, sockaddr in found]
+
+
+class NamedTlsContext(ssl.SSLContext):
+    """TLS-контекст, который проверяет сертификат по введённому имени, а не по адресу.
+
+    asyncpg берёт имя для TLS из `host`, а соединение идёт на проверенный адрес (DNS
+    rebinding): имя подставляется здесь, при создании TLS-объекта соединения.
+    """
+
+    server_name: str = ""
+
+    def wrap_bio(
+        self,
+        incoming: ssl.MemoryBIO,
+        outgoing: ssl.MemoryBIO,
+        server_side: bool = False,
+        server_hostname: str | bytes | None = None,
+        session: ssl.SSLSession | None = None,
+    ) -> ssl.SSLObject:
+        """TLS-объект с именем `server_name` вместо адреса."""
+        return super().wrap_bio(
+            incoming, outgoing, server_side, self.server_name or server_hostname, session
+        )
+
+
 class AsyncpgCustomerDatabase:
     """Обращения к базам заказчика; места по `host:port` — в памяти процесса."""
 
-    def __init__(self, settings: DbSettings) -> None:
-        """Запомнить параметры; соединений до первого обращения нет."""
+    def __init__(
+        self, settings: DbSettings, policy: HostPolicy, resolve: Resolver = resolve_host
+    ) -> None:
+        """Запомнить параметры; соединений до первого обращения нет.
+
+        `policy` — запрет внутренних адресов портала, `resolve` — разрешение имени
+        (§7.6.5, шаг 2); тесты подменяют их, а не обходят проверку.
+        """
         self._settings = settings
+        self._policy = policy
+        self._resolve = resolve
         self._places: dict[tuple[str, int], asyncio.Semaphore] = {}
 
     def _ssl(self, target: DbTarget) -> ssl.SSLContext | bool:
+        """TLS по режиму; имя для проверки сертификата — введённое, а не адрес."""
         if target.tls_mode == "disable":
             return False
+        context = NamedTlsContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.server_name = target.host
         if target.tls_mode == "verify":
-            return ssl.create_default_context(cafile=str(self._settings.tls_root_cert_file))
-        context = ssl.create_default_context()
+            context.load_verify_locations(cafile=str(self._settings.tls_root_cert_file))
+            return context
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         return context
 
-    @asynccontextmanager
-    async def _access(self, target: DbTarget) -> AsyncIterator[Any]:
-        """Место, соединение, транзакция только для чтения; в конце — откат и закрытие."""
+    async def _addresses(self, target: DbTarget) -> list[str]:
+        """Имя разрешается один раз; хоть один адрес запрещён — `host_forbidden` (шаг 2)."""
+        if self._policy.name_forbidden(target.host):
+            raise DbUnavailableError("host_forbidden")
+        addresses = list(dict.fromkeys(await self._resolve(target.host, target.port)))
+        if not addresses:
+            raise DbUnavailableError("unreachable")
+        for address in addresses:
+            try:
+                parsed = ipaddress.ip_address(address)
+            except ValueError:
+                raise DbUnavailableError("host_forbidden") from None
+            if self._policy.address_forbidden(parsed, target.host):
+                raise DbUnavailableError("host_forbidden")
+        return addresses
+
+    async def _connect(self, target: DbTarget, tls: ssl.SSLContext | bool) -> Any:
+        """Соединение только на проверенные адреса, по порядку до первого удачного.
+
+        Разрешение имени и попытки соединения — в пределах `db.connect_timeout_seconds`.
+        """
         settings = self._settings
-        place = self._places.setdefault(
-            (target.host, target.port), asyncio.Semaphore(settings.max_connections_per_server)
-        )
-        try:
-            async with asyncio.timeout(settings.wait_seconds):
-                await place.acquire()
-        except TimeoutError:
-            raise DbUnavailableError("busy") from None
-        connection: Any = None
-        try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + settings.connect_timeout_seconds
+        async with asyncio.timeout_at(deadline):
+            addresses = await self._addresses(target)
+        failure: OSError = OSError("no address accepted the connection")
+        for address in addresses:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
             try:
-                tls = self._ssl(target)
-            except (OSError, ssl.SSLError):
-                raise DbUnavailableError("tls_failed") from None
-            try:
-                connection = await asyncpg.connect(
-                    host=target.host,
+                return await asyncpg.connect(
+                    host=address,
                     port=target.port,
                     user=target.username,
                     password=target.password,
                     database=target.database,
-                    timeout=settings.connect_timeout_seconds,
+                    timeout=remaining,
+                    command_timeout=settings.client_timeout_seconds,
                     ssl=tls,
                     statement_cache_size=0,
                     server_settings={
@@ -350,22 +546,62 @@ class AsyncpgCustomerDatabase:
                         "default_transaction_read_only": "on",
                     },
                 )
-                await connection.transaction(isolation="repeatable_read", readonly=True).start()
-                await connection.fetchrow(
-                    _LIMITS,
-                    _seconds(settings.statement_timeout_seconds),
-                    _seconds(settings.lock_timeout_seconds),
-                    _seconds(settings.idle_in_transaction_timeout_seconds),
-                )
-                yield connection
+            except ssl.SSLError:
+                raise
+            except OSError as error:
+                # Адрес не принял соединение — следующий проверенный адрес того же имени.
+                failure = error
+        raise failure
+
+    @asynccontextmanager
+    async def _access(self, target: DbTarget) -> AsyncIterator[Any]:
+        """Место, адрес и соединение, транзакция только для чтения; в конце — откат и закрытие.
+
+        Шаги 2–5 — в пределах `db.access_timeout_seconds`, каждая операция — в пределах
+        `db.client_timeout_seconds` (`command_timeout`). Срок истёк — соединение рвётся без
+        `ROLLBACK`, причина `timeout`; место освобождается в том же `finally` (§7.6.5).
+        """
+        settings = self._settings
+        place = self._places.setdefault(
+            (target.host, target.port), asyncio.Semaphore(settings.max_connections_per_server)
+        )
+        try:
+            async with asyncio.timeout(settings.wait_seconds):
+                await place.acquire()
+        except TimeoutError:
+            raise DbUnavailableError("busy") from None
+        connection: Any = None
+        expired = False
+        try:
+            try:
+                tls = self._ssl(target)
+            except (OSError, ssl.SSLError):
+                raise DbUnavailableError("tls_failed") from None
+            try:
+                async with asyncio.timeout(settings.access_timeout_seconds):
+                    connection = await self._connect(target, tls)
+                    await connection.transaction(isolation="repeatable_read", readonly=True).start()
+                    await connection.fetchrow(
+                        _LIMITS,
+                        _seconds(settings.statement_timeout_seconds),
+                        _seconds(settings.lock_timeout_seconds),
+                        _seconds(settings.idle_in_transaction_timeout_seconds),
+                    )
+                    yield connection
             except (DbRightsExcessError, DbUnavailableError):
                 raise
-            except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError) as error:
+            except TimeoutError:
+                expired = True
+                raise DbUnavailableError("timeout") from None
+            except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError) as error:
                 raise DbUnavailableError(_reason(error)) from None
         finally:
             try:
                 if connection is not None:
-                    await self._close(connection)
+                    if expired:
+                        connection.terminate()
+                    else:
+                        await self._close(connection)
             finally:
                 place.release()
 
@@ -383,7 +619,12 @@ class AsyncpgCustomerDatabase:
             raise
 
     async def _rights(self, connection: Any) -> RightsReport:
-        """Запросы 1–6 §7.6.6 подряд в транзакции обращения."""
+        """Запросы 1–13 §7.6.6 подряд в транзакции обращения; первым — версия сервера.
+
+        Находки — по видам в порядке таблицы §7.6.1. Запрос 8 — с ветвью
+        `pg_parameter_acl`, а запрос 10 отправляется только на PostgreSQL 15+.
+        """
+        parameters = await connection.fetchval(_VERSION) >= _PARAMETER_ACL_VERSION
         findings: list[RightsFinding] = []
         attributes = await connection.fetch(_ATTRIBUTES)
         for kind, column in zip(_ATTRIBUTE_KINDS, _ATTRIBUTE_COLUMNS, strict=True):
@@ -432,7 +673,85 @@ class AsyncpgCustomerDatabase:
                     definers[0]["total"],
                 )
             )
+        maintained = await connection.fetch(_MAINTAIN)
+        if maintained:
+            findings.append(
+                RightsFinding(
+                    "maintain",
+                    ("MAINTAIN",),
+                    tuple(
+                        (_RELATION_TYPES[_char(row["relkind"])], row["name"]) for row in maintained
+                    ),
+                    maintained[0]["total"],
+                )
+            )
+        findings.extend(await self._acl_findings(connection, parameters))
+        findings.extend(await self._file_findings(connection))
+        findings.sort(key=lambda item: FINDING_KINDS.index(item.kind))
         return RightsReport(findings, warnings)
+
+    @staticmethod
+    async def _acl_findings(connection: Any, parameters: bool) -> list[RightsFinding]:
+        """Запросы 8–10: права с передачей, членство с передачей, права на параметры."""
+        findings: list[RightsFinding] = []
+        grantable = await connection.fetch(_GRANT_OPTION[parameters])
+        if grantable:
+            findings.append(
+                RightsFinding(
+                    "grant_option",
+                    tuple(sorted({item for row in grantable for item in row["privileges"]})),
+                    tuple((row["type"], row["name"]) for row in grantable),
+                    grantable[0]["total"],
+                )
+            )
+        admin = await connection.fetch(_ADMIN_OPTION)
+        if admin:
+            findings.append(finding("admin_option", [("role", row["rolname"]) for row in admin]))
+        if parameters:
+            settings = await connection.fetch(_SERVER_SETTINGS)
+            if settings:
+                granted = {item for row in settings for item in row["privileges"]}
+                findings.append(
+                    RightsFinding(
+                        "server_settings",
+                        tuple(item for item in ("ALTER SYSTEM", "SET") if item in granted),
+                        tuple(("parameter", row["name"]) for row in settings),
+                        settings[0]["total"],
+                    )
+                )
+        return findings
+
+    @staticmethod
+    async def _file_findings(connection: Any) -> list[RightsFinding]:
+        """Запросы 11–13: закрытые функции, запись в большие объекты (§7.6.6)."""
+        findings: list[RightsFinding] = []
+        functions = await connection.fetch(_CATALOG_FUNCTION)
+        if functions:
+            findings.append(
+                RightsFinding(
+                    "catalog_function",
+                    ("EXECUTE",),
+                    tuple(("function", row["name"]) for row in functions),
+                    functions[0]["total"],
+                )
+            )
+        objects = await connection.fetch(_LARGE_OBJECT)
+        if objects:
+            findings.append(
+                RightsFinding(
+                    "large_object",
+                    ("UPDATE",),
+                    tuple(("large object", row["name"]) for row in objects),
+                    objects[0]["total"],
+                )
+            )
+        if await connection.fetchval(_LO_COMPAT):
+            findings.append(
+                RightsFinding(
+                    "lo_compat_privileges", (), (("parameter", "lo_compat_privileges"),), 1
+                )
+            )
+        return findings
 
     async def _checked(self, connection: Any) -> RightsReport:
         report = await self._rights(connection)
@@ -495,7 +814,11 @@ class AsyncpgCustomerDatabase:
                 read: list[list[str | None]] = []
                 shapes: list[str | None] = []
                 async for record in connection.cursor(
-                    query, rows, settings.value_max_bytes, prefetch=1
+                    query,
+                    rows,
+                    settings.value_max_bytes,
+                    prefetch=1,
+                    timeout=settings.client_timeout_seconds,
                 ):
                     values = list(record.values())
                     size += sum(len(value.encode()) for value in values if value is not None)

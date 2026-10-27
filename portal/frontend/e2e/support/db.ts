@@ -22,8 +22,12 @@ export interface Exclusion {
   column: string | null;
 }
 
-/** Накладка `portal-api` с включёнными подключениями; раздел `code:` — как в накладке стенда. */
-export const DB_ON_YAML = 'db:\n  enabled: true\n';
+/**
+ * Накладка `portal-api` с включёнными подключениями; раздел `code:` — как в накладке стенда. Раздел `db:`
+ * заменяется целиком, поэтому исключение стенда для `customer-db` (§13.5) повторено здесь: без него
+ * адрес из внутренней сети портала — `host_forbidden` (§7.6.5).
+ */
+export const DB_ON_YAML = 'db:\n  enabled: true\n  allowed_internal_hosts: ["customer-db"]\n';
 
 /** Создаёт подключение к `customer-db` под ролью `username` и возвращает ответ целиком. */
 export async function createConnection(

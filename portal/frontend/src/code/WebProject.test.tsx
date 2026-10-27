@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { CodeProject, CodeWeb, PortalConfig } from '../api/types';
-import { CONFIG, mockApi, ok, session } from '../test/mockApi';
+import { CONFIG, fail, mockApi, ok, session } from '../test/mockApi';
 import { renderApp } from '../test/renderApp';
 import { texts } from '../texts';
 
@@ -82,7 +82,7 @@ function setup(handlers: Parameters<typeof mockApi>[0] = {}) {
 }
 
 async function opened(): Promise<void> {
-  await screen.findByRole('heading', { level: 1, name: 'Фильтр участков' }, { timeout: 5000 });
+  await screen.findByRole('heading', { level: 1, name: 'Фильтр участков' });
 }
 
 describe('раздел «Код» 1.0: предпросмотр', () => {
@@ -99,6 +99,10 @@ describe('раздел «Код» 1.0: предпросмотр', () => {
 
     const target = frame.contentWindow as Window;
     const post = vi.spyOn(target, 'postMessage');
+    // До отправки `init` от фрейма принимается только «ready» (§7.5.17).
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'log', fn: 'early', args: [], known: true, count: null }, source: target }));
+    });
     // Чужое окно: «ready» не принимается, код не уходит.
     act(() => {
       window.dispatchEvent(new MessageEvent('message', { data: { type: 'ready' }, source: window }));
@@ -126,7 +130,79 @@ describe('раздел «Код» 1.0: предпросмотр', () => {
       window.dispatchEvent(new MessageEvent('message', { data: { type: 'html', html: '<b>x</b>' }, source: target }));
     });
     expect(await screen.findByText(/<img src=x>/)).toBeInTheDocument();
+    expect(screen.queryByText(/api\.early/)).toBeNull();
     expect(document.querySelector('#preview-pane img, #preview-pane b')).toBeNull();
+  });
+});
+
+describe('раздел «Код» 1.0: слой предпросмотра из образца (0.25)', () => {
+  const p = w.web.pane;
+  const WITH_DB = project({ db: { connection_id: 'c-1', title: 'Кадастр (рабочая)', tables: [{ schema: 'cadastre', name: 'parcels' }], available: true } });
+
+  /** Открывает предпросмотр с запомненной таблицей слоя и отвечает фрейму на `ready`; возвращает отправленный `init`. */
+  async function runWithTable(user: ReturnType<typeof userEvent.setup>) {
+    await opened();
+    await user.click(screen.getByRole('button', { name: w.web.preview }));
+    const frame = (await screen.findByTitle(/widget\.html/)) as HTMLIFrameElement;
+    const target = frame.contentWindow as Window;
+    const post = vi.spyOn(target, 'postMessage');
+    await waitFor(() => {
+      act(() => {
+        window.dispatchEvent(new MessageEvent('message', { data: { type: 'ready' }, source: target }));
+      });
+      expect(post).toHaveBeenCalledTimes(1);
+    });
+    return { target, init: post.mock.calls[0]?.[0] as { layer: { source: string } } };
+  }
+
+  it.each(['light', 'dark'] as const)('образец уже загружается — отказ под списком, таблица выбрана, слой придуманный (тема %s)', async (theme) => {
+    window.localStorage.setItem('portal.theme', theme);
+    window.localStorage.setItem('portal.codePreviewLayer.p-1', 'cadastre.parcels');
+    const { server, user } = setup({
+      [`GET /api/code/projects/${ID}`]: () => ok(WITH_DB),
+      [`GET /api/code/projects/${ID}/preview-layer`]: () => fail(429, 'db_sample_in_progress'),
+    });
+    const { init } = await runWithTable(user);
+    expect(init.layer.source).toBe('invented');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(p.sampleBusy);
+    expect(screen.getByRole('button', { name: p.layer })).toHaveTextContent('cadastre.parcels');
+    const layerCalls = () => server.calls.filter((call) => call.path.endsWith('/preview-layer')).length;
+    expect(layerCalls()).toBe(1);
+
+    await user.click(within(alert).getByRole('button', { name: p.reloadSample }));
+    await waitFor(() => expect(layerCalls()).toBe(2));
+  });
+
+  it('запуск со слоем из образца: пояснение над ошибками; подделанные сообщения фрейма отброшены', async () => {
+    window.localStorage.setItem('portal.codePreviewLayer.p-1', 'cadastre.parcels');
+    const { user } = setup({
+      [`GET /api/code/projects/${ID}`]: () => ok(WITH_DB),
+      [`GET /api/code/projects/${ID}/preview-layer`]: () =>
+        ok({
+          connection_title: 'Кадастр (рабочая)',
+          schema: 'cadastre',
+          table: 'parcels',
+          rows: 1,
+          truncated: false,
+          excluded_columns: 0,
+          geometry: null,
+          features: { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: null, properties: { id: '1' } }] },
+        }),
+    });
+    const { target, init } = await runWithTable(user);
+    expect(init.layer.source).toBe('sample');
+
+    act(() => {
+      const send = (data: unknown) => window.dispatchEvent(new MessageEvent('message', { data, source: target }));
+      send({ type: 'error', file: 'widget.html', line: 1, column: 1, message: 'Uncaught TypeError: Иванов' });
+      send({ type: 'error', file: 'Иванов.js', line: 1, column: 1, message: 'Uncaught TypeError: x' });
+      send({ type: 'blocked', url: 'https://x.example', directive: 'connect-src Иванов' });
+    });
+    await user.click(screen.getByText(p.tabs.errors(1)));
+    expect(screen.getByText(p.errorsNoteSample)).toBeInTheDocument();
+    expect(screen.queryByText(/Иванов\.js|x\.example/)).toBeNull();
   });
 });
 

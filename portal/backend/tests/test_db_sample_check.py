@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from portal.core.settings import Settings, SqlSandboxSettings
+from portal.databases.domain import snapshot_body
 from portal.databases.ports import DbUnavailableError, SampleRequest, SampleRows
 from portal.llm.ports import ContentDelta, Finished
 from portal.tools.ports import SandboxQueryError, SandboxRun, SandboxTable
@@ -391,7 +392,7 @@ async def test_thousands_of_tables_against_full_snapshot_take_linear_time() -> N
     names = [f"t{i}" for i in range(2000)] + [f"x{i}" for i in range(2621)]
     block = _Block(0, 1, "", tables=[(None, name) for name in names + names])
     runner = SqlTestRunner(cast(Any, None), cast(Any, None), cast(Any, None), cast(Any, None))
-    check = DbCheck("Кадастр", 5, SampleSource(connection, snapshot, read))
+    check = DbCheck("Кадастр", 5, SampleSource(connection, snapshot, read), 2000)
 
     started = time.monotonic()
     assert await runner._samples(block, check) is None
@@ -399,3 +400,51 @@ async def test_thousands_of_tables_against_full_snapshot_take_linear_time() -> N
     assert block.reason == "db_busy"
     assert [item.table for item in requested] == [f"t{i}" for i in range(2000)]
     assert len(block.reasons) == 2621
+
+
+async def test_tables_over_the_limit_get_invented_data() -> None:
+    """`db.sample_max_tables`: первые пригодные — образец, следующие — `table_limit` (А-149)."""
+    snapshot: Any = SimpleNamespace(
+        tables=[table("cadastre", name, [column("id", primary_key=True)]) for name in "abc"]
+    )
+    connection: Any = SimpleNamespace(
+        schemas=["cadastre"], samples_allowed=True, sample_exclusions=[]
+    )
+    requested: list[SampleRequest] = []
+
+    async def read(requests: Sequence[SampleRequest]) -> Sequence[SampleRows]:
+        requested.extend(requests)
+        return [SampleRows(["id"], [["1"]], None, False) for _ in requests]
+
+    names = ["a", "missing", "a", "b", "c"]
+    block = _Block(0, 1, "", tables=[(None, name) for name in names])
+    runner = SqlTestRunner(cast(Any, None), cast(Any, None), cast(Any, None), cast(Any, None))
+    samples = await runner._samples(
+        block, DbCheck("Кадастр", 5, SampleSource(connection, snapshot, read), 2)
+    )
+    assert [item.table for item in requested] == ["a", "b"]
+    assert samples is not None and [item.name for item in samples] == ["a", "b"]
+    assert block.reasons == {"missing": "not_in_snapshot", "c": "table_limit"}
+
+
+def test_exclusions_are_grouped_once_per_answer() -> None:
+    """Снимок на пределе × 500 исключений — словарь, а не перебор списка (§7.6.1)."""
+    columns = [column(f"c{j}") for j in range(20)]
+    tables = [table("cadastre", f"t{i}", columns) for i in range(2000)]
+    exclusions: list[dict[str, str | None]] = [
+        {"schema": "cadastre", "table": f"t{i}", "column": "c1"} for i in range(499)
+    ]
+    exclusions.append({"schema": "cadastre", "table": "t0", "column": None})
+    connection: Any = SimpleNamespace(
+        id=uuid4(), schemas=["cadastre"], sample_exclusions=exclusions
+    )
+    snapshot: Any = SimpleNamespace(taken_at=None, truncated=False, tables=tables)
+    started = time.monotonic()
+    body = snapshot_body(connection, snapshot)
+    assert time.monotonic() - started < 0.5
+    by_name = {item["name"]: item for item in body["tables"]}
+    assert by_name["t0"]["samples_excluded"] is True
+    assert all(item["excluded"] for item in by_name["t0"]["columns"])
+    assert [item["excluded"] for item in by_name["t1"]["columns"][:3]] == [False, True, False]
+    assert by_name["t1"]["samples_excluded"] is False
+    assert not any(item["excluded"] for item in by_name["t1999"]["columns"])

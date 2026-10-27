@@ -32,6 +32,10 @@ ROLES = (
     "portal_super",
     "portal_setrole",
     "portal_definer",
+    "portal_grantor",
+    "portal_admin",
+    "portal_settings",
+    "portal_files",
 )
 # Итог проверки прав по таблице ролей §13.5: среди находок есть этот вид.
 EXPECTED_KIND = {
@@ -40,26 +44,51 @@ EXPECTED_KIND = {
     "portal_writeall": "predefined_role",
     "portal_super": "superuser",
     "portal_setrole": "write",
+    "portal_grantor": "grant_option",
+    "portal_admin": "admin_option",
+    "portal_settings": "server_settings",
+    "portal_files": "catalog_function",
 }
 # Обращения портала через порт: права каждой роли, снимок, образец и слой у читателя.
 SCRIPT = """
 import asyncio, json, os, sys, uuid
 from portal.core.settings import load_settings
 from portal.databases.customer import AsyncpgCustomerDatabase
-from portal.databases.ports import DbTarget, SampleRequest
+from portal.databases.hosts import HostPolicy
+from portal.databases.network import interface_subnets
+from portal.databases.ports import DbTarget, DbUnavailableError, SampleRequest
 
 ROLES = json.loads(sys.argv[1])
 
 
-def target(role):
+def target(role, host="customer-db"):
     return DbTarget(
-        uuid.uuid4(), "customer-db", 5432, "cadastre", role,
+        uuid.uuid4(), host, 5432, "cadastre", role,
         os.environ["CUSTOMER_DB_PASSWORD"], "disable", ("cadastre", "public"),
     )
 
 
+async def reason(database, host):
+    try:
+        await database.check(target("portal_reader", host))
+    except DbUnavailableError as error:
+        return error.reason
+    return None
+
+
 async def main():
-    database = AsyncpgCustomerDatabase(load_settings(os.environ).db)
+    settings = load_settings(os.environ).db
+    subnets = interface_subnets()
+    policy = HostPolicy.of(settings.forbidden_hosts, settings.allowed_internal_hosts, subnets)
+    database = AsyncpgCustomerDatabase(settings, policy)
+    strict = AsyncpgCustomerDatabase(
+        settings, HostPolicy.of(settings.forbidden_hosts, (), subnets)
+    )
+    hosts = {
+        "saved_portal_db": policy.saved_host_forbidden("portal-db"),
+        "portal_db": await reason(database, "portal-db"),
+        "customer_db_without_exception": await reason(strict, "customer-db"),
+    }
     rights = {}
     for role in ROLES:
         report = await database.check(target(role))
@@ -81,6 +110,7 @@ async def main():
         "sample_rows": len(sample.rows),
         "preview_rows": len(preview.rows),
         "geojson": list(preview.geojson or []),
+        "hosts": hosts,
     }))
 
 
@@ -141,6 +171,19 @@ def test_rights_of_each_stand_role(accessed: tuple[dict[str, Any], list[str]]) -
     assert "cadastre.recalc_area" in " ".join(rights["portal_definer"]["warnings"])
     # Предупреждение о функции — только у роли, которой выдан EXECUTE.
     assert not any("recalc_area" in name for name in rights["portal_reader"]["warnings"])
+
+
+def test_portal_addresses_are_refused_and_customer_db_works(
+    accessed: tuple[dict[str, Any], list[str]],
+) -> None:
+    """`portal-db` — `host_forbidden`; `customer-db` работает только по исключению стенда."""
+    hosts = accessed[0]["hosts"]
+    assert hosts == {
+        "saved_portal_db": True,
+        "portal_db": "host_forbidden",
+        "customer_db_without_exception": "host_forbidden",
+    }
+    assert accessed[0]["rights"]["portal_reader"]["findings"] == []
 
 
 def test_snapshot_and_sample_through_the_port(accessed: tuple[dict[str, Any], list[str]]) -> None:

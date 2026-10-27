@@ -109,12 +109,17 @@ class CodeTargetRequest(RequestModel):
 
 
 class CodeMessageRequest(RequestModel):
-    """Тело сообщения в диалоге `code` (§7.5.8): `file_ids` и `target` обязательны, `null` — нет."""
+    """Тело сообщения в диалоге `code` (§7.5.8): `file_ids` и `target` обязательны, `null` — нет.
 
-    content: str
+    С `preview_fix` (§7.5.16) поля `content` нет: текст вопроса собирает сервер; само поле
+    проверяет сценарий.
+    """
+
+    content: str | None = None
     action: Literal["write", "explain", "fix"]
     file_ids: list[UUID] | None
     target: CodeTargetRequest | None
+    preview_fix: dict[str, Any] | None = None
 
 
 class DocparseMessageRequest(RequestModel):

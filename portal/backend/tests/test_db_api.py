@@ -4,6 +4,7 @@
 у неё спросил. Права ролей на настоящем PostgreSQL — `tests/test_db_customer.py`.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from uuid import UUID
@@ -12,7 +13,7 @@ import pytest
 
 from portal.core.settings import Settings
 from portal.databases.domain import finding
-from portal.databases.ports import DbTarget, RightsReport
+from portal.databases.ports import DbTarget, DbUnavailableError, RightsReport, SnapshotContent
 from tests.conftest import close_portal, make_portal
 from tests.db_support import (
     PASSWORD,
@@ -173,8 +174,11 @@ async def test_stale_result_does_not_overwrite_login_change(
     monkeypatch.setattr(fake, "check", check_while_admin_switches_role)
     await admin.post(f"/api/admin/db-connections/{target}/check")
 
-    rows = await portal.rows("SELECT rights_status, username FROM db_connections")
-    assert [tuple(row) for row in rows] == [("unknown", "portal_clean")]
+    rows = await portal.rows("SELECT rights_status, username, last_error FROM db_connections")
+    assert [tuple(row) for row in rows] == [("unknown", "portal_clean", None)]
+    # Итог отброшен как устаревший: в аудите проверки права не указаны (§9.5).
+    audit = await portal.rows("SELECT details FROM audit_log WHERE event = 'db_connection_checked'")
+    assert audit[0][0] == {"connection_id": target, "rights": None}
 
 
 async def test_flag_off_closes_routes_and_hides_selection(
@@ -202,3 +206,23 @@ async def test_flag_off_closes_routes_and_hides_selection(
         assert fake.calls == []
     finally:
         await close_portal(disabled)
+
+
+async def test_refresh_lock_is_free_after_portal_timeout(
+    portal: Portal, fake: FakeCustomerDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Обращение кончилось сроком портала — блокировка обновления снимка свободна (§7.6.5)."""
+    admin = await admin_client(portal)
+    target = (await create_connection(admin))["id"]
+    employee = await portal.employee()
+    snapshot = fake.snapshot
+
+    async def silent(connection: DbTarget) -> tuple[RightsReport, SnapshotContent]:
+        raise DbUnavailableError("timeout")
+
+    monkeypatch.setattr(fake, "snapshot", silent)
+    failed = await refresh(employee, target)
+    assert (failed.status_code, failed.json()["error"]["details"]["reason"]) == (503, "timeout")
+    monkeypatch.setattr(fake, "snapshot", snapshot)
+    async with asyncio.timeout(5):
+        assert (await refresh(employee, target)).status_code == 200

@@ -36,6 +36,7 @@ from portal.code.ports import (
     CompileFile,
     CompileResult,
 )
+from portal.code.preview_fix import parse_preview_fix, preview_fix_text
 from portal.code.prompt import CodePlan, build_code_plan, fix_attempt_messages, messages_tokens
 from portal.code.service import CodeService
 from portal.core.errors import field_error, not_found, validation_error
@@ -286,6 +287,7 @@ class CodeTool:
             max_model_len - settings.code.max_output_tokens - settings.llm.safety_margin_tokens
         )
         self._reserve = settings.kb.context_max_tokens
+        self._message_max_chars = settings.dialogs.message_max_chars
 
     # --- разбор тела запроса (§7.5.8, §5.10.3) ---
 
@@ -354,6 +356,40 @@ class CodeTool:
             "file_ids": None if file_ids is None else [str(item) for item in file_ids],
             "target": snapshot,
         }
+
+    async def preview_fix_question(
+        self,
+        owner_id: UUID,
+        dialog_id: UUID,
+        action: CodeAction,
+        file_ids: Sequence[UUID] | None,
+        target: Mapping[str, Any] | None,
+        preview_fix: Any,
+    ) -> tuple[str, dict[str, Any]]:
+        """«Исправить с помощником» по ошибкам предпросмотра: текст вопроса и параметры.
+
+        Проект — веб-вид, `action: "write"`, `target: null`; запись журнала — по §7.5.16,
+        пути и строки — по сохранённым файлам проекта. Текст собирается из
+        `code.preview_fix.*`; при слое из образца в нём только тип, файл, строка и директива.
+        """
+        async with self._uow_factory() as uow:
+            project = await uow.code.project_by_dialog(owner_id, dialog_id)
+            if project is None:
+                raise not_found()
+            if not project.web:
+                raise validation_error([field_error("preview_fix", "invalid_format")])
+            files = await uow.code.files(owner_id, project.id)
+        if action != "write":
+            raise validation_error([field_error("action", "invalid_format")])
+        if target is not None:
+            raise validation_error([field_error("target", "invalid_format")])
+        lines = {file.path: len(file.content.split("\n")) for file in files}
+        fix = parse_preview_fix(preview_fix, lines, self._code.preview.errors_max)
+        text = preview_fix_text(fix, self._code.preview_fix)
+        if len(text) > self._message_max_chars:
+            raise validation_error([field_error("preview_fix", "too_long")])
+        params = await self.question_params(owner_id, dialog_id, action, file_ids, None)
+        return text, params
 
     async def memory_params(
         self, owner_id: UUID, dialog_id: UUID, action: CodeAction, files: str | None

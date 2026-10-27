@@ -276,7 +276,7 @@ export interface SqlRunRows {
 export interface SqlRunFixture extends SqlRunRows {
   table: string;
   origin?: 'sample' | 'invented';
-  invented_reason?: 'not_in_snapshot' | 'excluded' | 'samples_not_allowed' | null;
+  invented_reason?: 'not_in_snapshot' | 'excluded' | 'samples_not_allowed' | 'table_limit' | null;
 }
 
 /** Проверка на образце (контракт §7.4, 1.0): `null` — без подключения. */
@@ -409,6 +409,35 @@ export type QuestionParams =
       target: { file_id: string; start_line: number; end_line: number } | null;
     }
   | Record<string, never>;
+
+/** Тип ошибки предпросмотра — закрытый список (контракт §7.5.16, 0.25). */
+export const PREVIEW_ERROR_TYPES = [
+  'Error',
+  'AggregateError',
+  'EvalError',
+  'InternalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+  'DOMException',
+] as const;
+export type PreviewErrorType = (typeof PREVIEW_ERROR_TYPES)[number];
+
+/**
+ * Запись `preview_fix.problems` (контракт §7.5.16, 0.25): `text` — только при `layer: "invented"`.
+ * `path` — путь файла проекта или `null`; при `path: null` и `line` — `null`.
+ */
+export type PreviewFixProblem =
+  | { kind: 'error'; path: string | null; line: number | null; type: PreviewErrorType; text?: string }
+  | { kind: 'network'; path: null; line: null; directive: string; text?: string };
+
+/** «Исправить с помощником» по ошибкам предпросмотра: текст вопроса собирает сервер (контракт §7.5.16, 0.25). */
+export interface PreviewFix {
+  layer: 'invented' | 'sample';
+  problems: PreviewFixProblem[];
+}
 
 export interface SqlSchemaSummary {
   id: string;
@@ -812,8 +841,15 @@ export type RightsKind =
   | 'bypassrls'
   | 'owner'
   | 'write'
+  | 'maintain'
   | 'create'
+  | 'grant_option'
   | 'predefined_role'
+  | 'admin_option'
+  | 'server_settings'
+  | 'catalog_function'
+  | 'large_object'
+  | 'lo_compat_privileges'
   | 'definer_function';
 
 /** Лишнее право или предупреждение (контракт §7.6.1): `objects` — первые три, `total` — сколько всего. */
@@ -835,6 +871,7 @@ export type DbErrorReason =
   | 'tls_required'
   | 'busy'
   | 'schemas_unavailable'
+  | 'host_forbidden'
   | 'other';
 
 export interface SampleExclusion {

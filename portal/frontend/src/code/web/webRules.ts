@@ -147,9 +147,12 @@ export interface SyntaxMessage {
   message: string;
 }
 
-/** Вопрос «Исправить с помощником» (§5.13.20): до десяти сообщений, дальше «и ещё ‹N›». */
-export function fixQuestion(kind: 'syntax' | 'preview', items: readonly { path: string | null; line: number | null; message: string }[]): string {
-  const shown = items.slice(0, 10).map((item) => r.fixLine(item.path ?? texts.workshop.web.pane.placeUnknown, item.line, item.message));
+/**
+ * Вопрос «Исправить с помощником» по ошибкам синтаксиса (§5.13.20): до десяти сообщений, дальше «и ещё ‹N›».
+ * По ошибкам предпросмотра текст собирает сервер (`preview_fix`, контракт §7.5.16).
+ */
+export function fixQuestion(items: readonly { path: string; line: number | null; message: string }[]): string {
+  const shown = items.slice(0, 10).map((item) => r.fixLine(item.path, item.line, item.message));
   const more = items.length > 10 ? [r.fixMore(items.length - 10)] : [];
-  return [kind === 'syntax' ? r.fixSyntax : r.fixPreview, ...shown, ...more].join('\n');
+  return [r.fixSyntax, ...shown, ...more].join('\n');
 }

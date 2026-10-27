@@ -42,9 +42,10 @@ interface CogisApi {
    * Приближает карту к геометрии; отступ от краёв — в процентах.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @param maxScale Необязателен, как и minScale; пример: `api.goTo(point)`.
    * @param marginInPercent По умолчанию 20.
    */
-  goTo(geometry: any, maxScale: any, minScale: any, marginInPercent?: any): any;
+  goTo(geometry: any, maxScale?: any, minScale?: any, marginInPercent?: any): any;
   /**
    * Подсвечивает геометрию на карте.
    *
@@ -56,26 +57,30 @@ interface CogisApi {
    * Ставит метку в точке геометрии.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @param icon Адрес картинки, без него — стандартная иконка. Метка пропадает после сдвига карты или смены масштаба.
    */
-  showPushpin(geometry: any, icon: any): any;
+  showPushpin(geometry: any, icon?: any): any;
   /**
    * Находит слой проекта по адресу сервиса и номеру слоя. existsIn — где искать: map, legend, search или attributeTable.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @param layerId Номер слоя назначает сервер; он меняется при правке проекта, если в проекте QGIS у слоя не задана переменная elitegis_layer_id.
+   * @example api.getLayer("https://.../MapServer", 0)
    */
-  getLayer(serviceUrl: any, layerId: any, existsIn: any): any;
+  getLayer(serviceUrl: any, layerId: any, existsIn?: any): any;
   /**
    * Ищет объекты слоя по условию, номерам или геометрии; возвращает объекты с геометрией и атрибутами в системе координат карты. Работает, если запросы к слою разрешены в настройках.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
    */
-  searchInLayer(layer: any, whereClause: any, objectIds: any, geometry: any): any;
+  searchInLayer(layer: any, whereClause: any, objectIds?: any, geometry?: any): any;
   /**
    * Ищет адрес первым геокодером проекта.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @param filters `{свойство: значение}` — дополнительные параметры сервиса геокодирования.
    */
-  geocodeAddress(address: any, filters: any): any;
+  geocodeAddress(address: any, filters?: any): any;
   /**
    * Добавляет фильтр к слою.
    *
@@ -103,7 +108,7 @@ interface CogisApi {
    */
   search(text: any): any;
   /**
-   * Открывает сведения об объекте.
+   * Открывает карточку ранее найденного объекта, например из результата searchInLayer.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
    * @param goTo По умолчанию true.
@@ -111,9 +116,10 @@ interface CogisApi {
    */
   openIdentify(feature: any, goTo?: any, calloutOnly?: any): any;
   /**
-   * Показывает объекты в точке или области.
+   * Имитирует щелчок по карте в точке: открывает карточку объекта в этой точке.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @example api.goTo(point); api.identify(point);
    */
   identify(geometry: any): any;
   /**
@@ -138,12 +144,14 @@ interface CogisApi {
    * Строит зоны доступности от точек; пустой список точек убирает зоны.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @example api.constructServiceArea([api.createPoint(82.9246, 55.0304, api.getSpatialReference(4326))], 'Geodesic_Length', [3, 6], ['Car'])
    */
   constructServiceArea(points: any, cost: any, breaks: any, restrictions: any): any;
   /**
    * Строит маршрут через точки; пустой список точек убирает маршрут.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @example api.findRoute([api.createPoint(82.9246, 55.0304, api.getSpatialReference(4326)), api.createPoint(82.9546, 55.4304, api.getSpatialReference(4326))], 'Geodesic_Length', ['Car'])
    */
   findRoute(points: any, cost: any, restrictions: any): any;
   /**
@@ -162,14 +170,17 @@ interface CogisApi {
    * Создаёт цвет из красной, зелёной и синей составляющих и прозрачности.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @param alpha Прозрачность, в примере документации 0.5.
+   * @example api.createColor(255, 2, 2, 0.5)
    */
-  createColor(r: any, g: any, b: any, alpha: any): any;
+  createColor(r: any, g: any, b: any, alpha?: any): any;
   /**
    * Символ точки: цвет, размер, обводка, вид.
    *
    * Документация CoGIS, п. 7.10. Что возвращает — не описано.
+   * @example api.createSimplePointSymbol(api.createColor(255, 2, 2), 10)
    */
-  createSimplePointSymbol(color: any, size: any, outline: any, type: any): any;
+  createSimplePointSymbol(color: any, size: any, outline?: any, type?: any): any;
   /**
    * Символ точки картинкой.
    *
@@ -208,12 +219,21 @@ interface CogisApi {
    * Формирует отчёт по шаблону для слоя.
    *
    * Есть только в примерах документации CoGIS, в списке функций её нет.
+   * @param template Имя файла шаблона отчёта (.docx или .xlsx) из папки шаблонов отчётов.
+   * @param source `{serviceUrl, layerId, whereClause, orderBy}`.
+   * @param options Смысл options.Caption в документации не описан.
+   * @example api.generateReport("simple.xlsx", {serviceUrl: "https://.../MapServer", layerId: 4, whereClause: "", orderBy: ""}, {Caption: "test"});
    */
   generateReport(template: any, source: any, options: any): any;
 }
 
-// Хуки карточки объекта: функции окна, которые задаёт код сотрудника (п. 7.9.3–7.9.4).
+// Функции окна, которые задаёт код сотрудника (п. 7.9.2–7.9.4).
 interface Window {
+  /**
+   * Вызывается CoGIS для слоя KML с 3D-моделями; задаётся скриптом HTML-кастомизации, не в папке \Customer\openProject\.
+   * @example kmlLayer.entities.values.forEach(x => { if (x.label) x.label.show = false; if (x.polyline) x.polyline.show = false; if (x.billboard) x.billboard.show = false; })
+   */
+  onCesiumKmlInit?: (kmlLayer: any) => any;
   /**
    * Проверка перед сохранением объекта карточки.
    * @param object Объект карточки CoGIS: свойства не описаны в документации, смотрите примеры п. 7.9.3.

@@ -268,8 +268,10 @@ class SqlTool:
         """Проверка на образце по выбору: подключение и снимок — текущие (§7.4, §7.5.18)."""
         source = None
         sample_rows = 0
+        max_tables = 0
         if self._databases is not None:
             sample_rows = self._databases.sample_rows_check
+            max_tables = self._databases.sample_max_tables
             found = await self._databases.source(owner_id, selection)
             if found is not None:
                 source = SampleSource(
@@ -277,7 +279,7 @@ class SqlTool:
                     found.snapshot,
                     partial(self._databases.sample, owner_id, found.connection, preview=False),
                 )
-        return DbCheck(selection.title, sample_rows, source)
+        return DbCheck(selection.title, sample_rows, source, max_tables)
 
     async def test_run(
         self,

@@ -25,8 +25,15 @@ FINDING_KINDS = (
     "bypassrls",
     "owner",
     "write",
+    "maintain",
     "create",
+    "grant_option",
     "predefined_role",
+    "admin_option",
+    "server_settings",
+    "catalog_function",
+    "large_object",
+    "lo_compat_privileges",
     "definer_function",
 )
 _OBJECTS_SHOWN = 3
@@ -177,22 +184,44 @@ def refresh_available_at(
     return snapshot.taken_at + timedelta(minutes=minutes)
 
 
-def table_excluded(exclusions: Sequence[Mapping[str, str | None]], schema: str, table: str) -> bool:
+ExclusionMap = Mapping[tuple[str, str], frozenset[str] | None]
+
+
+def exclusion_map(exclusions: Sequence[Mapping[str, str | None]]) -> ExclusionMap:
+    """Исключения образцов словарём «(схема, таблица) → вся таблица (`None`) или столбцы».
+
+    Строится один раз на ответ, проверку или слой (§7.6.1): поиск таблицы и столбца — по
+    словарю, а не перебором списка (столбцы снимка × исключения).
+    """
+    columns: dict[tuple[str, str], set[str]] = {}
+    whole: set[tuple[str, str]] = set()
+    for item in exclusions:
+        key = (str(item["schema"]), str(item["table"]))
+        column = item.get("column")
+        if column is None:
+            whole.add(key)
+        else:
+            columns.setdefault(key, set()).add(column)
+    result: dict[tuple[str, str], frozenset[str] | None] = {
+        key: frozenset(names) for key, names in columns.items()
+    }
+    result.update(dict.fromkeys(whole))
+    return result
+
+
+def table_excluded(exclusions: ExclusionMap, schema: str, table: str) -> bool:
     """Таблица исключена из образцов целиком."""
-    return any(
-        item["schema"] == schema and item["table"] == table and item.get("column") is None
-        for item in exclusions
-    )
+    key = (schema, table)
+    return key in exclusions and exclusions[key] is None
 
 
-def column_excluded(
-    exclusions: Sequence[Mapping[str, str | None]], schema: str, table: str, column: str
-) -> bool:
+def column_excluded(exclusions: ExclusionMap, schema: str, table: str, column: str) -> bool:
     """Столбец исключён из образцов (сам или вместе с таблицей)."""
-    return table_excluded(exclusions, schema, table) or any(
-        item["schema"] == schema and item["table"] == table and item.get("column") == column
-        for item in exclusions
-    )
+    key = (schema, table)
+    if key not in exclusions:
+        return False
+    names = exclusions[key]
+    return names is None or column in names
 
 
 def visible_tables(connection: Connection, snapshot: StoredSnapshot) -> list[dict[str, Any]]:
@@ -204,7 +233,7 @@ def visible_tables(connection: Connection, snapshot: StoredSnapshot) -> list[dic
 
 def snapshot_body(connection: Connection, snapshot: StoredSnapshot) -> dict[str, Any]:
     """Объект `DbSnapshot` (§7.6.1): исключения — по текущим `sample_exclusions`."""
-    exclusions = connection.sample_exclusions
+    exclusions = exclusion_map(connection.sample_exclusions)
     tables = []
     for table in visible_tables(connection, snapshot):
         schema, name = table["schema"], table["name"]
@@ -275,18 +304,20 @@ class CopyPlan:
     excluded: tuple[tuple[str, Literal["excluded", "binary"]], ...]
 
 
-def copy_plan(connection: Connection, table: Mapping[str, Any]) -> CopyPlan:
-    """Столбцы для выборки: кроме исключённых администратором и двоичных."""
+def copy_plan(
+    connection: Connection, table: Mapping[str, Any], exclusions: ExclusionMap | None = None
+) -> CopyPlan:
+    """Столбцы для выборки: кроме исключённых администратором и двоичных.
+
+    `exclusions` — словарь исключений подключения, если вызывающий уже построил его.
+    """
+    if exclusions is None:
+        exclusions = exclusion_map(connection.sample_exclusions)
     schema, name = table["schema"], table["name"]
-    rules = {
-        item.get("column")
-        for item in connection.sample_exclusions
-        if item["schema"] == schema and item["table"] == name
-    }
     copied: list[str] = []
     excluded: list[tuple[str, Literal["excluded", "binary"]]] = []
     for column in table["columns"]:
-        if None in rules or column["name"] in rules:
+        if column_excluded(exclusions, schema, name, column["name"]):
             excluded.append((column["name"], "excluded"))
         elif column["binary"]:
             excluded.append((column["name"], "binary"))
@@ -375,7 +406,7 @@ def resolve_table(
     return None
 
 
-InventedReason = Literal["not_in_snapshot", "excluded", "samples_not_allowed"]
+InventedReason = Literal["not_in_snapshot", "excluded", "samples_not_allowed", "table_limit"]
 
 
 def sample_origin(

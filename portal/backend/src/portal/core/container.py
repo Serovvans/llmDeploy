@@ -2,6 +2,7 @@
 
 import asyncio
 import warnings
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -30,9 +31,11 @@ from portal.code.zipio import ZipProjectArchives
 from portal.core.clock import SystemClock
 from portal.core.db import create_engine
 from portal.core.ports import Clock, SessionAuthenticator
-from portal.core.settings import Settings
+from portal.core.settings import ConfigError, Settings
 from portal.databases.crypto import AesPasswordCipher
 from portal.databases.customer import AsyncpgCustomerDatabase, root_certificate_readable
+from portal.databases.hosts import HostPolicy, IpNetwork
+from portal.databases.network import SubnetsUnavailableError, interface_subnets
 from portal.databases.ports import CustomerDatabase
 from portal.databases.repositories import SqlDbUnitOfWorkFactory
 from portal.databases.service import DbService
@@ -331,6 +334,18 @@ def build_code_eval_container(
     )
 
 
+def _portal_subnets(settings: Settings) -> tuple[IpNetwork, ...]:
+    """Подсети интерфейсов `portal-api` (§7.6.5, шаг 2); при `db.enabled` — обязательно."""
+    try:
+        return interface_subnets()
+    except SubnetsUnavailableError as error:
+        if settings.db.enabled:
+            raise ConfigError(
+                f"Не прочитались подсети интерфейсов портала ({error}): db.enabled недопустим"
+            ) from None
+        return ()
+
+
 def build_container(
     settings: Settings,
     clock: Clock | None = None,
@@ -341,6 +356,7 @@ def build_container(
     transcription_queue: TranscriptionQueue | None = None,
     code_sandbox: CodeSandbox | None = None,
     customer_database: CustomerDatabase | None = None,
+    portal_subnets: Sequence[IpNetwork] | None = None,
 ) -> Container:
     """Собрать все зависимости API.
 
@@ -349,7 +365,8 @@ def build_container(
     песочницы. `chat_model`, `knowledge`, `qdrant`, `sql_sandbox` и `transcription_queue`
     подменяют клиент Bifrost, базу знаний, клиент Qdrant, песочницу SQL и очередь
     расшифровки вложений в тестах; `code_sandbox` — песочницу сборки C#,
-    `customer_database` — обращения к базам заказчика (§7.6). Шаблоны мастера
+    `customer_database` — обращения к базам заказчика (§7.6), `portal_subnets` — подсети
+    интерфейсов портала вместо прочитанных (§7.6.5, шаг 2). Шаблоны мастера
     читаются и проверяются здесь же: ошибка в них — отказ запуска (§7.5.6).
     """
     clock = clock or SystemClock()
@@ -393,13 +410,19 @@ def build_container(
         settings.kb,
     )
     sql_schemas = SqlSchemaService(SqlSchemaStoreFactory(base.engine), clock, settings.sql)
+    hosts = HostPolicy.of(
+        settings.db.forbidden_hosts,
+        settings.db.allowed_internal_hosts,
+        _portal_subnets(settings) if portal_subnets is None else portal_subnets,
+    )
     databases = DbService(
         SqlDbUnitOfWorkFactory(base.engine, clock),
-        customer_database or AsyncpgCustomerDatabase(settings.db),
+        customer_database or AsyncpgCustomerDatabase(settings.db, hosts),
         AesPasswordCipher(secret_key),
         clock,
         settings.db,
         partial(root_certificate_readable, settings.db.tls_root_cert_file),
+        hosts,
     )
     sql_checker = SqlSyntaxChecker(settings.sql.check_max_chars, settings.sql.check_timeout_seconds)
     docparse = DocparseService(

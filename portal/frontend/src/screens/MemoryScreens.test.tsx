@@ -135,7 +135,7 @@ describe('память диалога: индикатор и панель', () =
       // Уровень «заполняется» при 92 %: интерфейс сам по проценту уровень не вычисляет (CLAUDE.md, правило 1).
       setup(() => ok(estimate({ percent: 92, pairs: [pair(1, { dropped: true }), pair(2, { question_preview: '', attachments: 2 })] })));
 
-      const meter = await screen.findByRole('button', { name: `${t.meterCaption} ${t.levels.filling}` }, { timeout: 5000 });
+      const meter = await screen.findByRole('button', { name: `${t.meterCaption} ${t.levels.filling}` });
       expect(document.documentElement.dataset.theme).toBe(theme);
       expect(meter).toHaveAttribute('aria-expanded', 'true');
       expect(document.getElementById(meter.getAttribute('aria-describedby') ?? '')?.textContent).toBe(t.percentHint(92));

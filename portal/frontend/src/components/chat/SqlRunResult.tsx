@@ -189,6 +189,10 @@ function Origin({ block }: { block: SqlRunBlock }) {
   if (excluded.length > 0) {
     lines.push(d.excludedTables(names(excluded), excluded.length > 1));
   }
+  const overLimit = byReason('table_limit');
+  if (overLimit.length > 0) {
+    lines.push(d.tableLimit(names(overLimit), overLimit.length > 1));
+  }
   const columns = db.excluded_columns.filter((item) => item.reason === 'excluded').map((item) => `${item.table}.${item.column}`);
   if (columns.length > 0) {
     lines.push(d.excludedColumns(names(columns)));

@@ -1,25 +1,40 @@
 import { describe, expect, it } from 'vitest';
 
 import { texts } from '../../texts';
-import { appendMessage, EMPTY_LOG, errorCount, type FrameMessage, logResult, MAX_TEXT, notInserted, parseFrameMessage, previewFixItems } from './preview';
+import { appendMessage, EMPTY_LOG, errorCount, errorName, type FrameMessage, logResult, MAX_TEXT, notInserted, parseFrameMessage, previewFix } from './preview';
 import { sqlParameters, stripQuotes } from './sqlParams';
 import { extractHtml, fixQuestion, languageOf } from './webRules';
 
 const LIMITS = { log_max_entries: 2, errors_max: 2 };
+const PATHS = new Set(['plugin.js', 'widget.html']);
 
 describe('сообщения фрейма предпросмотра — недоверенные данные', () => {
   it('неизвестный тип и поля не своих типов отбрасываются', () => {
-    expect(parseFrameMessage('ready')).toBeNull();
-    expect(parseFrameMessage({ type: 'init' })).toBeNull();
-    expect(parseFrameMessage({ type: 'log', fn: 'getLayer', args: [1], known: true, count: null })).toBeNull();
-    expect(parseFrameMessage({ type: 'log', fn: 'getLayer', args: [], known: 'yes', count: null })).toBeNull();
-    expect(parseFrameMessage({ type: 'error', file: null, line: 0, column: null, message: 'x' })).toBeNull();
-    expect(parseFrameMessage({ type: 'blocked', url: 'https://example.com' })).toBeNull();
+    expect(parseFrameMessage('ready', PATHS)).toBeNull();
+    expect(parseFrameMessage({ type: 'init' }, PATHS)).toBeNull();
+    expect(parseFrameMessage({ type: 'log', fn: 'getLayer', args: [1], known: true, count: null }, PATHS)).toBeNull();
+    expect(parseFrameMessage({ type: 'log', fn: 'getLayer', args: [], known: 'yes', count: null }, PATHS)).toBeNull();
+    expect(parseFrameMessage({ type: 'error', file: null, line: 0, column: null, message: 'x' }, PATHS)).toBeNull();
+    expect(parseFrameMessage({ type: 'blocked', url: 'https://example.com' }, PATHS)).toBeNull();
+  });
+
+  it('ошибка с файлом не из проекта и запрет с директивой не из списка отбрасываются целиком (§7.5.17)', () => {
+    const error = { type: 'error', line: 3, column: 1, message: 'Uncaught TypeError: x' };
+    expect(parseFrameMessage({ ...error, file: 'plugin.js' }, PATHS)).toMatchObject({ type: 'error', file: 'plugin.js' });
+    expect(parseFrameMessage({ ...error, file: null }, PATHS)).toMatchObject({ type: 'error', file: null });
+    expect(parseFrameMessage({ ...error, file: 'Иванов Иван.js' }, PATHS)).toBeNull();
+    expect(parseFrameMessage({ ...error, file: 'plugin.js ' }, PATHS)).toBeNull();
+    const blocked = { type: 'blocked', url: 'https://api.example' };
+    expect(parseFrameMessage({ ...blocked, directive: 'connect-src' }, PATHS)).toMatchObject({ directive: 'connect-src' });
+    // Имя по шаблону [a-z-], но не из списка, — тоже канал для значений строк базы.
+    for (const directive of ['', 'a', 'abc', 'connect-srcx', 'cadastre-ivanov', 'frame-ancestors', 'sandbox', 'Connect-src', 'connect-src 50:01', 'img-src;']) {
+      expect(parseFrameMessage({ ...blocked, directive }, PATHS)).toBeNull();
+    }
   });
 
   it('длинные строки обрезаются, аргументов — не больше двадцати', () => {
     const long = 'x'.repeat(MAX_TEXT + 10);
-    const parsed = parseFrameMessage({ type: 'log', fn: long, args: Array.from({ length: 30 }, () => long), known: false, count: 3 });
+    const parsed = parseFrameMessage({ type: 'log', fn: long, args: Array.from({ length: 30 }, () => long), known: false, count: 3 }, PATHS);
     expect(parsed).toMatchObject({ type: 'log', known: false, count: 3 });
     if (parsed?.type !== 'log') {
       throw new Error('ожидалась запись журнала');
@@ -56,20 +71,30 @@ describe('сообщения фрейма предпросмотра — нед�
     state = appendMessage(state, { type: 'blocked', url: 'https://x.example/?n=50:01:0000000:123', directive: 'connect-src' }, big);
     state = appendMessage(state, { type: 'blocked', url: 'https://x.example/Иванов.png', directive: 'img-src' }, big);
 
-    const sample = previewFixItems(state.problems, true);
-    expect(sample.map((item) => item.message)).toEqual([
-      'SyntaxError',
-      'TypeError',
-      'Error',
-      texts.workshop.web.pane.networkDirective('connect-src'),
-    ]);
-    expect(sample[0]).toMatchObject({ path: 'plugin.js', line: 4 });
-    const question = fixQuestion('preview', sample);
-    expect(question).not.toMatch(/Иванов|50:01|x\.example/);
+    const sample = previewFix(state.problems, 'sample');
+    expect(sample).toEqual({
+      layer: 'sample',
+      problems: [
+        { kind: 'error', path: 'plugin.js', line: 4, type: 'SyntaxError' },
+        { kind: 'error', path: null, line: null, type: 'TypeError' },
+        { kind: 'error', path: 'plugin.js', line: 7, type: 'Error' },
+        { kind: 'network', path: null, line: null, directive: 'connect-src' },
+      ],
+    });
+    expect(JSON.stringify(sample)).not.toMatch(/Иванов|50:01|x\.example/);
 
-    const invented = previewFixItems(state.problems, false);
-    expect(invented[0]?.message).toContain('Иванов Иван Иванович');
-    expect(invented[3]?.message).toBe(texts.workshop.web.pane.network('https://x.example/?n=50:01:0000000:123'));
+    const invented = previewFix(state.problems, 'invented');
+    expect(invented.layer).toBe('invented');
+    expect(invented.problems[0]).toMatchObject({ type: 'SyntaxError', text: expect.stringContaining('Иванов Иван Иванович') as unknown });
+    expect(invented.problems[3]).toEqual({ kind: 'network', path: null, line: null, directive: 'connect-src', text: 'https://x.example/?n=50:01:0000000:123' });
+  });
+
+  it('тип ошибки — только из закрытого списка контракта, иначе Error', () => {
+    expect(errorName('Uncaught DOMException: x')).toBe('DOMException');
+    expect(errorName('Uncaught (in promise) RangeError: x')).toBe('RangeError');
+    expect(errorName('Uncaught ИвановError: x')).toBe('Error');
+    expect(errorName('Uncaught CadastreError: 50:01')).toBe('Error');
+    expect(errorName('Script error.')).toBe('Error');
   });
 
   it('«что сделано» — по функции; слой из образца называет таблицу и число объектов', () => {
@@ -136,7 +161,7 @@ describe('JavaScript внутри HTML', () => {
 
   it('вопрос «Исправить с помощником» — не больше десяти строк и «и ещё N»', () => {
     const items = Array.from({ length: 12 }, (_, i) => ({ path: 'widget.html', line: i + 1, message: `ошибка ${i}` }));
-    const text = fixQuestion('syntax', items).split('\n');
+    const text = fixQuestion(items).split('\n');
     expect(text).toHaveLength(12);
     expect(text.at(-1)).toBe(texts.workshop.web.route.fixMore(2));
   });

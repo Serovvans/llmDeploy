@@ -206,6 +206,15 @@ async def _question(
         except ValidationError as error:
             raise validation_failure(error.errors()) from None
         target = None if code.target is None else code.target.model_dump()
+        if code.preview_fix is not None:
+            if "content" in code.model_fields_set:
+                raise validation_error([field_error("content", "invalid_format")])
+            content, params = await container.code_tool.preview_fix_question(
+                owner_id, dialog_id, code.action, code.file_ids, target, code.preview_fix
+            )
+            return QuestionInput(content, params)
+        if code.content is None:
+            raise validation_error([field_error("content", "required")])
         params = await container.code_tool.question_params(
             owner_id, dialog_id, code.action, code.file_ids, target
         )

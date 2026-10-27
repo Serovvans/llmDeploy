@@ -170,6 +170,8 @@ export type ChatAction =
   | { type: 'streamEvent'; id: string; event: StreamEvent; now: number }
   | { type: 'generationStopped'; id: string }
   | { type: 'generationRejected'; id: string; messages: ChatMessage[] }
+  /** Текст вопроса, собранный сервером (`preview_fix`, контракт §7.5.16): лента показывает его, как он ушёл помощнику. */
+  | { type: 'questionSaved'; id: string; messageId: string; content: string }
   /** Режим пары сменён (или возвращён после отказа): у вопроса `questionId` и его ответа (контракт §5.10.1). */
   | { type: 'memoryModeChanged'; id: string; questionId: string; mode: MemoryMode }
   /** Пересказ применён, изменён (`summary`) или сжатие отменено (`null`), контракт §5.10.6. */
@@ -534,6 +536,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case 'generationRejected':
       return withView(state, action.id, (view) => ({ ...view, messages: action.messages, generation: null }));
+    case 'questionSaved':
+      return withView(state, action.id, (view) => ({
+        ...view,
+        messages: view.messages.map((message) => (message.id === action.messageId ? { ...message, content: action.content } : message)),
+      }));
     case 'memoryModeChanged':
       return withView(state, action.id, (view) => {
         const index = view.messages.findIndex((message) => message.id === action.questionId);

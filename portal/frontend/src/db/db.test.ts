@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '../api/client';
 import type { AdminDbConnection } from '../api/types';
 import { texts } from '../texts';
-import { parseExclusion, validateConnection } from './ConnectionForm';
-import { dbCheckUnavailable } from './refusal';
+import { parseExclusion, serverErrors, validateConnection } from './ConnectionForm';
+import { dbCheckUnavailable, dbRefusal } from './refusal';
 import { clipboardText, findingLine, reasonText } from './rights';
 import { availableAt, connectionOf, dbValue, refreshedAt } from './selection';
 
@@ -54,6 +54,54 @@ describe('итог проверки прав', () => {
     expect(findingLine(DEFINER)).toEqual({ left: r.definer, right: 'EXECUTE: cadastre.set_status, cadastre.recalc_area и ещё 2' });
   });
 
+  it('виды 0.25: права из находки, у выдачи ролей — своя строка для копирования', () => {
+    const maintain = { kind: 'maintain' as const, privileges: ['MAINTAIN'], objects: [{ type: 'table', name: 'cadastre.parcels' }], total: 4 };
+    const grant = {
+      kind: 'grant_option' as const,
+      privileges: ['SELECT', 'USAGE'],
+      objects: [{ type: 'table', name: 'cadastre.parcels' }, { type: 'schema', name: 'cadastre' }],
+      total: 3,
+    };
+    const admin = { kind: 'admin_option' as const, privileges: [], objects: [{ type: 'role', name: 'app_ro' }, { type: 'role', name: 'gis_editors' }], total: 2 };
+    const settings = {
+      kind: 'server_settings' as const,
+      privileges: ['ALTER SYSTEM', 'SET'],
+      objects: [{ type: 'parameter', name: 'work_mem' }, { type: 'parameter', name: 'log_statement' }],
+      total: 4,
+    };
+    expect(findingLine(maintain)).toEqual({ left: r.kinds.maintain, right: 'MAINTAIN: cadastre.parcels и ещё 3' });
+    expect(findingLine(grant)).toEqual({ left: r.kinds.grant_option, right: 'SELECT, USAGE WITH GRANT OPTION: cadastre.parcels, cadastre и ещё 1' });
+    expect(findingLine(admin)).toEqual({ left: r.kinds.admin_option, right: 'WITH ADMIN OPTION: app_ro, gis_editors' });
+    expect(findingLine(settings)).toEqual({ left: r.kinds.server_settings, right: 'ALTER SYSTEM, SET ON PARAMETER: work_mem, log_statement и ещё 2' });
+    const excess = connection({ rights: { status: 'excess', checked_at: null, findings: [maintain, grant, admin, settings], warnings: [] } });
+    expect(clipboardText(excess).split('\n').slice(2, 6)).toEqual([
+      '- MAINTAIN: cadastre.parcels и ещё 3',
+      '- SELECT, USAGE WITH GRANT OPTION: cadastre.parcels, cadastre и ещё 1',
+      '- членство WITH ADMIN OPTION в ролях: app_ro, gis_editors',
+      '- ALTER SYSTEM, SET ON PARAMETER: work_mem, log_statement и ещё 2',
+    ]);
+  });
+
+  it('виды решения 44: служебные функции, большие объекты, отключённая проверка прав на них', () => {
+    const functions = { kind: 'catalog_function' as const, privileges: ['EXECUTE'], objects: [{ type: 'function', name: 'lo_export(oid,text)' }, { type: 'function', name: 'public.dblink_connect_u(text)' }], total: 3 };
+    const objects = {
+      kind: 'large_object' as const,
+      privileges: ['UPDATE'],
+      objects: [{ type: 'large object', name: '16403' }, { type: 'large object', name: '16404' }],
+      total: 9,
+    };
+    const compat = { kind: 'lo_compat_privileges' as const, privileges: [], objects: [{ type: 'parameter', name: 'lo_compat_privileges' }], total: 1 };
+    expect(findingLine(functions)).toEqual({ left: r.kinds.catalog_function, right: 'EXECUTE ON FUNCTION: lo_export(oid,text), public.dblink_connect_u(text) и ещё 1' });
+    expect(findingLine(objects)).toEqual({ left: r.kinds.large_object, right: 'UPDATE ON LARGE OBJECT: 16403, 16404 и ещё 7' });
+    expect(findingLine(compat)).toEqual({ left: r.kinds.lo_compat_privileges, right: 'lo_compat_privileges = on' });
+    const excess = connection({ rights: { status: 'excess', checked_at: null, findings: [functions, objects, compat], warnings: [] } });
+    expect(clipboardText(excess).split('\n').slice(2, 5)).toEqual([
+      '- EXECUTE ON FUNCTION: lo_export(oid,text), public.dblink_connect_u(text) и ещё 1',
+      '- UPDATE ON LARGE OBJECT: 16403, 16404 и ещё 7',
+      '- lo_compat_privileges = on в сеансе учётной записи (проверка прав на большие объекты отключена)',
+    ]);
+  });
+
   it('текст для администратора базы: лишние права, «желательно снять» — только с предупреждением', () => {
     const excess = connection({ rights: { status: 'excess', checked_at: null, findings: [{ kind: 'superuser', privileges: [], objects: [], total: 0 }, OWNER, WRITE], warnings: [DEFINER] } });
     expect(clipboardText(excess)).toBe(
@@ -86,7 +134,13 @@ describe('итог проверки прав', () => {
     expect(reasonText(connection({ last_error: { reason: 'schemas_unavailable', details: { schemas: ['a', 'b'] }, at } }))).toBe(
       r.reasons.schemas_unavailable('a, b'),
     );
+    expect(reasonText(connection({ last_error: { reason: 'host_forbidden', details: null, at } }))).toBe(r.reasons.host_forbidden);
     expect(reasonText(connection({ last_error: { reason: 'new_reason', details: null, at } }))).toBe(r.reasons.other);
+  });
+
+  it('внутренний адрес портала: у администратора — своя причина, у сотрудника — прежний общий текст', () => {
+    const error = new ApiError(503, { code: 'db_unavailable', message: '', details: { reason: 'host_forbidden' } });
+    expect(dbRefusal(error)).toBe(texts.db.refusals.connect);
   });
 });
 
@@ -124,6 +178,13 @@ describe('форма подключения', () => {
     // Исключения без разрешённых образцов не проверяются: они сохраняются как есть.
     expect(validateConnection({ ...VALID, samples_allowed: false, exclusions: ['bad'] }, true).exclusions).toBeUndefined();
     expect(validateConnection({ ...VALID, schemas: ['a\u0001'] }, true).schemas).toBe(e.schemaInvalid('a\u0001'));
+  });
+
+  it('ошибка сервера по полю «Адрес»: внутренний адрес портала — свой текст', () => {
+    const e = texts.db.form.errors;
+    const refused = (code: string) => new ApiError(422, { code: 'validation_error', message: '', fields: [{ field: 'host', code, message: '' }] });
+    expect(serverErrors(refused('host_forbidden'), VALID)).toEqual({ host: e.hostForbidden });
+    expect(serverErrors(refused('required'), VALID)).toEqual({ host: e.host });
   });
 
   it('исключение — схема.таблица или схема.таблица.столбец', () => {

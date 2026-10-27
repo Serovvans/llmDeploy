@@ -38,6 +38,7 @@ from portal.databases.domain import (
     StoredSnapshot,
     copy_plan,
     ddl_text,
+    exclusion_map,
     find_table,
     refresh_available_at,
     sample_origin,
@@ -45,6 +46,7 @@ from portal.databases.domain import (
     snapshot_body,
     table_index,
 )
+from portal.databases.hosts import HostPolicy
 from portal.databases.ports import (
     CustomerDatabase,
     DbRightsExcessError,
@@ -165,11 +167,17 @@ def _name_error(value: Any) -> str | None:
     return None
 
 
-def _host_error(value: Any) -> str | None:
+_HOST_FORBIDDEN_MESSAGE = "Это внутренний адрес портала. Укажите сервер базы заказчика."
+
+
+def _host_error(value: Any, policy: HostPolicy) -> str | None:
+    """Сервер: имя узла или адрес, не внутри портала (§7.6.2) — без разрешения имени."""
     if not isinstance(value, str) or not value:
         return "required"
     if len(value) > _HOST_MAX:
         return "too_long"
+    if policy.saved_host_forbidden(value):
+        return "host_forbidden"
     try:
         ipaddress.ip_address(value)
     except ValueError:
@@ -188,15 +196,18 @@ class DbService:
         clock: Clock,
         settings: DbSettings,
         tls_verify_available: Callable[[], bool],
+        hosts: HostPolicy,
     ) -> None:
-        """Получить зависимости явно."""
+        """Получить зависимости явно; `hosts` — запрет внутренних адресов портала."""
         self._uow_factory = uow_factory
         self._database = database
         self._cipher = cipher
         self._clock = clock
         self._settings = settings
         self._tls_verify_available = tls_verify_available
+        self._hosts = hosts
         self._refreshing: dict[UUID, asyncio.Lock] = {}
+        self._previewing: set[UUID] = set()
 
     @property
     def enabled(self) -> bool:
@@ -207,6 +218,11 @@ class DbService:
     def sample_rows_check(self) -> int:
         """Строк образца на таблицу при проверке запроса (`db.sample_rows_check`)."""
         return self._settings.sample_rows_check
+
+    @property
+    def sample_max_tables(self) -> int:
+        """Таблиц образца в одной проверке блока (`db.sample_max_tables`)."""
+        return self._settings.sample_max_tables
 
     def tls_verify_available(self) -> bool:
         """Режим `verify` доступен: корневой сертификат читается."""
@@ -243,7 +259,9 @@ class DbService:
         problems: list[FieldError] = []
 
         def check(name: str, code: str | None) -> None:
-            if code is not None:
+            if code == "host_forbidden":
+                problems.append(field_error(name, code, _HOST_FORBIDDEN_MESSAGE))
+            elif code is not None:
                 problems.append(field_error(name, code))
 
         if creating or data.title is not UNSET:
@@ -268,7 +286,7 @@ class DbService:
                 else None,
             )
         if creating or data.host is not UNSET:
-            check("host", _host_error(data.host))
+            check("host", _host_error(data.host, self._hosts))
         if data.port is not UNSET and not (isinstance(data.port, int) and 1 <= data.port <= 65535):
             check("port", "invalid_format")
         for name in ("database", "username"):
@@ -448,15 +466,28 @@ class DbService:
                 raise not_found()
         rights: str | None = None
         reason: str | None = None
+        fresh = True
+
+        def note(written: bool) -> None:
+            nonlocal fresh
+            fresh = written
+
         try:
             report = await self.access(
-                actor.id, connection, "check", lambda target: self._database.check(target)
+                actor.id,
+                connection,
+                "check",
+                lambda target: self._database.check(target),
+                recorded=note,
             )
             rights = "excess" if report.findings else "read_only"
         except DbUnavailableError as error:
             reason = error.reason
             if error.report is not None:
                 rights = "excess" if error.report.findings else "read_only"
+        if not fresh:
+            # Параметры входа сменили во время проверки: итог — о прежней учётной записи.
+            rights = None
         async with self._uow_factory() as uow:
             details: dict[str, Any] = {"connection_id": str(connection_id), "rights": rights}
             if reason is not None:
@@ -493,10 +524,12 @@ class DbService:
         *,
         tables: int = 0,
         rows: Callable[[T], int] = lambda _: 0,
+        recorded: Callable[[bool], None] = lambda _: None,
     ) -> T:
         """Одно обращение §7.6.5: шаг 0, порт, итог в строку подключения, журнал.
 
         Записанный `excess` — `DbRightsExcessError(None)` без соединения (кроме `check`).
+        `recorded` узнаёт, записан ли итог (`False` — отброшен как устаревший).
         """
         started = time.monotonic()
 
@@ -524,7 +557,7 @@ class DbService:
             result = await work(self.target(connection))
         except DbRightsExcessError as excess:
             report = excess.report
-            await self._record(connection, report, None)
+            recorded(await self._record(connection, report, None))
             log("excess_rights", "excess", 0, 0)
             raise
         except DbUnavailableError as failure:
@@ -534,11 +567,11 @@ class DbService:
                 "details": failure.details,
                 "at": self._clock.now().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
-            await self._record(connection, report, error)
+            recorded(await self._record(connection, report, error))
             log(failure.reason, _status(report), 0, 0)
             raise
         report = result if isinstance(result, RightsReport) else _report_of(result)
-        await self._record(connection, report, None)
+        recorded(await self._record(connection, report, None))
         log(
             "excess_rights" if report is not None and report.findings else "ok",
             _status(report),
@@ -549,8 +582,11 @@ class DbService:
 
     async def _record(
         self, connection: Connection, report: RightsReport | None, error: dict[str, Any] | None
-    ) -> None:
-        """Записать итог; устаревший (параметры входа сменили во время обращения) — отбросить."""
+    ) -> bool:
+        """Записать итог; устаревший (параметры входа сменили во время обращения) — отбросить.
+
+        `False` — итог отброшен.
+        """
         rights = None
         if report is not None:
             rights = (
@@ -568,6 +604,7 @@ class DbService:
             )
         if not recorded:
             logger.info("db access result stale", extra={"connection_id": str(connection.id)})
+        return recorded
 
     # --- сотрудник ---
 
@@ -715,13 +752,30 @@ class DbService:
         *,
         preview: bool,
     ) -> Sequence[SampleRows]:
-        """Образцы таблиц одним обращением (§7.6.8); ошибки — исключения порта."""
+        """Образцы таблиц одним обращением (§7.6.8); ошибки — исключения порта.
+
+        Слой предпросмотра (`preview`) — не больше одной загрузки у сотрудника (ПД §8.6
+        п. 3): отметка ставится после шага 0, перед обращением к базе, и снимается по его
+        концу при любом исходе; вторая — `429 db_sample_in_progress` без обращения к порту.
+        """
         rows = self._settings.sample_rows_preview if preview else self._settings.sample_rows_check
+
+        async def work(target: DbTarget) -> tuple[RightsReport, Sequence[SampleRows]]:
+            if not preview:
+                return await self._database.sample(target, requests, rows=rows, preview=False)
+            if user_id in self._previewing:
+                raise errors.sample_in_progress()
+            self._previewing.add(user_id)
+            try:
+                return await self._database.sample(target, requests, rows=rows, preview=True)
+            finally:
+                self._previewing.discard(user_id)
+
         _, result = await self.access(
             user_id,
             connection,
             "sample_preview" if preview else "sample_check",
-            lambda target: self._database.sample(target, requests, rows=rows, preview=preview),
+            work,
             tables=len(requests),
             rows=lambda answer: sum(len(item.rows) for item in answer[1]),
         )
@@ -734,7 +788,8 @@ class DbService:
 
         Выбор недоступен — `409 db_connection_unavailable`; таблица не отмечена или её нет в
         снимке — `validation_error` по `table`; образцы не разрешены или таблица исключена —
-        `409 db_samples_not_allowed`; лишние права — `409 db_connection_unusable`.
+        `409 db_samples_not_allowed`; лишние права — `409 db_connection_unusable`; у
+        сотрудника уже идёт загрузка слоя из образца — `429 db_sample_in_progress`.
         """
         source = await self.source(user_id, selection)
         if source is None:
@@ -744,9 +799,11 @@ class DbService:
             found = find_table(source.connection, source.snapshot, schema, table)
         if found is None:
             raise validation_error([field_error("table", "unknown_value")])
-        if sample_origin(source.connection, found) is not None:
+        plan = copy_plan(
+            source.connection, found, exclusion_map(source.connection.sample_exclusions)
+        )
+        if sample_origin(source.connection, found, plan) is not None:
             raise errors.samples_not_allowed()
-        plan = copy_plan(source.connection, found)
         spatial = next(
             (
                 column

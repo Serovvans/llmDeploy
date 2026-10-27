@@ -24,3 +24,33 @@ db:
   snapshot_max_columns: 40000
   comment_max_chars: 500
   max_selected_tables: 200
+  # Таблиц образца в одной проверке блока; остальным — придуманные данные (§7.4).
+  sample_max_tables: 200
+  # Сроки на стороне портала (§7.6.5): ответ сервера на одну операцию (больше
+  # statement_timeout_seconds и lock_timeout_seconds) и всё обращение (больше
+  # connect_timeout_seconds + client_timeout_seconds). По сроку соединение рвётся.
+  client_timeout_seconds: 15
+  access_timeout_seconds: 120
+  # Имена, которые нельзя указать сервером подключения (ПД §8.6 п. 4): localhost и все
+  # сервисы deploy/docker-compose.yml. Новый сервис compose — новая строка (тест сверяет).
+  forbidden_hosts:
+    - localhost
+    - caddy
+    - bifrost
+    - vllm
+    - vllm-embed
+    - vllm-rerank
+    - dcgm-exporter
+    - prometheus
+    - grafana
+    - lego
+    - portal-web
+    - portal-api
+    - portal-worker
+    - portal-db
+    - qdrant
+    - sql-sandbox
+    - code-sandbox
+  # Имена, адресам которых разрешены подсети портала (петлевые и локальные канала — нет).
+  # Только стенд (customer-db); на ВМ список пуст.
+  allowed_internal_hosts: []

@@ -1,13 +1,23 @@
 """«Проверить запрос» и слой предпросмотра проекта «Код» (docs/portal-api.md §7.5.18)."""
 
 import asyncio
+import contextlib
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 import pytest
 
 from portal.core.settings import Settings
+from portal.databases.ports import (
+    DbRightsExcessError,
+    DbTarget,
+    DbUnavailableError,
+    RightsReport,
+    SampleRequest,
+    SampleRows,
+)
 from tests.code_support import code_portal, new_project
 from tests.db_support import (
     FakeCustomerDatabase,
@@ -25,9 +35,9 @@ pytestmark = pytest.mark.anyio
 PARCELS = [{"schema": "cadastre", "name": "parcels"}]
 
 
-async def _web(client: httpx.AsyncClient) -> dict[str, Any]:
+async def _web(client: httpx.AsyncClient, name: str = "Слой") -> dict[str, Any]:
     response = await client.post(
-        "/api/code/projects", json={"source": "template", "kind": "js_plugin", "name": "Слой"}
+        "/api/code/projects", json={"source": "template", "kind": "js_plugin", "name": name}
     )
     assert response.status_code == 201, response.text
     project: dict[str, Any] = response.json()["project"]
@@ -243,3 +253,90 @@ async def test_preview_layer_flags(settings: Settings) -> None:
             params={"schema": "cadastre", "table": "parcels"},
         )
         assert response.status_code == 403
+
+
+class _GatedDatabase(FakeCustomerDatabase):
+    """Слой из образца ждёт `gate`; `fail` — чем закончится обращение к порту."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate: asyncio.Event | None = None
+        self.entered = asyncio.Event()
+        self.fail: Exception | None = None
+
+    async def sample(
+        self, target: DbTarget, tables: Sequence[SampleRequest], *, rows: int, preview: bool
+    ) -> tuple[RightsReport, Sequence[SampleRows]]:
+        result = await super().sample(target, tables, rows=rows, preview=preview)
+        self.entered.set()
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.fail is not None:
+            raise self.fail
+        return result
+
+
+async def test_one_sample_layer_load_per_employee(settings: Settings) -> None:
+    """Вторая загрузка слоя из образца у сотрудника — `429` без обращения к базе (§7.5.18)."""
+    fake = _GatedDatabase()
+    query = {"schema": "cadastre", "table": "parcels"}
+    async with code_portal(db_settings(settings), customer_database=fake) as (portal, _):
+        client = await portal.employee()
+        web, other_web = await _web(client), await _web(client, "Другой слой")
+        connection = await _with_selection(portal, client, web["id"], samples_allowed=True)
+        selection = {"db": {"connection_id": connection, "tables": PARCELS}}
+        await client.patch(f"/api/code/projects/{other_web['id']}", json=selection)
+        petrov = await portal.employee("petrov")
+        petrov_web = await _web(petrov)
+        await petrov.patch(f"/api/code/projects/{petrov_web['id']}", json=selection)
+
+        def layer(who: httpx.AsyncClient, project: dict[str, Any]) -> Any:
+            return who.get(f"/api/code/projects/{project['id']}/preview-layer", params=query)
+
+        # Отказы до обращения к базе отметку не ставят.
+        wrong = await client.get(
+            f"/api/code/projects/{web['id']}/preview-layer",
+            params={"schema": "public", "table": "notes"},
+        )
+        assert wrong.status_code == 422
+
+        fake.gate = asyncio.Event()
+        first = asyncio.create_task(layer(client, web))
+        await asyncio.wait_for(fake.entered.wait(), timeout=5)
+        calls = len(fake.calls)
+        for project in (web, other_web):
+            busy = await layer(client, project)
+            assert (busy.status_code, busy.json()["error"]["code"]) == (
+                429,
+                "db_sample_in_progress",
+            )
+            assert (
+                busy.json()["error"]["message"] == "Образец уже загружается. Дождитесь окончания."
+            )
+        assert len(fake.calls) == calls
+        # У другого сотрудника своя отметка.
+        fake.entered.clear()
+        second = asyncio.create_task(layer(petrov, petrov_web))
+        await asyncio.wait_for(fake.entered.wait(), timeout=5)
+        fake.gate.set()
+        assert (await first).status_code == 200 and (await second).status_code == 200
+
+        # После итога, ошибки базы, лишних прав на шаге 4 и обрыва клиентом — снова можно.
+        fake.gate = None
+        assert (await layer(client, web)).status_code == 200
+        fake.fail = DbUnavailableError("timeout")
+        assert (await layer(client, web)).status_code == 503
+        fake.fail = DbRightsExcessError(RightsReport([WRITE], []))
+        unusable = await layer(client, web)
+        assert unusable.json()["error"]["code"] == "db_connection_unusable"
+        await portal.execute("UPDATE db_connections SET rights_status = 'unknown'")
+        fake.fail = None
+        fake.gate, fake.entered = asyncio.Event(), asyncio.Event()
+        aborted = asyncio.create_task(layer(client, web))
+        await asyncio.wait_for(fake.entered.wait(), timeout=5)
+        aborted.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await aborted
+        fake.gate.set()
+        fake.gate = None
+        assert (await layer(client, web)).status_code == 200

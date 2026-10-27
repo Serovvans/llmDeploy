@@ -22,9 +22,24 @@ export function findingLine(finding: RightsFinding): { left: string; right: stri
   if (ROLE_ATTRIBUTES.has(finding.kind)) {
     return { left, right: finding.kind.toUpperCase() };
   }
+  const privileges = finding.privileges.join(', ');
   switch (finding.kind) {
     case 'write':
-      return { left, right: `${finding.privileges.join(', ')}: ${objectNames(finding)}` };
+    case 'maintain':
+      return { left, right: `${privileges}: ${objectNames(finding)}` };
+    case 'grant_option':
+      return { left, right: `${privileges} WITH GRANT OPTION: ${objectNames(finding)}` };
+    case 'admin_option':
+      return { left, right: `WITH ADMIN OPTION: ${objectNames(finding)}` };
+    case 'server_settings':
+      return { left, right: `${privileges} ON PARAMETER: ${objectNames(finding)}` };
+    case 'catalog_function':
+      return { left, right: `EXECUTE ON FUNCTION: ${objectNames(finding)}` };
+    case 'large_object':
+      return { left, right: `UPDATE ON LARGE OBJECT: ${objectNames(finding)}` };
+    case 'lo_compat_privileges':
+      // Объекта нет — справа только параметр (§5.14).
+      return { left, right: 'lo_compat_privileges = on' };
     case 'create': {
       const created = finding.objects.map((item) => r.createObject(item.type, item.name)).join(', ');
       const more = finding.total - finding.objects.length;
@@ -41,6 +56,12 @@ export function findingLine(finding: RightsFinding): { left: string; right: stri
 function clipboardLine(finding: RightsFinding): string {
   if (finding.kind === 'owner') {
     return r.clipboard.owner(objectNames(finding));
+  }
+  if (finding.kind === 'admin_option') {
+    return r.clipboard.adminOption(objectNames(finding));
+  }
+  if (finding.kind === 'lo_compat_privileges') {
+    return r.clipboard.loCompat;
   }
   if (finding.kind === 'definer_function') {
     return r.clipboard.definer(objectNames(finding));
@@ -75,6 +96,7 @@ export function reasonText(connection: AdminDbConnection): string {
     case 'tls_required':
     case 'timeout':
     case 'busy':
+    case 'host_forbidden':
       return reasons[error.reason];
     case 'database_not_found':
       return reasons.database_not_found(connection.database);

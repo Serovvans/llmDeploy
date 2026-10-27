@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api, isApiError } from '../api/client';
-import type { CodeAction, CodeConfig, CodeFile, CodeProject, CodeTarget, DbConnection, QuestionParams, Source } from '../api/types';
+import type { CodeAction, CodeConfig, CodeFile, CodeProject, CodeTarget, DbConnection, PreviewFix, QuestionParams, Source } from '../api/types';
 import { useDialogs } from '../chat/ChatProvider';
 import { EMPTY_DRAFT, type ChatMessage } from '../chat/state';
 import { Composer } from '../components/chat/Composer';
@@ -38,7 +38,9 @@ export type Ask =
   | { kind: 'wizard'; content: string }
   | { kind: 'change'; fragment: Fragment }
   /** «Исправить с помощником» у JS и HTML (1.0, §5.13.20): обычный вопрос «Написать или изменить». */
-  | { kind: 'write'; content: string };
+  | { kind: 'write'; content: string }
+  /** То же по ошибкам предпросмотра: текст вопроса собирает сервер из `preview_fix` (контракт §7.5.16). */
+  | { kind: 'previewFix'; previewFix: PreviewFix };
 
 /** Строки файла для `target` «весь файл»: последний перевод строки новой строки не начинает. */
 function lineCount(text: string): number {
@@ -235,12 +237,19 @@ export function useAssistant(options: Options) {
           SingleToast.push(a.busy);
           return true;
         }
+        // Файл переименовали или удалили (`unknown_value`) либо укоротили (`invalid_format`) после запуска
+        // предпросмотра (концепция §5.13.20, контракт §7.5.16); прочие коды — общий текст отказа.
+        const changedAfterRun = (code: string) => code === 'unknown_value' || code === 'invalid_format';
+        if (isApiError(error, 'validation_error') && error.fields.some((item) => item.field.startsWith('preview_fix') && changedAfterRun(item.code))) {
+          SingleToast.push(texts.workshop.web.pane.fixChanged);
+          return true;
+        }
         return options.sectionOff(error);
       },
     [options],
   );
 
-  const sendBuilt = async (sendAction: CodeAction, content: string | undefined, target: Fragment | null) => {
+  const sendBuilt = async (sendAction: CodeAction, content: string | undefined, target: Fragment | null, previewFix?: PreviewFix) => {
     setTooLarge(null);
     setTooLong(false);
     await options.flush();
@@ -252,6 +261,7 @@ export function useAssistant(options: Options) {
     chat.send(dialogId, sendParams, () => undefined, onRefused(scope), {
       content,
       codeTarget: target,
+      previewFix,
     });
   };
 
@@ -290,6 +300,10 @@ export function useAssistant(options: Options) {
       case 'write':
         setAction('write');
         void sendBuilt('write', request.content, null);
+        break;
+      case 'previewFix':
+        setAction('write');
+        void sendBuilt('write', undefined, null, request.previewFix);
         break;
       case 'change':
         setAction('write');
