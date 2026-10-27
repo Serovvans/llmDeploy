@@ -2,6 +2,7 @@ import { Loader, SingleToast } from '@skbkontur/react-ui';
 import { lazy, Suspense, useEffect } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 
+import { DatabasesScreen } from './admin/DatabasesScreen';
 import { ChatProvider } from './chat/ChatProvider';
 import { MediaUploadsProvider } from './chat/MediaUploads';
 import { DocparseProvider } from './docparse/DocparseProvider';
@@ -119,6 +120,7 @@ function Workspace() {
         <Route path="/code/*" element={<CodeRoute />} />
         <Route path="/documents/:id?" element={<DocumentsScreen />} />
         <Route path="/admin/users" element={<UsersScreen />} />
+        <Route path="/admin/databases" element={<DatabasesScreen />} />
         <Route path="/profile" element={<ProfileScreen user={user} />} />
         <Route path="*" element={<NotFoundScreen />} />
         </Routes>

@@ -33,15 +33,30 @@ import 'monaco-editor/languages/definitions/csharp/register.js';
 
 import * as monaco from 'monaco-editor/editor/editor.api.js';
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker';
+import CssWorker from 'monaco-editor/languages/features/css/css.worker.js?worker';
 
 import type { CodeSdk } from '../../api/types';
 import { CODE_COLORS } from '../../theme/codeColors';
 import type { ResolvedTheme } from '../../theme/preference';
 import { suggestions, type SuggestionKind } from '../sdkCompletion';
 import './monaco.css';
+import TsWorker from './ts.worker.ts?worker';
 
-// Воркер — отдельный файл своего origin: `default-src 'self'` его разрешает, `blob:` не нужен (А-113).
-self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
+export { checkSyntax, configureWeb, countSyntaxErrors, registerHtmlScriptHints } from './web';
+
+// Воркеры — отдельные файлы своего origin: `default-src 'self'` их разрешает, `blob:` не нужен (А-113).
+// Воркер TypeScript и воркер CSS грузятся только при открытии файла JavaScript, HTML или CSS (1.0).
+self.MonacoEnvironment = {
+  getWorker: (_moduleId: string, label: string) => {
+    if (label === 'javascript' || label === 'typescript') {
+      return new TsWorker();
+    }
+    if (label === 'css') {
+      return new CssWorker();
+    }
+    return new EditorWorker();
+  },
+};
 
 export type Monaco = typeof monaco;
 export { monaco };
@@ -120,6 +135,19 @@ export function applyTheme(theme: ResolvedTheme): void {
       { token: 'delimiter', foreground: plain(c('--p-text')) },
       { token: 'namespace', foreground: plain(c('--p-text')) },
       { token: 'annotation', foreground: plain(c('--p-text')) },
+      // JavaScript, HTML и CSS (1.0): у HTML теги — ключевые слова, атрибуты — типы, значения — строки;
+      // у CSS селекторы — типы, свойства — ключевые слова, значения — строки и числа (§7.3).
+      { token: 'regexp', foreground: plain(code.string) },
+      { token: 'metatag', foreground: plain(code.keyword) },
+      { token: 'tag', foreground: plain(code.keyword) },
+      { token: 'attribute.name', foreground: plain(code.type) },
+      { token: 'attribute.value', foreground: plain(code.string) },
+      { token: 'tag.css', foreground: plain(code.type) },
+      { token: 'attribute.name.css', foreground: plain(code.keyword) },
+      { token: 'attribute.value.css', foreground: plain(code.string) },
+      { token: 'attribute.value.number.css', foreground: plain(code.number) },
+      { token: 'attribute.value.unit.css', foreground: plain(code.number) },
+      { token: 'attribute.value.hex.css', foreground: plain(code.number) },
     ],
     colors: {
       'editor.background': c('--p-bg'),

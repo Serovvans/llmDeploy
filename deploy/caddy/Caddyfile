@@ -139,6 +139,25 @@
 		}
 	}
 
+	# Предпросмотр раздела «Код»: страница исполняет код проекта и получает свою политику
+	# вместо политики портала (docs/portal-api.md §7.5.17); CSP портала не ослабляется.
+	# defer — значения ставятся при отправке ответа и заменяют и заголовки сайта выше, и
+	# всё, что пришло от portal-web; Strict-Transport-Security остаётся от сайта.
+	handle /code-preview/* {
+		import portal-encode
+		header {
+			defer
+			# 'unsafe-eval' — Knockout разбирает data-bind через new Function. Источников-адресов
+			# нет: ни сети, ни <script src>. sandbox держит изоляцию и при открытии напрямую.
+			Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts"
+			X-Frame-Options SAMEORIGIN
+			X-Content-Type-Options nosniff
+			Referrer-Policy no-referrer
+			Cache-Control no-cache
+		}
+		reverse_proxy portal-web:8080
+	}
+
 	handle {
 		import portal-encode
 		reverse_proxy portal-web:8080

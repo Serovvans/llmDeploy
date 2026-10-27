@@ -4,13 +4,13 @@ import { Button, Hint, Input, Kebab, Loader, MenuItem, Paging, ScrollContainer, 
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
+import { AdminHeader } from '../admin/AdminHeader';
 import { api, USERS_PAGE_SIZE, type UserListQuery } from '../api/client';
 import type { AdminUser, Page, TemporaryPasswordResult } from '../api/types';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { DataTable, SortableHeader } from '../components/DataTable';
 import { EmptyState } from '../components/EmptyState';
 import { Notice } from '../components/Notice';
-import { PageHeader } from '../components/PageHeader';
 import { TitleHint } from '../components/TitleHint';
 import { useFocusReturn } from '../hooks/useFocusReturn';
 import { usePageTitle } from '../hooks/usePageTitle';
@@ -183,13 +183,16 @@ function UsersList() {
 
   return (
     <>
-      <PageHeader title={t.title}>
-        <span data-opener="add">
-          <Button use="primary" onClick={() => openDialog({ kind: 'create' }, 'add')}>
-            {t.add}
-          </Button>
-        </span>
-      </PageHeader>
+      <AdminHeader
+        title={t.title}
+        action={
+          <span data-opener="add">
+            <Button use="primary" onClick={() => openDialog({ kind: 'create' }, 'add')}>
+              {t.add}
+            </Button>
+          </span>
+        }
+      />
       <ScrollContainer>
         <div className={styles.content}>
           <Input

@@ -85,6 +85,15 @@ INNER_MODULES = [
     "code/assistant.py",
     "files/zipdir.py",
     "code/evaluation.py",
+    "code/kinds.py",
+    "code/sql_check.py",
+    "code/preview_fix.py",
+    "tools/sqlstates.py",
+    "databases/domain.py",
+    "databases/errors.py",
+    "databases/ports.py",
+    "databases/service.py",
+    "databases/hosts.py",
 ]
 # Сценарии зависят от портов, а не от их реализаций.
 INFRASTRUCTURE = {
@@ -103,6 +112,10 @@ INFRASTRUCTURE = {
     "portal.worker.queue",
     "portal.code.repositories", "portal.code.tables", "portal.code.routes", "portal.code.schemas",
     "portal.code.sandbox", "portal.code.reference", "portal.code.templates", "portal.code.zipio",
+    "portal.code.web",
+    "portal.databases.repositories", "portal.databases.tables", "portal.databases.crypto",
+    "portal.databases.customer", "portal.databases.routes", "portal.databases.schemas",
+    "portal.databases.network",
 }  # fmt: skip
 
 

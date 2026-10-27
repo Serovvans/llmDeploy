@@ -328,8 +328,9 @@ for (const theme of ['light', 'dark'] as const) {
 
     // С 0.9 вместо помощника CoGIS — раздел «Код»: начало раздела и проект со сборкой и правкой.
     await page.goto('/code');
-    await expect(page.getByRole('heading', { name: 'Пример из инструкции' })).toBeVisible();
-    const productWords = ['GPTool', 'DLL', 'ZIP', 'Visual Studio', '.NET'];
+    // С 1.0 начало раздела — выбор вида проекта (docs/portal-ui.md §5.13.17).
+    await expect(page.getByRole('heading', { name: 'Что нужно сделать' })).toBeVisible();
+    const productWords = ['GPTool', 'DLL', 'ZIP', 'Visual Studio', '.NET', 'C#', 'JavaScript', 'HTML', 'CSS', 'JS'];
     await checkScreen(page, theme, 'код-начало', testInfo, productWords);
     const project = await simpleProject(member.api, `Theme${theme}`);
     // Источники ответа — документация CoGIS общей базы, которую добавили другие тесты: тоже данные.

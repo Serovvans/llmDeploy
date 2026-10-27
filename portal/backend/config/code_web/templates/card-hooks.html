@@ -1,0 +1,32 @@
+<script>
+  // Хуки карточки объекта: CoGIS сам вызывает эти функции окна.
+  // Замените имена полей, подписи кнопок и тексты сообщений на свои.
+
+  // Перед сохранением: не даёт сохранить объект с пустым полем «Кадастровый номер».
+  window.checkBeforeSave = function (object, project) {
+    var errors = [];
+    var number = object.attributes().get("Кадастровый номер")();
+    if (!number) {
+      errors.push("Заполните поле «Кадастровый номер».");
+    }
+    return ko.observable(errors);
+  };
+
+  // Видимость кнопки: прячет кнопку «Снять с учёта», если статус объекта — «Архив».
+  window.checkButtonVisibilityInCard = function (object, button, project) {
+    if (button.caption === "Снять с учёта") {
+      return ko.observable(object.attributes().get("Статус")() !== "Архив");
+    }
+    return ko.observable(true);
+  };
+
+  // Перед запуском задачи кнопкой карточки: проверяет, что у объекта указан район.
+  window.checkBeforeExecuteButtonInCard = function (object, button, project) {
+    var district = object.attributes().get("Район")();
+    if (!district) {
+      api.showAlert("Запуск задачи", "У объекта не указан район.");
+      return ko.observable(false);
+    }
+    return ko.observable(true);
+  };
+</script>

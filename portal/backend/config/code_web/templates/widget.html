@@ -1,0 +1,22 @@
+<!-- Фильтр слоя по полю status: введите значение и нажмите Enter, кнопка убирает фильтр. -->
+<!-- Замените на свои: адрес сервиса карты, номер слоя и имя поля. -->
+<style>
+  .status-filter { padding: 8px; }
+  .status-filter input { width: 100%; margin-bottom: 8px; }
+</style>
+<div class="status-filter">
+  <input id="statusFilterValue" type="text" placeholder="Значение поля status"
+    data-bind="event: { keypress: function (data, event) {
+      if (event.keyCode == 13) {
+        api.addAttributeFilterToLayer(
+          api.getLayer('https://cogis.example/arcgis/rest/services/Parcels/MapServer', 0),
+          'status', [$('#statusFilterValue').val()], 'Equal');
+        return false;
+      }
+      return true;
+    } }" />
+  <button class="action" data-bind="click: function () {
+      var layer = api.getLayer('https://cogis.example/arcgis/rest/services/Parcels/MapServer', 0);
+      api.removeAttributeFilterToLayer(layer, 'status', [$('#statusFilterValue').val()], 'Equal');
+    }">Удалить фильтр</button>
+</div>

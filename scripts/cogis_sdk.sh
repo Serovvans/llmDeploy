@@ -13,16 +13,23 @@
 #   plugins.txt  обязателен: список файлов папки plugins, вывод
 #                ls /usr/elitegis/plugins/ > plugins.txt на сервере CoGIS;
 #   <id>.dll     каждого пакета офлайн-набора, чья DLL названа в plugins.txt, — копия
-#                из /usr/elitegis/plugins/ (portal-api.md §7.5.14, «Пакеты на сервере»).
+#                из /usr/elitegis/plugins/ (portal-api.md §7.5.14, «Пакеты на сервере»);
+#   client/      (1.0, необязательна) файлы клиента CoGIS для предпросмотра и подсказок
+#                под постоянными именами: jquery.js, knockout.js, leaflet.js, leaflet.css;
+#                каждый необязателен (portal-api.md §7.5.16, «Библиотеки клиента CoGIS»).
 #
 # Что делает:
-#   1. проверяет набор файлов папки SDK и копии DLL пакетов, стоящих на сервере (список
-#      пакетов — portal code-packages разовым запуском образа portal-api без сети);
+#   1. проверяет набор файлов папки SDK, файлы client/ (не больше 4 МиБ, UTF-8) и копии
+#      DLL пакетов, стоящих на сервере (список пакетов — portal code-packages разовым
+#      запуском образа portal-api без сети);
 #   2. разовым запуском образа песочницы без сети (code-sandbox index) пишет в том
 #      llm_cogis-sdk-index manifest.json (файлы, вид, версии, SHA-256) и reference.json
 #      (справочник API) и печатает таблицу файлов; при ошибке ничего не записывается;
-#   3. пересоздаёт code-sandbox: манифест он читает только при старте и сверяет суммы;
-#   4. проверяет из portal-api, что песочница видит SDK, и печатает его версию.
+#   3. заменяет каталог client/ тома индекса копиями файлов client/ (нет папки — пустой
+#      каталог) тем же образом без сети;
+#   4. пересоздаёт code-sandbox: манифест он читает только при старте и сверяет суммы;
+#   5. проверяет из portal-api, что песочница видит SDK, и печатает его версию и версии
+#      библиотек клиента CoGIS.
 # Портал перечитывает индекс сам, его перезапуск не нужен. Флаг сборки
 # (code.build.enabled) скрипт не меняет. После обновления CoGIS скрипт повторяют.
 set -euo pipefail
@@ -34,6 +41,20 @@ readonly DEPLOY_DIR
 readonly ENV_FILE="${DEPLOY_DIR}/.env"
 readonly SDK_DIR="${DEPLOY_DIR}/cogis-sdk"
 readonly SDK_REQUIRED=(eLiteGIS.Server.dll Atemiko.eLiteMap.dll plugins.txt)
+# Библиотеки клиента CoGIS (1.0): папка, постоянные имена файлов и предел размера.
+readonly CLIENT_DIR="${SDK_DIR}/client"
+readonly CLIENT_FILES=(jquery.js knockout.js leaflet.js leaflet.css)
+readonly CLIENT_MAX_BYTES=$((4 * 1024 * 1024))
+# Замена client/ в томе индекса (внутри разового контейнера): распаковка tar-потока в
+# client.new, права 644 для portal-api, подмена прежнего каталога.
+readonly CLIENT_REPLACE='set -eu
+cd /index
+rm -rf client.new
+mkdir client.new
+tar -xf - -C client.new
+find client.new -type f -exec chmod 644 {} +
+rm -rf client
+mv client.new client'
 # Имя проекта — строка name: в docker-compose.yml; с него начинаются имена томов и образов.
 readonly COMPOSE_PROJECT="llm"
 readonly SERVICE="code-sandbox"
@@ -84,13 +105,81 @@ check_sdk_dir() {
       "${fix}; plugins.txt — вывод ls /usr/elitegis/plugins/ на сервере CoGIS; имена — с учётом регистра"
   local entry subdirs=()
   for entry in "$SDK_DIR"/*/; do
-    if [[ -d "$entry" ]]; then subdirs+=("$(basename "$entry")"); fi
+    if [[ -d "$entry" && "$(basename "$entry")" != client ]]; then
+      subdirs+=("$(basename "$entry")")
+    fi
   done
   [[ "${#subdirs[@]}" -eq 0 ]] ||
     log "ВНИМАНИЕ: подпапки ${SDK_DIR} не читаются (${subdirs[*]}): DLL кладутся в корень папки"
   # Пустой список допустим (плагинов нет), но чаще значит, что файл сняли не с той папки.
   grep -qiE '\.dll[[:space:]]*$' "${SDK_DIR}/plugins.txt" ||
     log "ВНИМАНИЕ: в plugins.txt нет ни одного .dll — все DLL пакетов попадут в архив для CoGIS; проверить: ls /usr/elitegis/plugins/ на сервере CoGIS"
+}
+
+is_client_file() {
+  local name
+  for name in "${CLIENT_FILES[@]}"; do
+    [[ "$1" == "$name" ]] && return 0
+  done
+  return 1
+}
+
+# Файлы client/, которые копируются в том индекса: известные имена, по строке на файл.
+client_present() {
+  local name
+  for name in "${CLIENT_FILES[@]}"; do
+    if [[ -f "${CLIENT_DIR}/${name}" ]]; then printf '%s\n' "$name"; fi
+  done
+}
+
+# Файлы client/ проверяются до индекса: при отказе том не меняется. Папки нет — не ошибка.
+check_client_dir() {
+  [[ -d "$CLIENT_DIR" ]] || return 0
+  local entry name size others=()
+  for entry in "$CLIENT_DIR"/*; do
+    [[ -e "$entry" ]] || continue
+    name="${entry##*/}"
+    if [[ ! -f "$entry" ]] || ! is_client_file "$name"; then others+=("$name"); fi
+  done
+  [[ "${#others[@]}" -eq 0 ]] ||
+    log "ВНИМАНИЕ: в ${CLIENT_DIR} не копируются (${others[*]}): берутся только ${CLIENT_FILES[*]}"
+  while IFS= read -r name; do
+    size="$(wc -c <"${CLIENT_DIR}/${name}" | tr -d '[:space:]')"
+    ((size <= CLIENT_MAX_BYTES)) ||
+      die "${CLIENT_DIR}/${name} больше 4 МиБ (${size} байт)" \
+        "взять с сервера CoGIS файл самой библиотеки (не архив и не сборку клиента целиком) и повторить make cogis-sdk"
+    iconv -f UTF-8 -t UTF-8 "${CLIENT_DIR}/${name}" >/dev/null 2>&1 ||
+      die "${CLIENT_DIR}/${name} не в кодировке UTF-8" \
+        "скопировать файл с сервера CoGIS без преобразования (scp, не через буфер обмена) и повторить make cogis-sdk"
+  done < <(client_present)
+}
+
+# Версия из первых 2 КиБ файла $1 по образцу $2 (как у portal-api, portal-api.md §7.5.16);
+# пусто — не нашлась.
+client_version() {
+  head -c 2048 "$1" | LC_ALL=C grep -oE "$2" | head -n 1 |
+    grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
+}
+
+# «Библиотека версия», «Библиотека (версия не найдена)» или «Библиотека нет».
+client_entry() {
+  local title="$1" file="${CLIENT_DIR}/$2" pattern="$3" version
+  if [[ ! -f "$file" ]]; then
+    printf '%s нет' "$title"
+    return
+  fi
+  version="$(client_version "$file" "$pattern")"
+  printf '%s %s' "$title" "${version:-(версия не найдена)}"
+}
+
+client_summary() {
+  local css="нет"
+  if [[ -f "${CLIENT_DIR}/leaflet.css" ]]; then css="есть"; fi
+  printf 'Библиотеки клиента CoGIS: %s, %s, %s, leaflet.css %s\n' \
+    "$(client_entry jQuery jquery.js 'jQuery (JavaScript Library )?v[0-9]+\.[0-9]+\.[0-9]+')" \
+    "$(client_entry Knockout knockout.js 'Knockout JavaScript library v[0-9]+\.[0-9]+\.[0-9]+')" \
+    "$(client_entry Leaflet leaflet.js 'Leaflet [0-9]+\.[0-9]+\.[0-9]+')" \
+    "$css"
 }
 
 # Образ сервиса $1 с тегом установки портала.
@@ -168,6 +257,25 @@ build_index() {
       "исправить набор файлов в ${SDK_DIR} и повторить make cogis-sdk; если сказано о правах на /index — docker volume rm ${INDEX_VOLUME} (сначала docker compose stop ${SERVICE} portal-api) и повторить"
 }
 
+# Файлы идут в контейнер tar-потоком со стороны ВМ: их читает root, и права копий
+# администратора не мешают пользователю образа. Нет файлов — пустой каталог client/.
+copy_client() {
+  local image="$1" name files=()
+  while IFS= read -r name; do files+=("$name"); done < <(client_present)
+  log "библиотеки клиента CoGIS: ${CLIENT_DIR} → том ${INDEX_VOLUME}, каталог client/ (${files[*]:-файлов нет})"
+  {
+    if [[ "${#files[@]}" -gt 0 ]]; then
+      tar -C "$CLIENT_DIR" -cf - -- "${files[@]}"
+    else
+      tar -cf - -T /dev/null
+    fi
+  } | docker run --rm -i --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true -v "${INDEX_VOLUME}:/index" \
+    --entrypoint /bin/sh "$image" -c "$CLIENT_REPLACE" ||
+    die "библиотеки клиента CoGIS не скопированы в том ${INDEX_VOLUME} (индекс SDK уже обновлён)" \
+      "повторить make cogis-sdk; если сказано о правах на /index — docker volume rm ${INDEX_VOLUME} (сначала docker compose stop ${SERVICE} portal-api) и повторить"
+}
+
 restart_sandbox() {
   log "пересоздание ${SERVICE}: SDK и индекс читаются при старте"
   compose up -d --no-deps --force-recreate --wait "$SERVICE" ||
@@ -189,6 +297,7 @@ print_summary() {
   cat <<EOF
 
 ===== SDK CoGIS подключён: версия ${sdk_version} =====
+$(client_summary)
 Флаг сборки не менялся. Пока сборка выключена, «Собрать» недоступно; включить её —
 после проверки сборки на настоящих DLL (docs/portal-design.md §8.5):
   в ${DEPLOY_DIR}/portal/config.override.yaml задать
@@ -196,7 +305,8 @@ print_summary() {
       build:
         enabled: true
   и перезапустить портал: cd ${DEPLOY_DIR} && docker compose restart portal-api
-После обновления CoGIS — заменить файлы в ${SDK_DIR} и повторить make cogis-sdk.
+После обновления CoGIS — заменить файлы в ${SDK_DIR} (и в ${CLIENT_DIR}) и повторить
+make cogis-sdk.
 EOF
 }
 
@@ -204,12 +314,14 @@ main() {
   check_root
   check_portal_deployed
   check_sdk_dir
+  check_client_dir
   local image api_image
   image="$(image_ref "$SERVICE")"
   api_image="$(image_ref portal-api)"
   check_server_packages "$api_image"
   ensure_index_volume
   build_index "$image"
+  copy_client "$image"
   restart_sandbox
   verify_sdk
   print_summary

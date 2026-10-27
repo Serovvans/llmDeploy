@@ -25,3 +25,15 @@
   line-height: 20px;
   white-space: normal;
 }
+
+/* Недоступный «Диалект» с подключением (Д-70): в обходе, фокус виден. */
+.fixedDialect {
+  display: inline-flex;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.fixedDialect:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}

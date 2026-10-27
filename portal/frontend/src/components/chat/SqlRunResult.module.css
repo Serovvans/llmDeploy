@@ -175,3 +175,10 @@
   gap: 12px;
   margin-top: 6px;
 }
+
+/* Строка происхождения проверки с подключением (§5.7, §7.3): 14 px, `--p-text-muted`. */
+.origin {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}

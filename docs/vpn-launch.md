@@ -147,6 +147,11 @@ make smoke-portal             # что отдаёт сайт через 443 и �
 `plugins.txt` — в `deploy/cogis-sdk/`, затем `make cogis-sdk`; включение и проверка на
 настоящих DLL — `docs/release-0.9.md`, шаги 4, 8, 11–13; состав файлов — `docs/runbook.md` §3.11.
 
+С 1.0: файлы клиента CoGIS (jQuery, Knockout, Leaflet) — в `deploy/cogis-sdk/client/`, тоже перед `make cogis-sdk`;
+подключения к базам заказчика выключены (`db.enabled: false`) до заявки DevOps (`docs/devops-request.md` §1.5), учётной
+записи «только чтение» (`docs/runbook.md` §3.12) и проверки подсетей Docker. Установка сразу на 1.0 — приложение в
+`docs/release-1.0.md`.
+
 ### 7. Учётные записи
 
 1. Войти под первым администратором, сменить временный пароль, настроить второй фактор:

@@ -38,10 +38,22 @@ interface Props {
   onPending: (pending: boolean) => void;
   onProjectGone: () => void;
   sectionOff: (error: unknown) => boolean;
+  /** Проект JS или HTML: сборки нет — тексты без неё (§5.13.17). */
+  web?: boolean;
 }
 
 /** Версии проекта — `SidePage` 480 px (концепция §5.13.13). */
-export function VersionsPanel({ projectId, max, onClose, beforeRestore, onRestored, onPending, onProjectGone, sectionOff }: Props) {
+export function VersionsPanel({
+  projectId,
+  max,
+  onClose,
+  beforeRestore,
+  onRestored,
+  onPending,
+  onProjectGone,
+  sectionOff,
+  web = false,
+}: Props) {
   const [snapshots, setSnapshots] = useState<Snapshots>({ status: 'loading' });
   const [restoring, setRestoring] = useState<CodeSnapshot | null>(null);
   const [pending, setPending] = useState(false);
@@ -104,7 +116,7 @@ export function VersionsPanel({ projectId, max, onClose, beforeRestore, onRestor
       </Notice>
     );
   } else if (snapshots.items.length === 0) {
-    body = <p className={styles.muted}>{v.empty}</p>;
+    body = <p className={styles.muted}>{web ? texts.workshop.web.versionsEmpty : v.empty}</p>;
   } else {
     body = (
       <ul className={styles.list}>
@@ -130,7 +142,7 @@ export function VersionsPanel({ projectId, max, onClose, beforeRestore, onRestor
       <SidePage.Body>
         <SidePage.Container>
           <div className={styles.body}>
-            <p className={styles.muted}>{v.note(max)}</p>
+            <p className={styles.muted}>{web ? texts.workshop.web.versionsNote(max) : v.note(max)}</p>
             {body}
           </div>
         </SidePage.Container>

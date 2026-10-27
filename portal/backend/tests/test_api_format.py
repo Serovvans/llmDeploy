@@ -173,7 +173,7 @@ async def test_config_is_available_on_any_login_step(portal: Portal) -> None:
     assert response.status_code == 200
     config = response.json()
     assert set(config) == {
-        "password", "dialogs", "chat", "kb", "media", "docparse", "sql", "memory", "code",
+        "password", "dialogs", "chat", "kb", "media", "docparse", "sql", "memory", "code", "db",
     }  # fmt: skip
     assert config["password"] == {"min_length": 12, "max_length": 128}
     assert config["dialogs"] == {"message_max_chars": 32000}

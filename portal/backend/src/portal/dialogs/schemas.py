@@ -12,6 +12,8 @@ from pydantic import (
 )
 
 from portal.core.schemas import ApiTime, RequestModel
+from portal.databases.schemas import DbSelectionOut, SelectionRequest
+from portal.databases.service import SelectionInput
 from portal.dialogs.domain import (
     AnswerMode,
     Attachment,
@@ -59,9 +61,16 @@ class SummaryRequest(RequestModel):
 
 
 class RenameDialogRequest(RequestModel):
-    """`PATCH /api/dialogs/{id}`."""
+    """`PATCH /api/dialogs/{id}`: `{ title?, db? }`, хотя бы одно; `db` — только у `sql`."""
 
-    title: str
+    title: str | None = None
+    db: SelectionRequest | None = None
+
+    def selection(self) -> SelectionInput | None:
+        """`db` для сценария; `null` — снять выбор."""
+        if self.db is None:
+            return None
+        return SelectionInput(self.db.connection_id, self.db.pairs())
 
 
 class ChatMessageRequest(RequestModel):
@@ -100,12 +109,17 @@ class CodeTargetRequest(RequestModel):
 
 
 class CodeMessageRequest(RequestModel):
-    """Тело сообщения в диалоге `code` (§7.5.8): `file_ids` и `target` обязательны, `null` — нет."""
+    """Тело сообщения в диалоге `code` (§7.5.8): `file_ids` и `target` обязательны, `null` — нет.
 
-    content: str
+    С `preview_fix` (§7.5.16) поля `content` нет: текст вопроса собирает сервер; само поле
+    проверяет сценарий.
+    """
+
+    content: str | None = None
     action: Literal["write", "explain", "fix"]
     file_ids: list[UUID] | None
     target: CodeTargetRequest | None
+    preview_fix: dict[str, Any] | None = None
 
 
 class DocparseMessageRequest(RequestModel):
@@ -152,6 +166,12 @@ class SqlRegenerateRequest(RequestModel):
     """Необязательное тело повторной генерации в диалоге `sql`: замена схемы (§5.6)."""
 
     schema_id: UUID | None
+
+
+class SqlRecheckRequest(RequestModel):
+    """Тело «Проверить снова»: номер блока в `sql_run` ответа (§7.4)."""
+
+    index: int
 
 
 class DocparseFieldOut(BaseModel):
@@ -278,6 +298,18 @@ def _carried(carried: CarriedView) -> CarriedOut:
     )
 
 
+class SqlDialogOut(DialogOut):
+    """`Dialog` вида `sql` в ответе `PATCH` (1.0): с выбором подключения."""
+
+    db: DbSelectionOut | None
+
+
+class SqlDialogMemoryOut(DialogMemoryOut):
+    """`GET /api/dialogs/{id}` вида `sql` (1.0): с выбором подключения."""
+
+    db: DbSelectionOut | None
+
+
 class DialogDetailsOut(DialogMemoryOut):
     """`GET /api/dialogs/{id}` для вида `docparse`: ещё и результат разбора."""
 
@@ -347,6 +379,32 @@ class SourceOut(BaseModel):
     quote: str
 
 
+def _sql_run(stored: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Блоки `sql_run`, сохранённые до 1.0, — с полями 1.0 по умолчанию (§9.32)."""
+    if stored is None:
+        return None
+    blocks = []
+    for block in stored.get("blocks") or []:
+        result, fixture = block.get("result"), block.get("fixture")
+        if result is not None and "row_count" not in result:
+            rows = result.get("rows")
+            result = {**result, "row_count": None if rows is None else len(rows)}
+        blocks.append(
+            {
+                **block,
+                "db": block.get("db"),
+                "fixture": None
+                if fixture is None
+                else [
+                    {"origin": "invented", "invented_reason": None, **table} for table in fixture
+                ],
+                "result": result,
+                "error_kind": block.get("error_kind", "message" if block.get("error") else None),
+            }
+        )
+    return {**stored, "blocks": blocks}
+
+
 class MessageOut(BaseModel):
     """Объект `Message`."""
 
@@ -387,7 +445,7 @@ class MessageOut(BaseModel):
             else [SourceOut.model_validate(source) for source in message.sources],
             sources_found=message.sources_found,
             sql_check=message.sql_check,
-            sql_run=message.sql_run,
+            sql_run=_sql_run(message.sql_run),
             sql_dangers=message.sql_dangers,
             dropped_messages=message.dropped_messages,
             memory_mode=message.memory_mode,

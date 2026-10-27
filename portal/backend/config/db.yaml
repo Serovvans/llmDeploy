@@ -1,0 +1,56 @@
+# Подключения к базам заказчика (docs/portal-api.md §7.6, §13.6). Пароли подключений —
+# в базе портала, зашифрованы PORTAL_SECRET_KEY; здесь только параметры.
+
+db:
+  # Включается после заявки DevOps, учётной записи по памятке и чистой проверки прав
+  # (ПД §8.6); при false маршруты §7.6 и слой из образца — 403.
+  enabled: false
+  application_name: scancontrol-portal
+  # Корневой сертификат заказчика для tls_mode: verify; файла нет — режим недоступен.
+  tls_root_cert_file: /etc/portal/customer-root-ca.pem
+  connect_timeout_seconds: 5
+  statement_timeout_seconds: 10
+  lock_timeout_seconds: 2
+  idle_in_transaction_timeout_seconds: 10
+  max_connections_per_server: 2
+  # Меньше sql.sandbox.total_timeout_seconds (проверка при старте).
+  wait_seconds: 10
+  snapshot_refresh_minutes: 30
+  sample_rows_check: 50
+  sample_rows_preview: 50
+  value_max_bytes: 65536
+  sample_max_bytes: 8388608
+  snapshot_max_tables: 2000
+  snapshot_max_columns: 40000
+  comment_max_chars: 500
+  max_selected_tables: 200
+  # Таблиц образца в одной проверке блока; остальным — придуманные данные (§7.4).
+  sample_max_tables: 200
+  # Сроки на стороне портала (§7.6.5): ответ сервера на одну операцию (больше
+  # statement_timeout_seconds и lock_timeout_seconds) и всё обращение (больше
+  # connect_timeout_seconds + client_timeout_seconds). По сроку соединение рвётся.
+  client_timeout_seconds: 15
+  access_timeout_seconds: 120
+  # Имена, которые нельзя указать сервером подключения (ПД §8.6 п. 4): localhost и все
+  # сервисы deploy/docker-compose.yml. Новый сервис compose — новая строка (тест сверяет).
+  forbidden_hosts:
+    - localhost
+    - caddy
+    - bifrost
+    - vllm
+    - vllm-embed
+    - vllm-rerank
+    - dcgm-exporter
+    - prometheus
+    - grafana
+    - lego
+    - portal-web
+    - portal-api
+    - portal-worker
+    - portal-db
+    - qdrant
+    - sql-sandbox
+    - code-sandbox
+  # Имена, адресам которых разрешены подсети портала (петлевые и локальные канала — нет).
+  # Только стенд (customer-db); на ВМ список пуст.
+  allowed_internal_hosts: []

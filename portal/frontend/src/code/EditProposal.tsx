@@ -6,7 +6,7 @@ import { Button, Link } from '@skbkontur/react-ui';
 import { useEffect, useId, useState } from 'react';
 
 import { api } from '../api/client';
-import type { CodeConfig, CodeEdit, CodeEditFull, CodeVerification } from '../api/types';
+import type { CodeConfig, CodeEdit, CodeEditFull, CodeKind, CodeVerification } from '../api/types';
 import { texts } from '../texts';
 import styles from './EditProposal.module.css';
 import { formatDateTime, lineDiffStats, rejectedReason } from './rules';
@@ -95,8 +95,8 @@ function Verification({ verification }: { verification: CodeVerification }) {
   );
 }
 
-function reasonSuffix(reason: string, config: CodeConfig): string {
-  const text = rejectedReason(reason, config);
+function reasonSuffix(reason: string, config: CodeConfig, kind: CodeKind): string {
+  const text = rejectedReason(reason, config, kind);
   return text ? ` — ${text}` : '';
 }
 
@@ -105,6 +105,8 @@ interface Props {
   messageId: string;
   edit: CodeEdit;
   config: CodeConfig;
+  /** Вид проекта (1.0): тексты отклонённых файлов веб-видов. */
+  kind?: CodeKind;
   /** Текущий текст файла проекта по пути, с несохранёнными правками; `null` — файла нет. */
   currentText: (path: string) => string | null;
   /** Решение сейчас недоступно: идёт решение по этой правке. */
@@ -116,7 +118,7 @@ interface Props {
 }
 
 /** Карточка правки под ответом помощника (концепция §5.13.11). */
-export function EditProposal({ projectId, messageId, edit, config, currentText, pending, onReview, onReject, onVersions }: Props) {
+export function EditProposal({ projectId, messageId, edit, config, kind = 'gptool', currentText, pending, onReview, onReject, onVersions }: Props) {
   const [after, setAfter] = useState<Map<string, string> | null>(null);
   const proposed = edit.status === 'proposed';
 
@@ -150,7 +152,7 @@ export function EditProposal({ projectId, messageId, edit, config, currentText, 
           <span>
             {e.notAccepted}
             <span className={styles.mono}>{item.path}</span>
-            {reasonSuffix(item.reason, config)}
+            {reasonSuffix(item.reason, config, kind)}
           </span>
         </p>
       ))}

@@ -7,6 +7,7 @@ import type {
   AnswerMode,
   Attachment,
   CodeTarget,
+  DbSelection,
   Dialog,
   DialogKind,
   DialogSummary,
@@ -14,6 +15,7 @@ import type {
   MemoryMode,
   Message,
   PortalConfig,
+  PreviewFix,
   QuestionParams,
 } from '../api/types';
 import { errorText, texts } from '../texts';
@@ -33,6 +35,7 @@ import {
   INITIAL_STATE,
   isTranscribing,
   newDialogKey,
+  type ChatAction,
   type ChatState,
   type Draft,
   type DraftAttachment,
@@ -84,11 +87,36 @@ type OnRefused = (error: unknown) => boolean;
 
 /**
  * Вопрос, текст которого строит интерфейс (помощник проекта, концепция §5.13.10): `content` уходит вместо
- * текста поля, поле не трогается; `codeTarget` — фрагмент для показа у вопроса в ленте.
+ * текста поля, поле не трогается; `codeTarget` — фрагмент для показа у вопроса в ленте. `previewFix` — вместо
+ * текста: его собирает сервер (контракт §7.5.16), лента берёт сохранённый текст после события `start`.
  */
 export interface SendOptions {
   content?: string;
   codeTarget?: CodeTarget | null;
+  previewFix?: PreviewFix;
+}
+
+/**
+ * Поток вопроса `preview_fix` как есть; после `start` (вопрос сохранён) лента берёт его текст с сервера: его
+ * собрал сервер, а показать нужно таким, каким он ушёл помощнику (концепция §5.13.20). Не прочитался —
+ * вопрос остаётся без текста до следующего чтения ленты.
+ */
+async function* withSavedQuestion(id: string, events: AsyncGenerator<StreamEvent>, dispatch: (action: ChatAction) => void) {
+  for await (const event of events) {
+    yield event;
+    if (event.type === 'start') {
+      const messageId = event.user_message_id;
+      api.listMessages(id, null).then(
+        (page) => {
+          const saved = page.items.find((message) => message.id === messageId);
+          if (saved) {
+            dispatch({ type: 'questionSaved', id, messageId, content: saved.content });
+          }
+        },
+        () => undefined,
+      );
+    }
+  }
 }
 
 const NEW_PREFIX = 'new:';
@@ -144,6 +172,15 @@ interface ChatApi {
   addDialog: (dialog: Dialog) => void;
   /** Диалог удалён в другой вкладке: убрать его строку и ленту без запроса к серверу. */
   forgetDialog: (id: string) => void;
+  /**
+   * Создать диалог без вопроса — выбором подключения в SQL-помощнике (контракт §7.6.9): черновик переходит к нему,
+   * в истории он появится с первым вопросом.
+   */
+  createDialog: (key: string, onCreated: OnCreated) => Promise<string>;
+  /** Выбор подключения сохранён у диалога (ответ `PATCH`). */
+  showDb: (id: string, db: DbSelection | null) => void;
+  /** «Проверить снова» блока `index` ответа `messageId` (контракт §6.6): диалог занят до конца проверки. */
+  recheck: (id: string, messageId: string, index: number) => void;
 }
 
 const ChatContext = createContext<ChatApi | null>(null);
@@ -685,8 +722,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
     ) => {
       const fieldDraft = stateRef.current.drafts[key] ?? EMPTY_DRAFT;
       // Текст, построенный интерфейсом, уходит вместо поля: поле и его вложения остаются как были.
-      const built = options?.content !== undefined;
-      const draft = built ? { ...EMPTY_DRAFT, text: options.content ?? '' } : fieldDraft;
+      const previewFix = options?.previewFix;
+      const built = options?.content !== undefined || previewFix !== undefined;
+      const draft = built ? { ...EMPTY_DRAFT, text: options?.content ?? '' } : fieldDraft;
       // Вложения, режим ответа и база знаний — только у чата (контракт §5.3).
       const isChat = 'mode' in params;
       const composer = texts.chat.composer;
@@ -702,7 +740,7 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
         refusal = composer.mediaFailed;
       } else if (draft.attachments.some(isTranscribing)) {
         refusal = composer.transcribing;
-      } else if (!draft.text.trim() && ready.length === 0) {
+      } else if (!previewFix && !draft.text.trim() && ready.length === 0) {
         refusal = composer.enterQuestion;
       } else if (config && draft.text.length > config.dialogs.message_max_chars) {
         refusal = composer.messageTooLong(config.dialogs.message_max_chars);
@@ -745,12 +783,17 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
           if (!built) {
             updateDraft(id, () => EMPTY_DRAFT);
           }
-          const body = { content, ...params, ...(isChat ? { attachment_ids: ready.map((a) => a.id) } : {}) };
+          const body = {
+            ...(previewFix ? { preview_fix: previewFix } : { content }),
+            ...params,
+            ...(isChat ? { attachment_ids: ready.map((a) => a.id) } : {}),
+          };
           void runStream(
             kind,
             id,
-            (signal) => api.sendMessage(id, body, signal),
-            content,
+            (signal) => (previewFix ? withSavedQuestion(id, api.sendMessage(id, body, signal), dispatch) : api.sendMessage(id, body, signal)),
+            // Текста вопроса `preview_fix` интерфейс не знает: при обрыве лента показывается как на сервере.
+            previewFix ? null : content,
             () => {
               // Вопрос и вложения возвращаются в панель запроса; построенный интерфейсом — нет: его не набирали.
               dispatch({ type: 'generationRejected', id, messages: before });
@@ -807,6 +850,66 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
 
   const stop = useCallback((id: string) => streams.current.get(id)?.abort(), []);
 
+  const createDialog = useCallback((key: string, onCreated: OnCreated) => ensureDialog(key, onCreated), [ensureDialog]);
+
+  const showDb = useCallback((id: string, db: DbSelection | null) => dispatch({ type: 'dbChanged', id, db }), []);
+
+  const recheck = useCallback(
+    (id: string, messageId: string, index: number) => {
+      const view = stateRef.current.dialogs[id];
+      const original = view?.messages.find((message) => message.id === messageId)?.sql_run?.blocks.find((block) => block.index === index);
+      if (!view || !original || view.generation || view.recheck || streams.current.has(id)) {
+        return;
+      }
+      const controller = new AbortController();
+      streams.current.set(id, controller);
+      dispatch({ type: 'recheckStarted', id, messageId, index });
+      dispatch({ type: 'recheckBlock', id, messageId, block: { ...original, status: 'pending' } });
+      // Остановка, обрыв и отказ сохранённый итог не меняют (контракт §6.6): блок возвращается к нему.
+      const restore = () => dispatch({ type: 'recheckBlock', id, messageId, block: original });
+      void (async () => {
+        let finished = false;
+        try {
+          for await (const event of api.recheckSqlRun(id, messageId, index, controller.signal)) {
+            if (event.type === 'sql_run') {
+              const block = event.blocks[0];
+              if (block) {
+                dispatch({ type: 'recheckBlock', id, messageId, block });
+              }
+            } else if (event.type === 'done') {
+              finished = true;
+            } else if (event.type === 'error') {
+              finished = true;
+              restore();
+              if (event.code === 'dialog_deleted') {
+                forgetDialog(id);
+                SingleToast.push(texts.dialogs.sql.removedElsewhere);
+              } else if (event.code !== 'session_ended') {
+                SingleToast.push(event.message, { use: 'error' });
+              }
+            }
+          }
+          if (!finished) {
+            restore();
+          }
+        } catch (error) {
+          restore();
+          if (isApiError(error, 'generation_in_progress')) {
+            SingleToast.push(texts.db.run.recheckWait);
+          } else if (!controller.signal.aborted && !isAbort(error) && !isApiError(error, 'unauthenticated')) {
+            SingleToast.push(errorText(error), { use: 'error' });
+          }
+        } finally {
+          if (streams.current.get(id) === controller) {
+            streams.current.delete(id);
+          }
+          dispatch({ type: 'recheckFinished', id });
+        }
+      })();
+    },
+    [forgetDialog],
+  );
+
   const rename = useCallback(async (id: string, title: string) => {
     dispatch({ type: 'dialogUpserted', dialog: await api.renameDialog(id, title), toTop: false });
   }, []);
@@ -848,6 +951,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       remove,
       addDialog,
       forgetDialog,
+      createDialog,
+      showDb,
+      recheck,
     }),
     [
       state,
@@ -876,6 +982,9 @@ export function ChatProvider({ config, children }: { config: PortalConfig | null
       remove,
       addDialog,
       forgetDialog,
+      createDialog,
+      showDb,
+      recheck,
     ],
   );
 

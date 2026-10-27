@@ -70,6 +70,17 @@ class DialogRepository(Protocol):
         """Записать название, если его ещё нет; `False` — пользователь уже назвал сам."""
         ...
 
+    async def set_selection(
+        self,
+        owner_id: UUID,
+        dialog_id: UUID,
+        connection_id: UUID | None,
+        title: str | None,
+        tables: list[dict[str, str]],
+    ) -> None:
+        """Записать выбор подключения диалога `sql` (§7.6.9); `title = None` — выбора нет."""
+        ...
+
     async def touch_dialog(self, owner_id: UUID, dialog_id: UUID, now: datetime) -> None:
         """Обновить `updated_at`: в диалоге новое сообщение."""
         ...
@@ -274,7 +285,8 @@ class AnswerPlan:
     `selection` — выбор для поиска в базе знаний, `None` — поиск не выполняется. `sql_dialect`
     задан у диалога `sql`: по нему проверяются блоки `sql` готового ответа. `sql_test_schema`
     — текст схемы, по которой запросы ответа проверяются на тестовых данных (§7.4);
-    `None` — проверки нет.
+    `None` — проверки нет. `sql_test_db` — выбор подключения вопроса
+    (`messages.params.db`, 1.0): проверка идёт на образце (§7.4).
     """
 
     system: str
@@ -284,6 +296,19 @@ class AnswerPlan:
     selection: KnowledgeSelection | None = None
     sql_dialect: str | None = None
     sql_test_schema: str | None = None
+    sql_test_db: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class RunReport:
+    """Состояние проверки SQL: `event` — для события `sql_run`, `stored` — для хранения.
+
+    С 1.0 они различаются у блоков с подключением: в сохранённой записи нет строк базы, а
+    ошибка исполнения при образце — код SQLSTATE (§7.4, «Проверка на образце»).
+    """
+
+    event: Mapping[str, Any]
+    stored: Mapping[str, Any]
 
 
 class DialogTool(Protocol):
@@ -320,14 +345,31 @@ class DialogTool(Protocol):
         owner_id: UUID,
         plan: AnswerPlan,
         content: str,
-        report: Callable[[Mapping[str, Any]], None],
+        report: Callable[[RunReport], None],
+        *,
+        only: int | None = None,
     ) -> None:
         """Проверить запросы сохранённого ответа на тестовых данных (§7.4).
 
         Вызывается только при `plan.sql_test_schema`. `report` получает `SqlRun` целиком
         при каждой смене состояния; в последнем нет блоков `pending` и `running` — и
-        тогда, когда задача отменена (остановка, потеря сессии).
+        тогда, когда задача отменена (остановка, потеря сессии). `only` — «Проверить
+        снова»: только блок с этим `index` (1.0).
         """
+        ...
+
+
+class SqlRechecker(Protocol):
+    """Выбор подключения диалога `sql` и «Проверить снова» (1.0, §7.4, §7.6.9)."""
+
+    async def recheck_plan(self, owner_id: UUID, params: Mapping[str, Any]) -> AnswerPlan:
+        """План с `sql_test_schema`, `sql_test_db` и диалектом; отказы — до потока."""
+        ...
+
+    async def with_selection(
+        self, owner_id: UUID, dialog_id: UUID, params: Mapping[str, Any], *, question: bool
+    ) -> dict[str, Any]:
+        """Параметры с текущим выбором диалога в `db`; у вопроса выбор обязан быть доступен."""
         ...
 
 

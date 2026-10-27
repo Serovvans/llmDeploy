@@ -315,6 +315,16 @@ def export_zip(
     return buffer.getvalue()
 
 
+def web_zip(files: Sequence[tuple[str, str]], memo: str, moment: datetime) -> bytes:
+    """Выгрузка веб-вида: файлы по путям в корне архива и `Памятка.txt` с BOM (§7.5.16)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path, content in files:
+            archive.writestr(_entry(path, moment), content.encode())
+        archive.writestr(_entry(MEMO_NAME, moment), (_UTF8_BOM + memo).encode())
+    return buffer.getvalue()
+
+
 _KIND_WORDS = {
     "tool": "инструмент",
     "package": "пакет, которого нет на сервере CoGIS",
@@ -388,6 +398,10 @@ class ZipProjectArchives:
     ) -> bytes:
         """Выгрузка проекта для Visual Studio."""
         return export_zip(name, files, references, packages, memo, moment)
+
+    def web_zip(self, files: Sequence[tuple[str, str]], memo: str, moment: datetime) -> bytes:
+        """Выгрузка веб-вида с памяткой."""
+        return web_zip(files, memo, moment)
 
     def cogis_archive(
         self,

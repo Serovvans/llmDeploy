@@ -3,6 +3,7 @@
  * подстановки мастера, состояние строки «Путь до CoGIS», числа строк в разнице.
  */
 import type {
+  CodeKind,
   CodeBuild,
   CodeConfig,
   CodeFile,
@@ -14,6 +15,7 @@ import type {
   WizardTool,
 } from '../api/types';
 import { formatDate, formatSize, texts } from '../texts';
+import { extensionList, kindRules, wrongExtensionText } from './kinds';
 
 const w = texts.workshop;
 
@@ -94,17 +96,22 @@ const lower = (value: string) => value.toLowerCase();
  * Ошибка пути нового или переименованного файла (концепция §5.13.5): правила пути, повтор без учёта
  * регистра и совпадение с папкой (`path_conflict`). `self` — переименовываемый файл.
  */
-export function filePathError(path: string, files: readonly CodeFile[], config: CodeConfig, self?: string): string | null {
+export function filePathError(path: string, files: readonly CodeFile[], config: CodeConfig, self?: string, kind: CodeKind = 'gptool'): string | null {
   if (!path) {
     return w.files.enter;
   }
-  switch (pathProblem(path, config.file_extensions)) {
+  const { extensions, singleFile } = kindRules(config, kind);
+  if (self === undefined && singleFile) {
+    // Устаревший экран: у однофайлового вида «+ Файл» нет (§5.13.24).
+    return w.web.files.singleFile;
+  }
+  switch (pathProblem(path, extensions)) {
     case 'outside_project':
       return w.files.outside;
     case 'invalid_format':
       return invalidPathText(path);
     case 'extension_not_allowed':
-      return w.files.onlyCs;
+      return kind === 'gptool' ? w.files.onlyCs : wrongExtensionText(config, kind);
   }
   const others = files.filter((file) => file.id !== self).map((file) => lower(file.path));
   const target = lower(path);
@@ -121,9 +128,17 @@ export function filePathError(path: string, files: readonly CodeFile[], config: 
 }
 
 /** Текст отказа сервера по пути файла (таблица §5.13.15); `null` — код не про путь. */
-export function filePathServerError(error: { code: string; fields: { field: string; code: string }[]; details: Record<string, unknown> }, path: string): string | null {
+export function filePathServerError(
+  error: { code: string; fields: { field: string; code: string }[]; details: Record<string, unknown> },
+  path: string,
+  config: CodeConfig,
+  kind: CodeKind = 'gptool',
+): string | null {
   if (error.code === 'file_exists') {
     return w.files.exists;
+  }
+  if (error.code === 'single_file_project') {
+    return w.web.files.singleFile;
   }
   if (error.code === 'project_limit') {
     const max = Number(error.details.max);
@@ -134,7 +149,7 @@ export function filePathServerError(error: { code: string; fields: { field: stri
     case 'required':
       return w.files.enter;
     case 'extension_not_allowed':
-      return w.files.onlyCs;
+      return kind === 'gptool' ? w.files.onlyCs : wrongExtensionText(config, kind);
     case 'outside_project':
       return w.files.outside;
     case 'path_conflict':
@@ -554,8 +569,14 @@ export function importLines(report: ImportReport, project: CodeProject, config: 
 }
 
 /** Причина отказа портала у файла правки (таблица §5.13.11); `null` — строка без причины. */
-export function rejectedReason(reason: string, config: CodeConfig): string | null {
+export function rejectedReason(reason: string, config: CodeConfig, kind: CodeKind = 'gptool'): string | null {
   const r = w.edit.reasons;
+  if (reason === 'extension_not_allowed' && kind !== 'gptool') {
+    return w.web.notExtension(extensionList(kindRules(config, kind).extensions));
+  }
+  if (reason === 'single_file') {
+    return w.web.singleFileRejected;
+  }
   switch (reason) {
     case 'outside_project':
     case 'invalid_path':
@@ -585,5 +606,6 @@ export function formatDateTime(iso: string, now: Date = new Date()): string {
 
 /** В ответе идёт блок правки (`csharp path=…`, контракт §7.5.10): строка состояния — «Готовлю правку…». */
 export function hasEditBlock(text: string): boolean {
-  return /^[ \t]*(`{3,}|~{3,})[ \t]*(csharp|cs|c#)(?![\w#])[^\n]*\bpath=/im.test(text);
+  // С 1.0 правка веб-видов приходит и в ограждениях JavaScript, HTML и CSS (контракт §7.5.16).
+  return /^[ \t]*(`{3,}|~{3,})[ \t]*(csharp|cs|c#|javascript|js|html|css)(?![\w#])[^\n]*\bpath=/im.test(text);
 }

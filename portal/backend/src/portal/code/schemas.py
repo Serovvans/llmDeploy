@@ -7,8 +7,10 @@ from pydantic import BaseModel, Field
 
 from portal.code.domain import ProjectFile, Snapshot, StoredBuild
 from portal.code.ports import ProjectPage
-from portal.code.service import ProjectDetails
+from portal.code.service import CatalogInput, ProjectDetails
 from portal.core.schemas import ApiTime, RequestModel
+from portal.databases.schemas import DbSelectionOut, SelectionRequest
+from portal.databases.service import SelectionInput
 from portal.dialogs.schemas import CarriedRequest
 
 
@@ -27,10 +29,49 @@ class ExampleProjectRequest(RequestModel):
     name: str
 
 
-# Тело создания проекта: мастер или пример, по полю `source`.
+class TemplateProjectRequest(RequestModel):
+    """`POST /api/code/projects` — веб-вид из шаблона (§7.5.16); вид и имя проверяет сценарий."""
+
+    source: Literal["template"]
+    kind: str
+    name: str
+
+
+# Тело создания проекта: мастер, пример или шаблон веб-вида, по полю `source`.
 CreateProjectRequest = Annotated[
-    WizardProjectRequest | ExampleProjectRequest, Field(discriminator="source")
+    WizardProjectRequest | ExampleProjectRequest | TemplateProjectRequest,
+    Field(discriminator="source"),
 ]
+
+
+class CatalogFileRequest(RequestModel):
+    """Настройки кастомизации файла: место вставки и клиенты (§7.5.16)."""
+
+    file_id: UUID
+    insertion: Literal["head_start", "head_end", "body_start", "body_end"]
+    clients: list[Literal["smartphone", "tablet", "desktop"]]
+
+    def to_input(self) -> CatalogInput:
+        """Вход сценария."""
+        return CatalogInput(self.file_id, self.insertion, list(self.clients))
+
+
+class SqlParameterRequest(RequestModel):
+    """Значение параметра «Проверить запрос»: имя как в запросе, с `@` или `$` (§7.5.18)."""
+
+    name: str
+    value: str
+
+
+class SqlCheckRequest(RequestModel):
+    """Тело `POST /api/code/projects/{id}/sql-check` (§7.5.18)."""
+
+    sql: str
+    parameters: list[SqlParameterRequest] = Field(default_factory=list)
+
+    def bound(self) -> list[tuple[str, str]]:
+        """Пары `(имя, значение)` в порядке тела."""
+        return [(item.name, item.value) for item in self.parameters]
 
 
 class PatchProjectRequest(RequestModel):
@@ -38,6 +79,14 @@ class PatchProjectRequest(RequestModel):
 
     packages: list[str] | None = None
     schema_id: UUID | None = None
+    db: SelectionRequest | None = None
+    catalog_files: list[CatalogFileRequest] | None = None
+
+    def selection(self) -> SelectionInput | None:
+        """`db` для сценария; `null` — снять выбор."""
+        if self.db is None:
+            return None
+        return SelectionInput(self.db.connection_id, self.db.pairs())
 
 
 class AddFileRequest(RequestModel):
@@ -76,6 +125,7 @@ class CodeFileOut(BaseModel):
     content: str
     revision: int
     updated_at: ApiTime
+    catalog: dict[str, Any] | None
 
     @classmethod
     def of(cls, file: ProjectFile) -> Self:
@@ -86,6 +136,7 @@ class CodeFileOut(BaseModel):
             content=file.content,
             revision=file.revision,
             updated_at=file.updated_at,
+            catalog=file.catalog,
         )
 
 
@@ -136,10 +187,12 @@ class CodeProjectOut(BaseModel):
     build_running: bool
     created_at: ApiTime
     updated_at: ApiTime
+    kind: str
+    db: DbSelectionOut | None
 
     @classmethod
-    def of(cls, details: ProjectDetails) -> Self:
-        """Проект целиком."""
+    def of(cls, details: ProjectDetails, db: DbSelectionOut | None = None) -> Self:
+        """Проект целиком; `db` — выбор подключения, когда он виден (§7.6.9)."""
         project = details.project
         return cls(
             id=project.id,
@@ -154,6 +207,8 @@ class CodeProjectOut(BaseModel):
             build_running=details.running,
             created_at=project.created_at,
             updated_at=project.updated_at,
+            kind=project.kind,
+            db=db,
         )
 
 
@@ -180,6 +235,7 @@ class CodeProjectItemOut(BaseModel):
     name: str
     updated_at: ApiTime
     build: BuildBadgeOut | None
+    kind: str
 
     @classmethod
     def of(cls, page: ProjectPage) -> Self:
@@ -193,7 +249,13 @@ class CodeProjectItemOut(BaseModel):
                 outdated=build.project_revision != project.revision,
                 findings=None if findings is None else len(findings),
             )
-        return cls(id=project.id, name=project.name, updated_at=project.updated_at, build=badge)
+        return cls(
+            id=project.id,
+            name=project.name,
+            updated_at=project.updated_at,
+            build=badge,
+            kind=project.kind,
+        )
 
 
 class CodeProjectListOut(BaseModel):

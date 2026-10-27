@@ -20,6 +20,8 @@ from portal.core.container import Container
 from portal.core.db import ping
 from portal.core.middleware import BODY_REFUSAL_KEY, BodyLimit, PortalMiddleware, error_response
 from portal.core.validation import validation_failure
+from portal.databases.routes import admin_router as db_admin_router
+from portal.databases.routes import router as db_router
 from portal.dialogs.routes import ATTACHMENT_UPLOAD_PATH, RECORDING_UPLOAD_PATH
 from portal.dialogs.routes import router as dialogs_router
 from portal.kb.routes import DOCUMENT_UPLOAD_PATH
@@ -125,6 +127,7 @@ def create_app(container: Container) -> FastAPI:
         await container.drafts.shutdown()
         await container.docparse.shutdown()
         await container.code.shutdown()
+        await container.sql_check.shutdown()
         container.sql_checker.close()
         container.hash_executor.shutdown()
         # Идущее чтение не ждём: тяжёлая страница PDF задержала бы остановку.
@@ -147,6 +150,8 @@ def create_app(container: Container) -> FastAPI:
     app.include_router(tools_router)
     app.include_router(kb_router)
     app.include_router(code_router)
+    app.include_router(db_admin_router)
+    app.include_router(db_router)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:

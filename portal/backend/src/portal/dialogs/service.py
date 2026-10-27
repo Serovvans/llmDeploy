@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 from portal.core.errors import (
     docx_images_too_large,
     docx_too_large,
+    feature_disabled,
     field_error,
     file_too_large,
     file_unreadable,
@@ -26,8 +27,9 @@ from portal.core.errors import (
     unsupported_file_type,
     validation_error,
 )
-from portal.core.ports import Clock, SessionAuthenticator
+from portal.core.ports import Clock, CurrentUser, SessionAuthenticator
 from portal.core.settings import ChatSettings
+from portal.databases.service import DbService, SelectionInput
 from portal.dialogs import errors
 from portal.dialogs.domain import (
     TITLE_MAX_LENGTH,
@@ -229,6 +231,13 @@ class DialogExporter(Protocol):
         ...
 
 
+class _Unset:
+    """Поле не передано: `db: null` в `PATCH` — осмысленное «снять выбор»."""
+
+
+UNSET = _Unset()
+
+
 class DialogService:
     """Диалоги и вложения владельца; чужое всегда `not_found`."""
 
@@ -250,6 +259,7 @@ class DialogService:
         summary_forming: Callable[[UUID], bool],
         exporter: DialogExporter,
         code_enabled: bool,
+        databases: DbService | None = None,
     ) -> None:
         """Получить зависимости явно.
 
@@ -263,8 +273,9 @@ class DialogService:
         блокировку PDF стоят в их очереди и не занимают общий пул цикла событий.
         `carried_max_chars` — предел длины перенесённого (`memory.max_chars`).
         `code_enabled` — флаг раздела «Код»: при нём диалоги `cogis` только для чтения
-        (§7.5.15).
+        (§7.5.15). `databases` — выбор подключения у диалогов `sql` (1.0, §7.6.9).
         """
+        self._databases = databases
         self._uow_factory = uow_factory
         self._storage = storage
         self._files = files
@@ -446,6 +457,45 @@ class DialogService:
             await uow.dialogs.set_title(owner_id, dialog_id, title)
             dialog.title = title
             return dialog
+
+    async def update(
+        self,
+        user: CurrentUser,
+        dialog_id: UUID,
+        title: str | None,
+        db: SelectionInput | _Unset | None,
+    ) -> Dialog:
+        """`PATCH` диалога: название и (у `sql`) выбор подключения (§7.6.9).
+
+        Выбор разрешено менять и во время ответа: идущий ответ его уже взял.
+        """
+        dialog = await self.get(user.id, dialog_id)
+        if not isinstance(db, _Unset) and dialog.kind != "sql":
+            raise validation_error([field_error("db", "invalid_format")])
+        if not isinstance(db, _Unset) and (self._databases is None or not self._databases.enabled):
+            raise feature_disabled()
+        if title is not None:
+            dialog = await self.rename(user.id, dialog_id, title)
+        if isinstance(db, _Unset):
+            return dialog
+        assert self._databases is not None  # флаг проверен выше
+        selection = await self._databases.select(user, db)
+        async with self._uow_factory() as uow:
+            current = await uow.dialogs.get_dialog(user.id, dialog_id, lock=True)
+            if current is None:
+                raise not_found()
+            self.check_writable(current)
+            current.db_connection_id = None if selection is None else selection.connection_id
+            current.db_connection_title = None if selection is None else selection.title
+            current.db_tables = [] if selection is None else selection.tables_data()
+            await uow.dialogs.set_selection(
+                user.id,
+                dialog_id,
+                current.db_connection_id,
+                current.db_connection_title,
+                current.db_tables,
+            )
+            return current
 
     async def delete(self, owner_id: UUID, dialog_id: UUID) -> None:
         """Удалить диалог: сначала файлы вложений, затем строка (§5.2).

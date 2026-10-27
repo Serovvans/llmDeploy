@@ -1,0 +1,238 @@
+/* Колонка «Предпросмотр» (концепция §5.13.21, §7.3): на месте колонки помощника, в теме портала. */
+.pane {
+  grid-area: assistant;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 16px 12px;
+  overflow-y: auto;
+  border-left: 1px solid var(--p-line);
+  background: var(--p-bg);
+}
+
+.expanded {
+  border-left: none;
+}
+
+.head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+}
+
+.title {
+  flex: 1;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.title:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.changed,
+.settings,
+.origin,
+.muted,
+.note {
+  margin: 0;
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.changed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  color: var(--p-text);
+}
+
+.layerSelect {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.refusal {
+  margin: 0;
+  color: var(--p-error-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.unavailable {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.frameArea {
+  display: flex;
+  flex: 55 0 200px;
+  flex-direction: column;
+  min-height: 200px;
+}
+
+.loader {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.frameBox {
+  position: relative;
+  flex: 1;
+  min-height: 200px;
+  overflow: hidden;
+  border: 1px solid var(--p-line);
+  /* Фон фрейма всегда белый, в обеих темах (§7.3, Д-65): код пишется под страницы CoGIS. */
+  background: #ffffff;
+}
+
+.frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.journal {
+  display: flex;
+  flex: 45 0 160px;
+  flex-direction: column;
+  min-height: 160px;
+}
+
+.journalBody {
+  flex: 1;
+  min-height: 0;
+  padding-top: 8px;
+  overflow-y: auto;
+}
+
+.log,
+.problems {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.logRow {
+  display: flex;
+  flex-direction: column;
+}
+
+.logButton {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--p-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.logButton:hover {
+  background: var(--p-surface-2);
+}
+
+.logButton:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: -2px;
+}
+
+.number {
+  flex: none;
+  min-width: 20px;
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.call {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mono,
+.args,
+.errorText {
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.result {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--p-text-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.args,
+.errorText {
+  display: block;
+  margin: 2px 0 0 28px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--p-surface-2);
+  white-space: pre-wrap;
+}
+
+.errorText {
+  margin: 2px 0 0;
+}
+
+.problem {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.problem svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.problemBody {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.errorIcon {
+  color: var(--p-error-text);
+}
+
+.warningIcon {
+  flex: none;
+  color: var(--p-warning-icon);
+}

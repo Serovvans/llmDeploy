@@ -61,48 +61,15 @@
   min-height: 0;
 }
 
-.column {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-  width: 100%;
-  max-width: 824px;
-  margin: 0 auto;
-  padding: 32px 32px 48px;
-}
 
 .intro {
   font-size: 16px;
   line-height: 24px;
 }
 
-.blocks {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-}
 
-.block {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 16px;
-  border: 1px solid var(--p-line);
-  border-radius: 8px;
-  background: var(--p-bg);
-}
 
-.blockTitle {
-  font-size: 16px;
-  font-weight: 600;
-  line-height: 24px;
-}
 
-.blockText {
-  flex: 1;
-  font-size: 14px;
-  line-height: 20px;
-}
 
 .muted {
   color: var(--p-text-muted);
@@ -124,6 +91,63 @@
 
 .fileName {
   overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* Начало раздела 1.0 (концепция §5.13.17): колонка 760 px, пять видов — строки между линиями, без рамок. */
+.kindsColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 824px;
+  margin: 0 auto;
+  padding: 32px 32px 48px;
+}
+
+.kindsTitle {
+  margin-top: 8px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.kindsTitle:focus-visible {
+  outline: 2px solid var(--p-focus);
+  outline-offset: 2px;
+}
+
+.kinds {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--p-line);
+}
+
+.kind {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.kindHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.kindTitle {
+  padding-top: 4px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.kindText {
+  max-width: 600px;
   font-size: 14px;
   line-height: 20px;
 }

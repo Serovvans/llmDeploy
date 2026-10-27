@@ -28,6 +28,12 @@ SQL_FIX_PROMPT = "Исправь запрос."
 SUMMARY_PROMPT = "Перескажи диалог."
 CODE_FIX_PROMPT = "Исправь ошибки сборки."
 CODE_EDIT_LINE = "// Правка заглушки."
+# Правило 2а (1.0): язык ограждения и строка в конце — по расширению первого файла.
+_WEB_EDITS = {
+    ".js": ("javascript", "// Правка заглушки."),
+    ".html": ("html", "<!-- Правка заглушки. -->"),
+    ".css": ("css", "/* Правка заглушки. */"),
+}
 _CODE_FIX_MARK = re.compile(r"\[\[stub:code-fix\]\](.*?)\[\[/stub:code-fix\]\]", re.DOTALL)
 _PROJECT_LINE = re.compile(r"^<проект ", re.MULTILINE)
 _PROJECT_FILE = re.compile(r'<файл имя="([^"\n]*)">\n(.*?)\n</файл>', re.DOTALL)
@@ -179,9 +185,15 @@ def _first_file(text: str) -> tuple[str, str] | None:
     return (found.group(1), found.group(2)) if found else None
 
 
+def _edit_style(path: str) -> tuple[str, str]:
+    """Язык ограждения и строка заглушки по расширению файла; иначе — C#."""
+    suffix = path[path.rfind(".") :].lower() if "." in path else ""
+    return _WEB_EDITS.get(suffix, ("csharp", CODE_EDIT_LINE))
+
+
 def _edit_block(path: str, content: str) -> str:
     """Блок правки «файл целиком» (§7.5.10)."""
-    return f"```csharp path={path}\n{content}\n```"
+    return f"```{_edit_style(path)[0]} path={path}\n{content}\n```"
 
 
 def code_edit(text: str) -> str:
@@ -189,7 +201,7 @@ def code_edit(text: str) -> str:
     first = _first_file(text)
     path, content = first if first else ("StubFile.cs", "// Файл заглушки.")
     if first:
-        content = f"{content.rstrip(chr(10))}\n{CODE_EDIT_LINE}"
+        content = f"{content.rstrip(chr(10))}\n{_edit_style(path)[1]}"
     head = "Правка-заглушка."
     if any(line.startswith("[1] ") for line in text.splitlines()):
         head += " [1]"

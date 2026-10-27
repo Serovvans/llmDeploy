@@ -368,6 +368,8 @@ services:
       # набора сюда не монтируются (docs/portal-api.md §13.5).
       - cogis-sdk-index:/data/cogis-sdk-index:ro
     networks:
+      # Через edge — и Bifrost, и (с 1.0) базы заказчика; песочницы к ним не выходят
+      # (docs/portal-api.md §13.5).
       - edge
       - portal
       # От песочницы portal-api не зависит (depends_on нет): без неё проверка SQL

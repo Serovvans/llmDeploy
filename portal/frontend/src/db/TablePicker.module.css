@@ -1,0 +1,157 @@
+/* Выбор таблиц (концепция §5.7, §5.13.23). Цвета — только переменные темы. */
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.connection {
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.connectionTitle {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.origin {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.muted {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.list {
+  padding-bottom: 16px;
+}
+
+.embeddedList {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  padding: 4px 12px;
+}
+
+.placeholder {
+  min-height: 120px;
+}
+
+.missing {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 0;
+}
+
+.group {
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+}
+
+.schema {
+  padding: 8px 0 4px;
+  color: var(--p-text-muted);
+  font-family: var(--p-font-mono);
+  font-size: 13px;
+}
+
+.table {
+  border-bottom: 1px solid var(--p-line);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr) max-content 32px;
+  align-items: center;
+  gap: 12px;
+  min-height: 36px;
+}
+
+.name {
+  font-family: var(--p-font-mono);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.comment {
+  display: block;
+  min-width: 0;
+}
+
+.ellipsis {
+  display: block;
+  overflow: hidden;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  color: var(--p-text-muted);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.columns {
+  margin: 0 0 8px 28px;
+  padding: 0;
+  list-style: none;
+}
+
+.column {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 2px 0;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.extra {
+  margin-left: auto;
+}
+
+.sideFooter {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}

@@ -6,12 +6,14 @@ import type {
   CodeTarget,
   Dialog,
   DialogCarried,
+  DbSelection,
   DialogKind,
   DialogSummary,
   MemoryMode,
   Message,
   Source,
   SqlRun,
+  SqlRunBlock,
 } from '../api/types';
 import type { MediaFailure } from './files';
 import { footnoteNumbers } from './footnotes';
@@ -60,6 +62,10 @@ export interface DialogView {
    */
   summary: DialogSummary | null;
   carried: DialogCarried | null;
+  /** Выбор подключения у диалога `sql` (контракт §7.6.9; 1.0); `null` — не выбрано или подключения выключены. */
+  db: DbSelection | null;
+  /** Идёт «Проверить снова» блока ответа: диалог занят, как во время ответа (концепция §5.7, А-143). */
+  recheck: { messageId: string; index: number } | null;
 }
 
 export interface DraftAttachment {
@@ -122,6 +128,8 @@ const EMPTY_VIEW: DialogView = {
   generation: null,
   summary: null,
   carried: null,
+  db: null,
+  recheck: null,
 };
 
 export type ChatAction =
@@ -162,10 +170,18 @@ export type ChatAction =
   | { type: 'streamEvent'; id: string; event: StreamEvent; now: number }
   | { type: 'generationStopped'; id: string }
   | { type: 'generationRejected'; id: string; messages: ChatMessage[] }
+  /** Текст вопроса, собранный сервером (`preview_fix`, контракт §7.5.16): лента показывает его, как он ушёл помощнику. */
+  | { type: 'questionSaved'; id: string; messageId: string; content: string }
   /** Режим пары сменён (или возвращён после отказа): у вопроса `questionId` и его ответа (контракт §5.10.1). */
   | { type: 'memoryModeChanged'; id: string; questionId: string; mode: MemoryMode }
   /** Пересказ применён, изменён (`summary`) или сжатие отменено (`null`), контракт §5.10.6. */
   | { type: 'summaryChanged'; id: string; summary: DialogSummary | null }
+  /** Выбор подключения сохранён у диалога (ответ `PATCH`, контракт §7.6.9). */
+  | { type: 'dbChanged'; id: string; db: DbSelection | null }
+  /** «Проверить снова»: начало, новое состояние блока (`block`) и конец (`null`). */
+  | { type: 'recheckStarted'; id: string; messageId: string; index: number }
+  | { type: 'recheckBlock'; id: string; messageId: string; block: SqlRunBlock }
+  | { type: 'recheckFinished'; id: string }
   | { type: 'draftUpdated'; key: string; update: (draft: Draft) => Draft }
   | { type: 'draftMoved'; from: string; to: string };
 
@@ -427,7 +443,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'messagesLoaded':
       return withView(state, action.id, (current) => {
         const dialog = action.dialog;
-        const view = dialog ? { ...current, summary: dialog.summary ?? null, carried: dialog.carried ?? null } : current;
+        const view = dialog
+          ? { ...current, summary: dialog.summary ?? null, carried: dialog.carried ?? null, db: dialog.db ?? null }
+          : current;
         const page = [...action.items].reverse();
         if (action.older) {
           return { ...view, status: 'ready', messages: [...page, ...view.messages], olderCursor: action.nextCursor };
@@ -518,6 +536,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case 'generationRejected':
       return withView(state, action.id, (view) => ({ ...view, messages: action.messages, generation: null }));
+    case 'questionSaved':
+      return withView(state, action.id, (view) => ({
+        ...view,
+        messages: view.messages.map((message) => (message.id === action.messageId ? { ...message, content: action.content } : message)),
+      }));
     case 'memoryModeChanged':
       return withView(state, action.id, (view) => {
         const index = view.messages.findIndex((message) => message.id === action.questionId);
@@ -534,6 +557,26 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case 'summaryChanged':
       return withView(state, action.id, (view) => ({ ...view, summary: action.summary }));
+    case 'dbChanged':
+      return withView(state, action.id, (view) => ({ ...view, db: action.db }));
+    case 'recheckStarted':
+      return withView(state, action.id, (view) => ({ ...view, recheck: { messageId: action.messageId, index: action.index } }));
+    case 'recheckBlock':
+      return withView(state, action.id, (view) => ({
+        ...view,
+        messages: view.messages.map((message) =>
+          message.id === action.messageId && message.sql_run
+            ? {
+                ...message,
+                sql_run: {
+                  blocks: message.sql_run.blocks.map((block) => (block.index === action.block.index ? action.block : block)),
+                },
+              }
+            : message,
+        ),
+      }));
+    case 'recheckFinished':
+      return withView(state, action.id, (view) => ({ ...view, recheck: null }));
     case 'draftUpdated':
       return {
         ...state,

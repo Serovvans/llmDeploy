@@ -72,7 +72,7 @@ function setup(handlers: Parameters<typeof mockApi>[0] = {}, config: PortalConfi
  * обычной секунды ожидания — предел как у других тестов экранов с ленивой частью.
  */
 async function projectOpened(): Promise<void> {
-  await screen.findByRole('heading', { level: 1, name: 'AddressEmailTool' }, { timeout: 5000 });
+  await screen.findByRole('heading', { level: 1, name: 'AddressEmailTool' });
 }
 
 function route(): HTMLElement {
@@ -247,6 +247,6 @@ describe('раздел «Код»: экран проекта', () => {
 
   it('раздел выключен — адрес проекта ведёт на прежний экран помощника CoGIS', async () => {
     setup({ 'GET /api/dialogs': () => ok({ items: [], next_cursor: null }) }, CONFIG);
-    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/cogis'), { timeout: 5000 });
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/cogis'));
   });
 });

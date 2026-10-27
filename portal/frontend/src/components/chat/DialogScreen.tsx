@@ -126,8 +126,13 @@ interface DialogScreenProps {
   /** Строка под ответом, когда поиск ничего не нашёл; по умолчанию — как в чате. */
   nothingFoundText?: string;
   onSendRefused?: OnRefused;
-  /** Причина, по которой вопрос сейчас отправить нельзя, — под панелью запроса; `null` — можно. */
-  beforeSend?: () => string | null;
+  /**
+   * Причина, по которой вопрос сейчас отправить нельзя, — под панелью запроса; `null` — можно. Обещание — отправка
+   * ждёт его (SQL: сохранение выбора базы у диалога); `false` — вопрос не уходит, причину экран показал сам.
+   */
+  beforeSend?: () => string | null | Promise<string | null | false>;
+  /** Меняется, когда меняется то, что сервер берёт для оценки памяти из самого диалога (SQL: выбор базы). */
+  memoryRevision?: string;
   /** Отправка ждёт настроек портала: кнопка «Отправить» — в состоянии `loading`. */
   sendPending?: boolean;
   /** Своя повторная генерация (SQL: с заменой удалённой схемы); по умолчанию — обычная. */
@@ -177,9 +182,12 @@ export function DialogScreen(props: DialogScreenProps) {
   const key = id ?? chat.newKey;
   const view = id ? chat.state.dialogs[id] : undefined;
   const dialog = id ? history.items.find((item) => item.id === id) : undefined;
-  const title = id ? (dialog?.title ?? labels.newLabel) : props.sectionTitle;
   const last = view?.messages.at(-1);
+  // Диалог, созданный выбором подключения, до первого вопроса выглядит как новый (концепция §5.7).
+  const unasked = !dialog && view?.status === 'ready' && view.messages.length === 0;
+  const title = id && !unasked ? (dialog?.title ?? labels.newLabel) : props.sectionTitle;
   const formingElsewhere = last?.status === 'streaming' && !view?.generation;
+  const rechecking = Boolean(view?.recheck);
   usePageTitle(title);
 
   const historyIdle = history.status === 'idle';
@@ -230,12 +238,19 @@ export function DialogScreen(props: DialogScreenProps) {
     view,
     available: usable,
     params: props.params,
-    busy: Boolean(view?.generation) || formingElsewhere,
+    busy: Boolean(view?.generation) || formingElsewhere || rechecking,
     viewer: { isOpen: viewer.isOpen, close: closeViewer },
     onNewDialog: labels.longDialogAction ? newChat : undefined,
     onSchemaMissing: props.onMemorySchemaMissing,
+    revision: props.memoryRevision,
   });
   const onCreated = (createdId: string) => navigate(`${basePath}/${createdId}`, { replace: true });
+  // Отправка после ожидания (`beforeSend` с обещанием) берёт ключ и параметры на момент отправки:
+  // за время ожидания экран мог создать диалог и сменить выбор (SQL-помощник, §5.7).
+  const latest = useRef({ key, params: props.params, onSendRefused: props.onSendRefused });
+  useEffect(() => {
+    latest.current = { key, params: props.params, onSendRefused: props.onSendRefused };
+  });
 
   const startRename = (target: Dialog, opener: string) => {
     rememberOpener(`[data-opener="${opener}"] [tabindex="0"]`);
@@ -303,6 +318,7 @@ export function DialogScreen(props: DialogScreenProps) {
         onOpenSource={openSource}
         openingFragment={viewer.opening?.fragmentId ?? null}
         memory={memory.feed}
+        onRecheck={kind === 'sql' ? (messageId, index) => chat.recheck(id, messageId, index) : undefined}
       />
     );
   }
@@ -383,7 +399,7 @@ export function DialogScreen(props: DialogScreenProps) {
                 <Composer
                   dialogId={id ?? null}
                   draft={chat.state.drafts[key] ?? EMPTY_DRAFT}
-                  answer={view?.generation ? 'generating' : formingElsewhere ? 'waiting' : 'idle'}
+                  answer={view?.generation || rechecking ? 'generating' : formingElsewhere ? 'waiting' : 'idle'}
                   placeholder={props.placeholder}
                   mono={props.mono}
                   note={props.note}
@@ -409,11 +425,20 @@ export function DialogScreen(props: DialogScreenProps) {
                   }
                   onTextChange={(text) => chat.setText(key, text)}
                   onSend={() => {
+                    const proceed = (refusal: string | null | false) => {
+                      if (refusal) {
+                        chat.setNotice(key, refusal);
+                      } else if (refusal === null) {
+                        const current = latest.current;
+                        chat.send(current.key, current.params, onCreated, current.onSendRefused);
+                      }
+                    };
                     const refusal = props.beforeSend?.() ?? null;
-                    if (refusal) {
-                      chat.setNotice(key, refusal);
+                    if (refusal instanceof Promise) {
+                      // Пока обещание не выполнено, экран держит «Отправить» в `loading` (`sendPending`).
+                      void refusal.then(proceed);
                     } else {
-                      chat.send(key, props.params, onCreated, props.onSendRefused);
+                      proceed(refusal);
                     }
                   }}
                   onStop={() => id && chat.stop(id)}

@@ -15,6 +15,8 @@ import httpx
 
 from portal.code.sandbox import HttpCodeSandbox
 from portal.core.settings import Settings
+from portal.databases.ports import CustomerDatabase
+from portal.tools.ports import SqlSandbox
 from tests.conftest import close_portal, make_portal
 from tests.support import Portal
 
@@ -116,11 +118,18 @@ class FakeSandboxServer:
 
 @asynccontextmanager
 async def code_portal(
-    settings: Settings, *, build: bool = True, llm_url: str | None = None, **code: Any
+    settings: Settings,
+    *,
+    build: bool = True,
+    llm_url: str | None = None,
+    sql_sandbox: SqlSandbox | None = None,
+    customer_database: CustomerDatabase | None = None,
+    **code: Any,
 ) -> AsyncIterator[tuple[Portal, FakeSandboxServer]]:
     """Приложение с включённым разделом «Код» и песочницей-подменой.
 
-    `llm_url` — адрес заглушки стенда: модель — настоящий клиент Bifrost, а не сценарий.
+    `llm_url` — адрес заглушки стенда: модель — настоящий клиент Bifrost, а не сценарий;
+    `sql_sandbox` и `customer_database` — песочница SQL и база заказчика (§7.5.18).
     """
     target = code_settings(settings, build=build, **code)
     if llm_url is not None:
@@ -130,7 +139,13 @@ async def code_portal(
     server = FakeSandboxServer()
     client = httpx.AsyncClient(transport=httpx.MockTransport(server.handle))
     sandbox = HttpCodeSandbox(client, target.code.build)
-    portal = await make_portal(target, code_sandbox=sandbox, scripted_model=llm_url is None)
+    portal = await make_portal(
+        target,
+        code_sandbox=sandbox,
+        scripted_model=llm_url is None,
+        sql_sandbox=sql_sandbox,
+        customer_database=customer_database,
+    )
     try:
         yield portal, server
     finally:

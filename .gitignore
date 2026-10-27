@@ -26,3 +26,6 @@ deploy/.env.deploy_copy
 # собственность заказчика: документация CoGIS и DLL SDK (раздел «Код», 0.9)
 .claude/notes/code-workshop/cogis-docs/
 deploy/cogis-sdk/
+
+# Customer property: CoGIS documentation PDFs (portal-design.md §8.5, CLAUDE.md rule 10)
+docs/*.pdf

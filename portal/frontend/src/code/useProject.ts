@@ -4,6 +4,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { api, ApiError, isApiError, NetworkError } from '../api/client';
 import type { CodeBuild, CodeConfig, CodeFile, CodeProject } from '../api/types';
 import { formatSize, texts } from '../texts';
+import { kindOf } from './kinds';
 import { filePathServerError, splitPath } from './rules';
 
 const w = texts.workshop;
@@ -319,11 +320,12 @@ export function useProject(id: string, config: CodeConfig | null, sectionOff: (e
         return '';
       }
       if (error instanceof ApiError) {
-        return filePathServerError(error, path) ?? saveErrorText(error, config);
+        const known = config ? filePathServerError(error, path, config, project ? kindOf(project) : 'gptool') : null;
+        return known ?? saveErrorText(error, config);
       }
       return saveErrorText(error, config);
     },
-    [config, sectionOff],
+    [config, project, sectionOff],
   );
 
   const createFile = useCallback(

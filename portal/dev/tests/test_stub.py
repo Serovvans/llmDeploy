@@ -584,6 +584,23 @@ async def test_project_question_gets_an_edit_of_the_first_file(client: httpx.Asy
     assert await _answer(client, _chat(marked)) == "свой"
 
 
+@pytest.mark.parametrize(
+    ("path", "language", "line"),
+    [
+        ("plugin.js", "javascript", "// Правка заглушки."),
+        ("widget.html", "html", "<!-- Правка заглушки. -->"),
+        ("catalog.css", "css", "/* Правка заглушки. */"),
+    ],
+)
+async def test_web_project_edit_follows_the_first_file_extension(
+    client: httpx.AsyncClient, path: str, language: str, line: str
+) -> None:
+    project = f'<проект имя="Плагин">\n<файл имя="{path}">\nкод\n</файл>\n</проект>'
+    assert await _answer(client, _chat(project)) == (
+        f"Правка-заглушка.\n\n```{language} path={path}\nкод\n{line}\n```"
+    )
+
+
 async def test_build_fix_protocol(client: httpx.AsyncClient) -> None:
     fix = f"Исправь ошибки сборки.\n\n{_PROJECT}\n\n<сборка>\nCS0103\n</сборка>"
     assert await _answer(client, _chat(fix)) == (

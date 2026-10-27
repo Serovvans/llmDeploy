@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api, isApiError } from '../api/client';
-import type { CodeAction, CodeConfig, CodeFile, CodeProject, CodeTarget, QuestionParams, Source } from '../api/types';
+import type { CodeAction, CodeConfig, CodeFile, CodeProject, CodeTarget, DbConnection, PreviewFix, QuestionParams, Source } from '../api/types';
 import { useDialogs } from '../chat/ChatProvider';
 import { EMPTY_DRAFT, type ChatMessage } from '../chat/state';
 import { Composer } from '../components/chat/Composer';
@@ -15,14 +15,19 @@ import { CarriedNotice } from '../components/memory/MemoryBlocks';
 import { MemoryLayout } from '../components/memory/MemoryLayout';
 import { Notice } from '../components/Notice';
 import { useMemoryUi } from '../memory/useMemoryUi';
+import { useSession } from '../session/SessionContext';
+import { snapshotDay } from '../db/selection';
 import { texts } from '../texts';
 import styles from './Assistant.module.css';
 import type { Fragment } from './CodeEditor';
 import { EditProposal } from './EditProposal';
+import { isWebKind, kindOf } from './kinds';
 import { hasEditBlock } from './rules';
 import { readScope, storeScope, type Scope } from './storage';
 
 const a = texts.workshop.assistant;
+const web = texts.workshop.web;
+const sc = texts.workshop.scope;
 type Action = Exclude<CodeAction, 'fix'>;
 const ACTIONS = (['write', 'explain'] as const).map((value) => ({ value, label: a.actions[value] }));
 
@@ -31,7 +36,11 @@ export type Ask =
   | { kind: 'explain'; fragment: Fragment | null }
   | { kind: 'fix' }
   | { kind: 'wizard'; content: string }
-  | { kind: 'change'; fragment: Fragment };
+  | { kind: 'change'; fragment: Fragment }
+  /** «Исправить с помощником» у JS и HTML (1.0, §5.13.20): обычный вопрос «Написать или изменить». */
+  | { kind: 'write'; content: string }
+  /** То же по ошибкам предпросмотра: текст вопроса собирает сервер из `preview_fix` (контракт §7.5.16). */
+  | { kind: 'previewFix'; previewFix: PreviewFix };
 
 /** Строки файла для `target` «весь файл»: последний перевод строки новой строки не начинает. */
 function lineCount(text: string): number {
@@ -88,6 +97,12 @@ interface Options {
 export function useAssistant(options: Options) {
   const { project, config, openFileIds, activeFile } = options;
   const dialogId = project.dialog_id;
+  const kind = kindOf(project);
+  const isWeb = isWebKind(kind);
+  const { config: portal } = useSession();
+  // Выбор подключения проекта (1.0): при выключенном флаге подключений интерфейс его не показывает (§5.13.24).
+  const db = portal?.db.enabled ? (project.db ?? null) : null;
+  const [connection, setConnection] = useState<DbConnection | null>(null);
   const chat = useDialogs('code');
   const { openDialog, setNotice, setText } = chat;
   const navigate = useNavigate();
@@ -139,6 +154,22 @@ export function useAssistant(options: Options) {
     };
   }, [schemaId]);
 
+  // Подключение проекта — для строки «Видит»: временно не используется ли оно и от какого числа схема.
+  const connectionId = db?.available ? db.connection_id : null;
+  useEffect(() => {
+    if (!connectionId) {
+      return;
+    }
+    let cancelled = false;
+    api.listDbConnections().then(
+      ({ items }) => !cancelled && setConnection(items.find((item) => item.id === connectionId) ?? null),
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionId]);
+
   // Ответ закончился — экран перечитывает проект: правка или цикл исправления могли изменить сборку.
   const generating = Boolean(view?.generation);
   const wasGenerating = useRef(false);
@@ -183,6 +214,7 @@ export function useAssistant(options: Options) {
     viewer: { isOpen: viewer.isOpen, close: viewer.close },
     placement: 'feed',
     revision: options.revision,
+    codeNote: isWeb ? (db ? web.memoryNoteDb : web.memoryNote) : db ? web.memoryNoteGptoolDb : undefined,
   });
 
   const onRefused = useCallback(
@@ -205,12 +237,19 @@ export function useAssistant(options: Options) {
           SingleToast.push(a.busy);
           return true;
         }
+        // Файл переименовали или удалили (`unknown_value`) либо укоротили (`invalid_format`) после запуска
+        // предпросмотра (концепция §5.13.20, контракт §7.5.16); прочие коды — общий текст отказа.
+        const changedAfterRun = (code: string) => code === 'unknown_value' || code === 'invalid_format';
+        if (isApiError(error, 'validation_error') && error.fields.some((item) => item.field.startsWith('preview_fix') && changedAfterRun(item.code))) {
+          SingleToast.push(texts.workshop.web.pane.fixChanged);
+          return true;
+        }
         return options.sectionOff(error);
       },
     [options],
   );
 
-  const sendBuilt = async (sendAction: CodeAction, content: string | undefined, target: Fragment | null) => {
+  const sendBuilt = async (sendAction: CodeAction, content: string | undefined, target: Fragment | null, previewFix?: PreviewFix) => {
     setTooLarge(null);
     setTooLong(false);
     await options.flush();
@@ -222,6 +261,7 @@ export function useAssistant(options: Options) {
     chat.send(dialogId, sendParams, () => undefined, onRefused(scope), {
       content,
       codeTarget: target,
+      previewFix,
     });
   };
 
@@ -256,6 +296,14 @@ export function useAssistant(options: Options) {
         setAction('write');
         setWizardRunning(true);
         void sendBuilt('write', request.content, null);
+        break;
+      case 'write':
+        setAction('write');
+        void sendBuilt('write', request.content, null);
+        break;
+      case 'previewFix':
+        setAction('write');
+        void sendBuilt('write', undefined, null, request.previewFix);
         break;
       case 'change':
         setAction('write');
@@ -349,6 +397,7 @@ export function useAssistant(options: Options) {
         messageId={message.id}
         edit={message.code_edit}
         config={config}
+        kind={kind}
         currentText={currentText}
         pending={options.decisionPending === message.id}
         onReview={() => options.onReview(message.id)}
@@ -367,7 +416,7 @@ export function useAssistant(options: Options) {
       </div>
     );
   } else if (!view || view.messages.length === 0) {
-    body = view?.status === 'ready' ? <EmptyState title={a.empty.title} text={a.empty.text} /> : null;
+    body = view?.status === 'ready' ? <EmptyState title={a.empty.title} text={isWeb ? web.assistantEmpty : a.empty.text} /> : null;
   } else {
     body = (
       <MessageList
@@ -388,7 +437,30 @@ export function useAssistant(options: Options) {
     );
   }
 
-  const missing = documentation === false ? (options.sdkAvailable === false ? a.noBoth : a.noDocumentation) : options.sdkAvailable === false ? a.noSdk : null;
+  // У видов JS и HTML заметки о библиотеках C# нет (§5.13.17).
+  const sdkMissing = !isWeb && options.sdkAvailable === false;
+  const missing = documentation === false ? (sdkMissing ? a.noBoth : a.noDocumentation) : sdkMissing ? a.noSdk : null;
+  let dbScope: React.ReactNode = null;
+  if (db && !db.available) {
+    dbScope = (
+      <span data-opener="scope-schema">
+        <Link component="button" use="grayed" onClick={() => options.onOpenSettings('scope-schema')}>
+          {sc.dbUnavailable}
+        </Link>
+      </span>
+    );
+  } else if (db) {
+    const unusable = connection?.usable === false;
+    const date = connection?.snapshot ? snapshotDay(connection.snapshot.taken_at) : null;
+    const link = (
+      <span data-opener="scope-schema">
+        <Link component="button" onClick={() => options.onOpenSettings('scope-schema')}>
+          {unusable && date ? sc.tablesOld(db.title, db.tables.length, date) : sc.tables(db.title, db.tables.length)}
+        </Link>
+      </span>
+    );
+    dbScope = unusable ? <Hint text={sc.unusableHint}>{link}</Hint> : link;
+  }
   const lastAnswer = last?.role === 'assistant' ? last : undefined;
   const longDialog = memory.active ? (
     memory.longDialog
@@ -404,7 +476,7 @@ export function useAssistant(options: Options) {
         {memory.toggle}
       </div>
       <div className={styles.scope}>
-        <Hint text={texts.workshop.scope.hint} maxWidth={320}>
+        <Hint text={isWeb ? web.scopeHint : texts.workshop.scope.hint} maxWidth={320}>
           <span className={styles.sees} tabIndex={0}>
             {texts.workshop.scope.sees}
           </span>
@@ -420,7 +492,19 @@ export function useAssistant(options: Options) {
           ]}
           onValueChange={setScope}
         />
-        {project.schema_id && schemaName && (
+        {isWeb && (
+          <>
+            <span aria-hidden="true">·</span>
+            <span>{web.scopeApi}</span>
+          </>
+        )}
+        {dbScope && (
+          <>
+            <span aria-hidden="true">·</span>
+            {dbScope}
+          </>
+        )}
+        {!dbScope && project.schema_id && schemaName && (
           <>
             <span aria-hidden="true">·</span>
             <span data-opener="scope-schema">
@@ -428,7 +512,7 @@ export function useAssistant(options: Options) {
             </span>
           </>
         )}
-        {options.sdkAvailable && (
+        {!isWeb && options.sdkAvailable && (
           <>
             <span aria-hidden="true">·</span>
             <span>{texts.workshop.scope.reference}</span>
@@ -455,7 +539,7 @@ export function useAssistant(options: Options) {
               <div className={styles.notice} data-opener="too-long">
                 <Notice
                   kind="warning"
-                  action={project.schema_id ? { label: a.settingsLink, onClick: () => options.onOpenSettings('too-long') } : undefined}
+                  action={project.schema_id || db ? { label: a.settingsLink, onClick: () => options.onOpenSettings('too-long') } : undefined}
                 >
                   {a.tooLong}
                 </Notice>

@@ -1,0 +1,71 @@
+/* Форма подключения (концепция §5.14). */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding-bottom: 24px;
+}
+
+.group,
+.radios {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.legend {
+  margin-bottom: 4px;
+  padding: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.label {
+  padding: 0;
+  color: var(--p-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.hostRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.host {
+  flex: 1;
+  min-width: 0;
+}
+
+.passwordSaved {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* Пункт «Шифрование»: пояснение — под названием пункта. */
+.radioCaption {
+  display: flex;
+  flex-direction: column;
+}
+
+.note {
+  display: block;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.error {
+  color: var(--p-error-text);
+  font-size: 14px;
+  line-height: 20px;
+}

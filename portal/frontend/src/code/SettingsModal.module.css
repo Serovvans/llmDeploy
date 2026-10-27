@@ -58,3 +58,19 @@
   font-size: 14px;
   line-height: 20px;
 }
+
+/* «Как вставлять в Каталог» (§5.13.23): строка на файл. */
+.catalogFile {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--p-line);
+}
+
+.catalogControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 24px;
+}

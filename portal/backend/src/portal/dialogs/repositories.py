@@ -153,6 +153,21 @@ class SqlDialogRepository:
             .values(title=title)
         )
 
+    async def set_selection(
+        self,
+        owner_id: UUID,
+        dialog_id: UUID,
+        connection_id: UUID | None,
+        title: str | None,
+        tables: list[dict[str, str]],
+    ) -> None:
+        """Записать выбор подключения; `updated_at` не меняется."""
+        await self._connection.execute(
+            sa.update(dialogs)
+            .where(dialogs.c.id == dialog_id, dialogs.c.owner_id == owner_id)
+            .values(db_connection_id=connection_id, db_connection_title=title, db_tables=tables)
+        )
+
     async def set_title_if_empty(self, owner_id: UUID, dialog_id: UUID, title: str) -> bool:
         """Записать название, если его ещё нет."""
         result = await self._connection.execute(

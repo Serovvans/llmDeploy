@@ -14,7 +14,9 @@ from portal.code.paths import conflicts, limit_exceeded, path_error, utf8_size
 
 _OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`]*)(.*)$")
 _PATH = re.compile(r'(?:^|\s)path=(?:"([^"\n]*)"|(\S+))')
-_EDIT_LANGUAGES = frozenset({"csharp", "cs", "c#"})
+_CSHARP = frozenset({"csharp", "cs", "c#"})
+# Веб-виды (§7.5.16): принимается ли файл, решает расширение пути, а не слово ограждения.
+_ALL_LANGUAGES = _CSHARP | {"javascript", "js", "html", "css"}
 _REJECTED_PATH_CHARS = 300
 _PATH_REASONS = {
     "outside_project": "outside_project",
@@ -43,8 +45,13 @@ def _closes(line: str, fence: str) -> bool:
     return len(body) >= len(fence) and set(body) == {fence[0]}
 
 
-def edit_blocks(text: str) -> Iterator[EditBlock]:
-    """Блоки правки ответа по порядку: язык `csharp`/`cs`/`c#` и `path=` в строке ограждения.
+def edit_languages(kind: str) -> frozenset[str]:
+    """Слова ограждения блока правки: у `gptool` — C#, у веб-видов — ещё JS, HTML и CSS."""
+    return _CSHARP if kind == "gptool" else _ALL_LANGUAGES
+
+
+def edit_blocks(text: str, languages: frozenset[str] = _ALL_LANGUAGES) -> Iterator[EditBlock]:
+    """Блоки правки ответа по порядку: язык из `languages` и `path=` в строке ограждения.
 
     Блоки — по правилу §7.1 (шаги 1, 3–5): блок открывает строка с не более чем тремя
     пробелами и ограждением из трёх и более `` ` `` или `~`, закрывает — строка из знаков
@@ -63,7 +70,7 @@ def edit_blocks(text: str) -> Iterator[EditBlock]:
             end += 1
         closed = end < len(lines)
         found = _PATH.search(rest)
-        if language.lower() in _EDIT_LANGUAGES and found is not None:
+        if language.lower() in languages and found is not None:
             body = "\n".join(lines[index + 1 : end])
             content = f"{body}\n" if body else ""
             path = found.group(1) if found.group(1) is not None else found.group(2)
@@ -72,7 +79,10 @@ def edit_blocks(text: str) -> Iterator[EditBlock]:
 
 
 def history_text(answer: str) -> str:
-    """Ответ для истории: каждый блок правки, закрытый или нет, заменён строкой (§7.5.9)."""
+    """Ответ для истории: каждый блок правки, закрытый или нет, заменён строкой (§7.5.9).
+
+    Вид проекта здесь неизвестен: заменяются блоки с любым словом ограждения правки.
+    """
     lines = answer.split("\n")
     out: list[str] = []
     position = 0
@@ -109,7 +119,7 @@ def parse_edit(
     принятыми в разбор файлами, по порядку ответа.
     """
     latest: dict[str, tuple[str, EditBlock]] = {}
-    for block in edit_blocks(answer):
+    for block in edit_blocks(answer, edit_languages(project.kind)):
         if block.closed:
             path = normalize_path(block.path)
             latest.pop(path.lower(), None)
@@ -152,12 +162,14 @@ def _reason(
     error = path_error(path, limits.extensions)
     if error is not None:
         return _PATH_REASONS[error]
+    current = by_path.get(path.lower())
+    if current is None and limits.single_file:
+        return "single_file"
     # U+0000 файл проекта хранить не может (§7.5.3); своей причины у него в контракте нет.
     if not content.strip() or "\x00" in content:
         return "empty_file"
     if utf8_size(content) > limits.file_max_bytes:
         return "file_too_large"
-    current = by_path.get(path.lower())
     if current is None and conflicts(path, others):
         return "path_conflict"
     current_size = 0 if current is None else current.size_bytes

@@ -1,0 +1,41 @@
+/* Окно «Скачать для CoGIS» у JS и HTML (концепция §5.13.22): строение — как у архива GPTool. */
+.loading {
+  height: 160px;
+}
+
+.files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.file {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.catalog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.catalogBlock {
+  display: flex;
+  flex-direction: column;
+  padding-left: 12px;
+  border-left: 2px solid var(--p-line);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.note {
+  margin-top: 16px;
+}

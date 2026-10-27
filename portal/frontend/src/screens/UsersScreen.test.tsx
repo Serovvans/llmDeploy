@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AdminUser } from '../api/types';
 import { ADMIN, fail, mockApi, ok, session } from '../test/mockApi';
@@ -312,6 +312,14 @@ describe('пользователи: временная блокировка вх
   const NOTE = /^Вход временно заблокирован до \d\d:\d\d, после неудачных попыток$/;
   /** Время окончания через `ms` от текущего момента. */
   const inFuture = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+  // Midday: a lock of a few minutes must not cross midnight, otherwise the note gets a date.
+  beforeEach(() => {
+    vi.setSystemTime(new Date(2026, 9, 26, 12, 0));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   function setupLocked(users: AdminUser[]) {
     const server = mockApi({

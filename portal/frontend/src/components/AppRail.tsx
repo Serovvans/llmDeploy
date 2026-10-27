@@ -8,7 +8,7 @@ import { IconPeople2Regular24 } from '@skbkontur/icons/IconPeople2Regular24';
 import { IconTechServerRegular24 } from '@skbkontur/icons/IconTechServerRegular24';
 import { IconWeatherSunMoonRegular24 } from '@skbkontur/icons/IconWeatherSunMoonRegular24';
 import { DropdownMenu, MenuHeader, MenuItem, MenuSeparator, SingleToast, Spinner } from '@skbkontur/react-ui';
-import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 
 import type { SessionUser } from '../api/types';
 import { useDocparse } from '../docparse/DocparseProvider';
@@ -55,7 +55,9 @@ export function AppRail({ user }: { user: SessionUser }) {
   const { logout, config } = useSession();
   const sections = config?.code.enabled ? SECTIONS.map((item) => (item.to === '/cogis' ? CODE_SECTION : item)) : SECTIONS;
   const navigate = useNavigate();
-  const onProfile = useLocation().pathname === '/profile';
+  const { pathname } = useLocation();
+  const onProfile = pathname === '/profile';
+  const onAdmin = pathname.startsWith('/admin/');
   // Пока идёт разбор документа, у пункта «Документы» вместо иконки — индикатор (концепция §5.9).
   const parsing = useDocparse().run !== null;
 
@@ -81,10 +83,11 @@ export function AppRail({ user }: { user: SessionUser }) {
       </div>
       <div className={styles.group}>
         {user.role === 'admin' && (
-          <NavLink to="/admin/users" className={itemClass}>
+          // С подключениями к базам пункт — «Управление» и отмечен на обеих вкладках (концепция §5.14, Д-59).
+          <Link to="/admin/users" className={itemClass({ isActive: onAdmin })} aria-current={onAdmin ? 'page' : undefined}>
             <IconPeople2Regular24 aria-hidden="true" />
-            <span>{texts.nav.users}</span>
-          </NavLink>
+            <span>{config?.db.enabled ? texts.db.admin.section : texts.nav.users}</span>
+          </Link>
         )}
         <DropdownMenu
           positions={MENU_POSITIONS}

@@ -16,7 +16,9 @@ import { TitleHint } from '../components/TitleHint';
 import { useFocusReturn } from '../hooks/useFocusReturn';
 import { useMemoryUi } from '../memory/useMemoryUi';
 import { formatDate, texts } from '../texts';
+import type { HomeState } from './CodeHome';
 import { useCode } from './CodeContext';
+import { isWebKind, kindOf, kindTexts } from './kinds';
 import { useProjectActions } from './projectActions';
 import styles from './ProjectPanel.module.css';
 import { listBadge } from './rules';
@@ -160,8 +162,13 @@ export function ProjectList() {
   return (
     <aside className={styles.panel} aria-label={w.projects}>
       <div className={styles.new}>
-        <Button use="primary" width="100%" icon={<IconPlusRegular16 />} onClick={() => navigate('/code/new')}>
-          {w.newTool}
+        <Button
+          use="primary"
+          width="100%"
+          icon={<IconPlusRegular16 />}
+          onClick={() => navigate('/code', { state: { focusKinds: true } satisfies HomeState })}
+        >
+          {w.web.newProject}
         </Button>
       </div>
       <div className={styles.scroll}>
@@ -182,13 +189,14 @@ export function ProjectList() {
                 {projects.status === 'ready' && projects.items.length === 0 && <p className={styles.muted}>{w.noProjects}</p>}
                 <ul className={styles.items}>
                   {projects.items.map((project) => {
-                    const badge = listBadge(project.build);
+                    const kind = kindOf(project);
+                    const badge = kind === 'gptool' ? listBadge(project.build) : null;
                     return (
                       <li key={project.id} className={styles.item} data-opener={`project-${project.id}`}>
                         <TitleHint text={project.name} pos="right">
                           <NavLink to={`/code/${project.id}`} className={rowClass}>
                             <span className={styles.name}>{project.name}</span>
-                            <span className={styles.time}>{formatDate(project.updated_at, now)}</span>
+                            <span className={styles.time}>{w.web.listLine(kindTexts(kind).short, formatDate(project.updated_at, now))}</span>
                           </NavLink>
                         </TitleHint>
                         {badge && (
@@ -203,9 +211,17 @@ export function ProjectList() {
                         <span className={styles.kebab}>
                           <Hint text={texts.users.actions}>
                             <Kebab aria-label={`${texts.users.actions}: ${project.name}`}>
-                              <MenuItem onClick={() => actions.exportProject(project.id, project.name)}>{w.exportVs}</MenuItem>
+                              {isWebKind(kind) ? (
+                                <MenuItem onClick={() => actions.exportWeb(project.id, `[data-opener="project-${project.id}"] [tabindex="0"]`)}>
+                                  {w.web.exportCogis}
+                                </MenuItem>
+                              ) : (
+                                <MenuItem onClick={() => actions.exportProject(project.id, project.name)}>{w.exportVs}</MenuItem>
+                              )}
                               <MenuSeparator />
-                              <MenuItem onClick={() => actions.askRemove(project, `[data-opener="project-${project.id}"] [tabindex="0"]`)}>
+                              <MenuItem
+                                onClick={() => actions.askRemove({ ...project, kind }, `[data-opener="project-${project.id}"] [tabindex="0"]`)}
+                              >
                                 {w.removeProject}
                               </MenuItem>
                             </Kebab>

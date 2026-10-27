@@ -1,4 +1,4 @@
-/** Типы контракта `docs/portal-api.md` версии 0.19 (поля релизов 0.7–0.9). Имена полей — как в контракте. */
+/** Типы контракта `docs/portal-api.md` версии 0.23 (поля релизов 0.7–1.0). Имена полей — как в контракте. */
 
 export type LoginStep = 'second_factor' | 'password_change' | 'second_factor_setup' | 'ready';
 
@@ -114,6 +114,17 @@ export interface PortalConfig {
   memory: { enabled: boolean; keep_recent_pairs: number; max_chars: number };
   /** Раздел «Код» (контракт §4, §7.5): флаги раздела и сборки, пределы и типы параметров мастера. */
   code: CodeConfig;
+  /** Подключения к базам заказчика (контракт §4, §7.6; 1.0). */
+  db: DbConfig;
+}
+
+export interface DbConfig {
+  enabled: boolean;
+  /** Корневой сертификат заказчика задан и читается: доступен режим «С проверкой сертификата». */
+  tls_verify_available: boolean;
+  sample_rows_check: number;
+  sample_rows_preview: number;
+  max_selected_tables: number;
 }
 
 export interface CodeParameterType {
@@ -136,7 +147,14 @@ export interface CodeConfig {
   max_snapshots: number;
   fix_attempts: number;
   wizard: { max_tools: number; max_parameters: number; parameter_types: CodeParameterType[] };
+  /** Виды проектов (контракт §7.5.16; 1.0). */
+  kinds: { id: CodeKind; extensions: string[]; single_file: boolean }[];
+  /** Флаг предпросмотра и пределы журнала и ошибок (контракт §7.5.17; 1.0). */
+  preview: { enabled: boolean; log_max_entries: number; errors_max: number };
 }
+
+/** Вид проекта «Код» (контракт §7.5.16); всё, кроме `gptool`, — веб-вид. */
+export type CodeKind = 'gptool' | 'js_plugin' | 'html_widget' | 'catalog' | 'card_hooks';
 
 export interface FieldError {
   field: string;
@@ -171,6 +189,8 @@ export interface Dialog {
   summary?: DialogSummary | null;
   /** Только в ответе `GET /api/dialogs/{id}`: перенесённое при создании; `null` — диалог создан не переносом. */
   carried?: DialogCarried | null;
+  /** Только у `sql` в `GET /api/dialogs/{id}` и ответе `PATCH`: выбор подключения (контракт §7.6.9; 1.0). */
+  db?: DbSelection | null;
 }
 
 /** Применённый пересказ: `until_message_id` — ответ, которым кончается пересказанная часть; `messages` — сообщений до него включительно. */
@@ -246,9 +266,24 @@ export interface SqlCheck {
 /** Таблица тестовых данных или результат запроса: ячейки — строки, как их отдаёт СУБД, либо `null` (SQL `NULL`). */
 export interface SqlRunRows {
   columns: string[];
-  rows: (string | null)[][];
+  /** (1.0) `null` у сохранённого блока проверки на образце: строки базы не хранятся (контракт §7.4). */
+  rows: (string | null)[][] | null;
   /** Строк было больше, чем отдано. */
   truncated: boolean;
+}
+
+/** Таблица тестовых данных блока (контракт §7.4); `origin` и `invented_reason` — с 1.0. */
+export interface SqlRunFixture extends SqlRunRows {
+  table: string;
+  origin?: 'sample' | 'invented';
+  invented_reason?: 'not_in_snapshot' | 'excluded' | 'samples_not_allowed' | 'table_limit' | null;
+}
+
+/** Проверка на образце (контракт §7.4, 1.0): `null` — без подключения. */
+export interface SqlRunDb {
+  connection_title: string;
+  sample_rows: number;
+  excluded_columns: { table: string; column: string; reason: 'excluded' | 'binary' }[];
 }
 
 /**
@@ -273,11 +308,16 @@ export interface SqlRunBlock {
   status: SqlRunStatus;
   /** Почему блок не проверялся — только при `status: "not_checked"`. */
   reason: string | null;
-  fixture: ({ table: string } & SqlRunRows)[] | null;
-  result: SqlRunRows | null;
+  /** (1.0) Подключение проверки; `null` или нет поля — проверка без подключения. */
+  db?: SqlRunDb | null;
+  fixture: SqlRunFixture[] | null;
+  /** `row_count` — с 1.0: сколько строк прочитано. */
+  result: (SqlRunRows & { row_count?: number }) | null;
   affected_rows: number | null;
   /** Сообщение СУБД: при `failed` — последняя ошибка, при `fixed` — ошибка исходного запроса. */
   error: string | null;
+  /** (1.0) Что в `error`: текст или код SQLSTATE с именем условия (только у сохранённой проверки на образце). */
+  error_kind?: 'message' | 'sqlstate' | null;
   /** Исправленный запрос — только при `status: "fixed"`. */
   fixed_sql: string | null;
 }
@@ -370,6 +410,35 @@ export type QuestionParams =
     }
   | Record<string, never>;
 
+/** Тип ошибки предпросмотра — закрытый список (контракт §7.5.16, 0.25). */
+export const PREVIEW_ERROR_TYPES = [
+  'Error',
+  'AggregateError',
+  'EvalError',
+  'InternalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+  'DOMException',
+] as const;
+export type PreviewErrorType = (typeof PREVIEW_ERROR_TYPES)[number];
+
+/**
+ * Запись `preview_fix.problems` (контракт §7.5.16, 0.25): `text` — только при `layer: "invented"`.
+ * `path` — путь файла проекта или `null`; при `path: null` и `line` — `null`.
+ */
+export type PreviewFixProblem =
+  | { kind: 'error'; path: string | null; line: number | null; type: PreviewErrorType; text?: string }
+  | { kind: 'network'; path: null; line: null; directive: string; text?: string };
+
+/** «Исправить с помощником» по ошибкам предпросмотра: текст вопроса собирает сервер (контракт §7.5.16, 0.25). */
+export interface PreviewFix {
+  layer: 'invented' | 'sample';
+  problems: PreviewFixProblem[];
+}
+
 export interface SqlSchemaSummary {
   id: string;
   name: string;
@@ -459,6 +528,15 @@ export interface DuplicateDocument {
 
 /* ---------- Раздел «Код» (контракт §7.5, 0.9) ---------- */
 
+export type CatalogInsertion = 'head_start' | 'head_end' | 'body_start' | 'body_end';
+export type CatalogClient = 'smartphone' | 'tablet' | 'desktop';
+
+/** Как вставлять файл в Каталог (контракт §7.5.16): только у проекта `catalog`. */
+export interface CatalogPlacement {
+  insertion: CatalogInsertion;
+  clients: CatalogClient[];
+}
+
 export interface CodeFile {
   id: string;
   path: string;
@@ -466,6 +544,8 @@ export interface CodeFile {
   /** Номер изменения файла, с 1. */
   revision: number;
   updated_at: string;
+  /** (1.0) Только у проекта `catalog`; у остальных — `null` или нет поля. */
+  catalog?: CatalogPlacement | null;
 }
 
 export type BuildStatus = 'succeeded' | 'failed' | 'timeout';
@@ -523,6 +603,10 @@ export interface CodeProject {
   build: CodeBuild | null;
   /** Идёт любая сборка проекта — кнопкой или проверка правки циклом исправления. */
   build_running: boolean;
+  /** (1.0) Вид проекта; у прежних ответов поля нет — это `gptool`. */
+  kind?: CodeKind;
+  /** (1.0) Подключение и таблицы; `null` — не выбрано или подключения выключены. */
+  db?: DbSelection | null;
   created_at: string;
   updated_at: string;
 }
@@ -532,6 +616,8 @@ export interface CodeProjectItem {
   name: string;
   updated_at: string;
   build: { status: BuildStatus; outdated: boolean; findings: number | null } | null;
+  /** (1.0) Вид проекта. */
+  kind?: CodeKind;
 }
 
 export interface CodeTarget {
@@ -650,4 +736,189 @@ export interface CodeSdk {
   libraries: { file_name: string; version: string | null }[];
   packages: { id: string; version: string; on_server: boolean }[];
   types: SdkType[];
+}
+
+/* ---------- Веб-виды и предпросмотр (контракт §7.5.16–7.5.18, 1.0) ---------- */
+
+export type ClientLibraryId = 'jquery' | 'knockout' | 'leaflet';
+
+/** Описание `api` и библиотеки клиента CoGIS — `GET /api/code/web`. */
+export interface CodeWeb {
+  /** `api.d.ts` целиком: функции `api` с описаниями JSDoc. */
+  api_types: string;
+  api_functions: string[];
+  libraries: { id: ClientLibraryId; version: string | null; available: boolean }[];
+}
+
+export type ClientLibraryFile = 'jquery.js' | 'knockout.js' | 'leaflet.js' | 'leaflet.css';
+
+/** Слой предпросмотра из образца — `GET …/preview-layer`. Строки — только в памяти вкладки. */
+export interface PreviewLayerSample {
+  connection_title: string;
+  schema: string;
+  table: string;
+  rows: number;
+  truncated: boolean;
+  excluded_columns: number;
+  geometry: { column: string; type: string } | null;
+  features: GeoJsonFeatureCollection;
+}
+
+export interface GeoJsonFeatureCollection {
+  type: 'FeatureCollection';
+  features: { type: 'Feature'; geometry: { type: string; coordinates: unknown } | null; properties: Record<string, string | null> }[];
+}
+
+/* ---------- Подключения к базам заказчика (контракт §7.6, 1.0) ---------- */
+
+/** Выбор подключения у диалога SQL и проекта (контракт §7.6.1). */
+export interface DbSelection {
+  /** `null` — подключение удалено. */
+  connection_id: string | null;
+  /** Название на момент выбора. */
+  title: string;
+  tables: DbTableRef[];
+  /** Подключение есть, доступно сотруднику и подключения включены. */
+  available: boolean;
+}
+
+export interface DbTableRef {
+  schema: string;
+  name: string;
+}
+
+export interface DbSnapshotSummary {
+  taken_at: string;
+  tables: number;
+  truncated: boolean;
+}
+
+/** Строка списка сотрудника — `GET /api/db/connections`. */
+export interface DbConnection {
+  id: string;
+  title: string;
+  description: string;
+  /** `false` — у учётной записи лишние права: база не читается, схема остаётся. */
+  usable: boolean;
+  samples_allowed: boolean;
+  snapshot: DbSnapshotSummary | null;
+  refresh_available_at: string | null;
+}
+
+export interface DbColumn {
+  name: string;
+  type: string;
+  not_null: boolean;
+  primary_key: boolean;
+  references: { schema: string; table: string; column: string } | null;
+  comment: string | null;
+  geometry: { type: string; srid: number } | null;
+  excluded: boolean;
+}
+
+export interface DbTable {
+  schema: string;
+  name: string;
+  kind: 'table' | 'view';
+  comment: string | null;
+  samples_excluded: boolean;
+  columns: DbColumn[];
+}
+
+/** Снимок схемы — `GET /api/db/connections/{id}/snapshot`. Имена и комментарии — недоверенный текст. */
+export interface DbSnapshot {
+  connection_id: string;
+  taken_at: string;
+  truncated: boolean;
+  tables: DbTable[];
+}
+
+export type RightsKind =
+  | 'superuser'
+  | 'createrole'
+  | 'createdb'
+  | 'replication'
+  | 'bypassrls'
+  | 'owner'
+  | 'write'
+  | 'maintain'
+  | 'create'
+  | 'grant_option'
+  | 'predefined_role'
+  | 'admin_option'
+  | 'server_settings'
+  | 'catalog_function'
+  | 'large_object'
+  | 'lo_compat_privileges'
+  | 'definer_function';
+
+/** Лишнее право или предупреждение (контракт §7.6.1): `objects` — первые три, `total` — сколько всего. */
+export interface RightsFinding {
+  kind: RightsKind;
+  privileges: string[];
+  objects: { type: string; name: string }[];
+  total: number;
+}
+
+export type DbTlsMode = 'verify' | 'require' | 'disable';
+
+export type DbErrorReason =
+  | 'unreachable'
+  | 'timeout'
+  | 'auth_failed'
+  | 'database_not_found'
+  | 'tls_failed'
+  | 'tls_required'
+  | 'busy'
+  | 'schemas_unavailable'
+  | 'host_forbidden'
+  | 'other';
+
+export interface SampleExclusion {
+  schema: string;
+  table: string;
+  column: string | null;
+}
+
+/** Подключение глазами администратора — маршруты `/api/admin/db-connections`. Пароля нет ни в каком виде. */
+export interface AdminDbConnection {
+  id: string;
+  title: string;
+  description: string;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  tls_mode: DbTlsMode;
+  schemas: string[];
+  samples_allowed: boolean;
+  sample_exclusions: SampleExclusion[];
+  access: { all: boolean; users?: { id: string; login: string; full_name: string }[] };
+  rights: {
+    status: 'unknown' | 'read_only' | 'excess';
+    checked_at: string | null;
+    findings: RightsFinding[];
+    warnings: RightsFinding[];
+  };
+  last_error: { reason: string; details: Record<string, unknown> | null; at: string } | null;
+  snapshot: DbSnapshotSummary | null;
+  refresh_available_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Тело создания и изменения подключения; при изменении все поля необязательны. */
+export interface DbConnectionInput {
+  title: string;
+  description: string;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password?: string;
+  tls_mode: DbTlsMode;
+  schemas: string[];
+  samples_allowed: boolean;
+  sample_exclusions: SampleExclusion[];
+  access: { all: true } | { all: false; user_ids: string[] };
 }

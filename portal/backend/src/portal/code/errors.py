@@ -108,3 +108,20 @@ def project_too_large() -> AppError:
         "project_too_large",
         "Проект слишком велик для помощника. Ограничьте его открытыми файлами.",
     )
+
+
+def single_file_project() -> AppError:
+    """У однофайлового вида файл не добавляется и не удаляется (§7.5.16)."""
+    return AppError(409, "single_file_project", "В проекте этого вида только один файл.")
+
+
+def wrong_project_kind() -> AppError:
+    """Действие недоступно для вида проекта (§7.5.16, §7.5.18)."""
+    return AppError(409, "wrong_project_kind", "Для проекта этого вида это действие недоступно.")
+
+
+def sql_check_in_progress() -> AppError:
+    """Проверка запроса этого проекта уже идёт (§7.5.18)."""
+    return AppError(
+        429, "sql_check_in_progress", "Проверка запроса уже идёт. Дождитесь её окончания."
+    )

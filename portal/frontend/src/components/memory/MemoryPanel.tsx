@@ -152,6 +152,8 @@ interface MemoryPanelProps {
   onCancelSummary: () => void;
   /** «Перенести в новый диалог…» в подвале; `null` — диалог ещё не создан на сервере, подвала нет. */
   onTransfer: (() => void) | null;
+  /** Помощник проекта (1.0): строка по виду проекта и выбору базы вместо строки 0.9. */
+  codeNote?: string;
 }
 
 /**
@@ -209,7 +211,7 @@ export function MemoryPanel(props: MemoryPanelProps) {
               <p className={styles.muted}>{t.estimateNote}</p>
               {kind === 'chat' && <p className={styles.muted}>{t.chatNote}</p>}
               {kind === 'docparse' && <p className={styles.muted}>{t.docparseNote}</p>}
-              {kind === 'code' && <p className={styles.muted}>{texts.workshop.assistant.memoryNote}</p>}
+              {kind === 'code' && <p className={styles.muted}>{props.codeNote ?? texts.workshop.assistant.memoryNote}</p>}
             </div>
             {/* Блоки 0.8 отделены линиями от пояснения и от описи, как на схеме панели (§4.9). */}
             <div className={styles.blocks}>

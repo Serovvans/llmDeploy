@@ -164,6 +164,31 @@ def _name_conflict(statement: exp.Expr) -> bool:
     return any(len(qualifiers) > 1 for qualifiers in schemas.values())
 
 
+def _tables(statement: exp.Expr) -> tuple[tuple[str | None, str], ...]:
+    """Таблицы — источники и цели оператора без имён общих табличных выражений (§7.4).
+
+    Имена — по правилам PostgreSQL; системные схемы не в счёт; порядок — первого упоминания.
+    """
+    ctes = {
+        _name(cte.args["alias"].this)
+        for cte in statement.find_all(exp.CTE)
+        if isinstance(cte.args["alias"].this, exp.Identifier)
+    }
+    found: dict[tuple[str | None, str], None] = {}
+    for table in statement.find_all(exp.Table):
+        if not isinstance(table.this, exp.Identifier):
+            continue
+        schema = table.args.get("db")
+        schema_name = _name(schema) if isinstance(schema, exp.Identifier) else None
+        if schema_name in _SYSTEM_SCHEMAS:
+            continue
+        name = _name(table.this)
+        if schema_name is None and name in ctes:
+            continue
+        found.setdefault((schema_name, name))
+    return tuple(found)
+
+
 def parse_statements(sql: str, dialect: str) -> ParsedSql | None:
     """Виды операторов текста, а у единственного оператора — текст без имён схем (§7.4).
 
@@ -178,7 +203,7 @@ def parse_statements(sql: str, dialect: str) -> ParsedSql | None:
         bare = _without_schemas(sql, statements[0])
         if bare is None:
             return None
-        return ParsedSql(kinds, bare, _name_conflict(statements[0]))
+        return ParsedSql(kinds, bare, _name_conflict(statements[0]), _tables(statements[0]))
     except (SqlglotError, RecursionError):
         return None
 

@@ -1,0 +1,68 @@
+/* Базы данных (концепция §5.14). Цвет — только у значков (§7.3). */
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1168px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.privacy,
+.muted {
+  display: block;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.placeholder {
+  height: 240px;
+}
+
+.title {
+  max-width: 260px;
+}
+
+.description {
+  display: block;
+  max-width: 240px;
+  overflow: hidden;
+  color: var(--p-text-muted);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status,
+.secondLine {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.icon,
+.errorIcon,
+.warningIcon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 20px;
+}
+
+.icon {
+  color: var(--p-text);
+}
+
+.errorIcon {
+  color: var(--p-error-text);
+}
+
+.warningIcon {
+  color: var(--p-warning-icon);
+}
+
+.kebab {
+  width: 48px;
+  text-align: right;
+}
