@@ -104,7 +104,9 @@ def _adapter(settings: Settings, resolver: Resolver, **db: Any) -> AsyncpgCustom
 
 
 def _target(host: str, tls_mode: Any = "disable") -> DbTarget:
-    return DbTarget(uuid4(), host, 5432, "cadastre", "portal_reader", "x", tls_mode, ("public",))
+    return DbTarget(
+        uuid4(), host, 5432, "cadastre", "portal_reader", "x", tls_mode, ("public",), False
+    )
 
 
 async def test_forbidden_hosts_are_refused_on_save_and_customer_networks_accepted(

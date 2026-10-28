@@ -69,3 +69,19 @@
   font-size: 14px;
   line-height: 20px;
 }
+
+/* «Нет в загруженной схеме» под «Не копировать никогда» — предупреждение, не ошибка (§5.14, Д-76). */
+.missing {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.warningIcon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 20px;
+  color: var(--p-warning-icon);
+}

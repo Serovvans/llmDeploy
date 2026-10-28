@@ -20,8 +20,8 @@ db:
   sample_rows_preview: 50
   value_max_bytes: 65536
   sample_max_bytes: 8388608
-  snapshot_max_tables: 2000
-  snapshot_max_columns: 40000
+  snapshot_max_tables: 3000
+  snapshot_max_columns: 60000
   comment_max_chars: 500
   max_selected_tables: 200
   # Таблиц образца в одной проверке блока; остальным — придуманные данные (§7.4).

@@ -124,7 +124,7 @@ function usePickerParts(props: TablePickerProps) {
     setRefusal(null);
     try {
       const snapshot = await api.refreshDbSnapshot(connection.id);
-      SingleToast.push(p.refreshed(snapshot.tables.length));
+      SingleToast.push(p.refreshed(snapshot.tables.length, snapshot.truncated));
       setRefreshFrom(null);
       accept(snapshot);
       latest.current.onSnapshot?.(snapshot);
@@ -173,8 +173,10 @@ function usePickerParts(props: TablePickerProps) {
       (!onlyChecked || isChecked(table)) &&
       (!needle || table.name.toLowerCase().includes(needle) || tableName(table).toLowerCase().includes(needle)),
   );
+  // Схемы и таблицы — в порядке ответа сервера, без пересортировки: так же портал ищет таблицу без схемы
+  // (контракт §7.6.1, А-157).
   const groups = new Map<string, DbTable[]>();
-  for (const table of [...visible].sort((a, b) => a.schema.localeCompare(b.schema) || a.name.localeCompare(b.name))) {
+  for (const table of visible) {
     groups.set(table.schema, [...(groups.get(table.schema) ?? []), table]);
   }
   const full = selected.length >= max;
@@ -292,11 +294,12 @@ function usePickerParts(props: TablePickerProps) {
     <div className={styles.head}>
       {snapshot && (
         <div className={styles.origin}>
-          <span className={styles.muted}>{d.snapshot(snapshotDate(snapshot.taken_at), snapshot.tables.length)}</span>
+          <span className={styles.muted}>{d.snapshot(snapshotDate(snapshot.taken_at), snapshot.tables.length, snapshot.truncated)}</span>
           {refreshButton}
           {refreshing && <span className={styles.muted}>{p.refreshing}</span>}
         </div>
       )}
+      {snapshot?.truncated && <p className={styles.muted}>{p.truncatedNote}</p>}
       <p className={styles.muted}>{d.modelNote}</p>
       {refusal && <Notice kind="error">{refusal}</Notice>}
       {gone.length > 0 && <Notice kind="info">{goneText(gone)}</Notice>}

@@ -61,10 +61,11 @@ from portal.databases.ports import DbTarget, DbUnavailableError, SampleRequest
 ROLES = json.loads(sys.argv[1])
 
 
-def target(role, host="customer-db"):
+def target(role, host="customer-db", every=False):
     return DbTarget(
         uuid.uuid4(), host, 5432, "cadastre", role,
-        os.environ["CUSTOMER_DB_PASSWORD"], "disable", ("cadastre", "public"),
+        os.environ["CUSTOMER_DB_PASSWORD"], "disable", () if every else ("cadastre", "public"),
+        every,
     )
 
 
@@ -97,6 +98,7 @@ async def main():
             "warnings": [name for item in report.warnings for _, name in item.objects],
         }
     _, snapshot = await database.snapshot(target("portal_reader"))
+    _, every = await database.snapshot(target("portal_reader", every=True))
     parcels = SampleRequest("cadastre", "parcels", ["id", "cadastral_number", "status", "area"])
     _, (sample,) = await database.sample(target("portal_reader"), [parcels], rows=5, preview=False)
     layer = SampleRequest("cadastre", "parcels", ["id", "status"], "geom")
@@ -106,6 +108,7 @@ async def main():
     print(json.dumps({
         "rights": rights,
         "tables": sorted(f"{item['schema']}.{item['name']}" for item in snapshot.tables),
+        "all_tables": [f"{item['schema']}.{item['name']}" for item in every.tables],
         "postgis": snapshot.postgis_schema,
         "sample_rows": len(sample.rows),
         "preview_rows": len(preview.rows),
@@ -193,6 +196,19 @@ def test_snapshot_and_sample_through_the_port(accessed: tuple[dict[str, Any], li
     )
     assert data["postgis"] == "public"
     assert data["sample_rows"] == 5
+    # Со списком схем — как в 1.0: таблицы расширения в схеме списка входят.
+    assert "public.spatial_ref_sys" in data["tables"]
+    assert not any(name.startswith("archive.") for name in data["tables"])
+
+
+def test_all_schemas_snapshot(accessed: tuple[dict[str, Any], list[str]]) -> None:
+    """«Все схемы» (1.0.1): `public`, затем по имени; без `closed` и объектов PostGIS."""
+    tables = accessed[0]["all_tables"]
+    schemas = list(dict.fromkeys(name.split(".")[0] for name in tables))
+    assert schemas == ["public", "archive", "cadastre"]
+    assert {"public.notes", "archive.parcels", "archive.notes", "cadastre.parcels"} <= set(tables)
+    assert "public.spatial_ref_sys" not in tables
+    assert "public.geometry_columns" not in tables
 
 
 def test_preview_layer_is_geojson_in_wgs84(accessed: tuple[dict[str, Any], list[str]]) -> None:

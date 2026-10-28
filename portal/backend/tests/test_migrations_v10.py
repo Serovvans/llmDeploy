@@ -63,7 +63,7 @@ def test_previous_release_data_survives_and_database_tables_appear(settings: Set
     def query(statement: str, **params: Any) -> list[Any]:
         return asyncio.run(_run(target, (statement,), **params))
 
-    assert query("SELECT version_num FROM alembic_version") == [("0011",)]
+    assert query("SELECT version_num FROM alembic_version") == [("0012",)]
     assert query(
         "SELECT kind, db_connection_id, db_connection_title, db_tables FROM code_projects"
     ) == [("gptool", None, None, [])]

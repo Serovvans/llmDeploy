@@ -43,7 +43,7 @@ def test_previous_release_data_survives_and_code_tables_appear(settings: Setting
     def query(statement: str, **params: Any) -> list[Any]:
         return asyncio.run(_run(target, (statement,), **params))
 
-    assert query("SELECT version_num FROM alembic_version") == [("0011",)]
+    assert query("SELECT version_num FROM alembic_version") == [("0012",)]
     assert query("SELECT kind, project_id FROM dialogs ORDER BY kind") == [
         (kind, None) for kind in ("chat", "cogis", "docparse", "sql")
     ]

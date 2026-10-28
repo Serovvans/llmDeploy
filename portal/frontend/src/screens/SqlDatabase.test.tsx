@@ -155,6 +155,36 @@ describe('SQL-помощник с подключением к базе', () => {
     expect(await screen.findByRole('button', { name: d.tables(2) })).toBeInTheDocument();
   });
 
+  it('1.0.1: выбор таблиц — схемы и таблицы в порядке ответа; схема не целиком — «не все» в шапке и в сообщении об обновлении', async () => {
+    const table = (schema: string, name: string) => ({ schema, name, kind: 'table' as const, comment: null, samples_excluded: false, columns: [] });
+    // Порядок сервера: `public`, затем по кодам символов — `Zeta` раньше `alpha` (контракт §7.6.1, А-157).
+    const ordered: DbSnapshot = {
+      ...SNAPSHOT,
+      truncated: true,
+      tables: [table('public', 'Zeta_t'), table('public', 'alpha_t'), table('Zeta', 'b'), table('alpha', 'a')],
+    };
+    const selection = { connection_id: 'c-1', title: CONNECTION.title, tables: [], available: true };
+    const { user } = setup(`/sql/${ID}`, {
+      'GET /api/db/connections': () => ok({ items: [{ ...CONNECTION, snapshot: { ...CONNECTION.snapshot, tables: 4, truncated: true } }] }),
+      'GET /api/db/connections/c-1/snapshot': () => ok(ordered),
+      'POST /api/db/connections/c-1/snapshot': () => ok({ ...ordered, taken_at: new Date().toISOString() }),
+      [`GET /api/dialogs/${ID}`]: () => ok(dialog({ db: selection })),
+    });
+    await user.click(await screen.findByRole('button', { name: d.chooseTables }));
+
+    expect(await screen.findByText(/4 таблицы — не все$/)).toBeInTheDocument();
+    expect(screen.getByText(d.picker.truncatedNote)).toBeInTheDocument();
+    const groups = Array.from(document.querySelectorAll('fieldset legend')).map((legend) => legend.textContent);
+    expect(groups).toEqual(['public', 'Zeta', 'alpha']);
+    const names = within(screen.getByText('public').closest('fieldset') as HTMLElement)
+      .getAllByRole('checkbox')
+      .map((box) => box.closest('label')?.textContent);
+    expect(names).toEqual(['Zeta_t', 'alpha_t']);
+
+    await user.click(screen.getByRole('button', { name: d.picker.refresh }));
+    expect(await screen.findByText(d.picker.refreshed(4, true))).toHaveTextContent('Схема обновлена: 4 таблицы — не все');
+  });
+
   it('подключение недоступно: заметка над лентой, перед вопросом выбор снимается у диалога', async () => {
     const gone = { connection_id: null, title: 'Архив ЕГРН', tables: [], available: false };
     const { server, user } = setup(`/sql/${ID}`, {

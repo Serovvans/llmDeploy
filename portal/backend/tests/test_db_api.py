@@ -9,6 +9,7 @@ import logging
 from collections.abc import AsyncIterator
 from uuid import UUID
 
+import httpx
 import pytest
 
 from portal.core.settings import Settings
@@ -226,3 +227,66 @@ async def test_refresh_lock_is_free_after_portal_timeout(
     monkeypatch.setattr(fake, "snapshot", snapshot)
     async with asyncio.timeout(5):
         assert (await refresh(employee, target)).status_code == 200
+
+
+def _fields(response: httpx.Response) -> set[tuple[str, str]]:
+    assert response.status_code == 422, response.text
+    return {(item["field"], item["code"]) for item in response.json()["error"]["fields"]}
+
+
+async def test_all_schemas_mode_changes_only_explicitly_and_resets_rights(
+    portal: Portal, fake: FakeCustomerDatabase
+) -> None:
+    """Режим «все схемы» (§7.6.2, А-155): итог тела, сброс прав, исключения, порт."""
+    admin = await admin_client(portal)
+    url = "/api/admin/db-connections"
+    body = {
+        "title": "Все схемы",
+        "host": "db.customer.test",
+        "database": "cadastre",
+        "username": "portal_reader",
+        "password": PASSWORD,
+        "tls_mode": "disable",
+        "access": {"all": True},
+    }
+    contradictory = await admin.post(url, json={**body, "all_schemas": True, "schemas": ["x"]})
+    assert _fields(contradictory) == {("schemas", "invalid_format")}
+    every = await admin.post(
+        url,
+        json={
+            **body,
+            "all_schemas": True,
+            "sample_exclusions": [{"schema": "archive", "table": "notes", "column": None}],
+        },
+    )
+    assert every.status_code == 201, every.text
+    assert (every.json()["all_schemas"], every.json()["schemas"]) == (True, [])
+    every_url = f"{url}/{every.json()['id']}"
+    assert _fields(await admin.patch(every_url, json={"schemas": ["cadastre"]})) == {
+        ("schemas", "invalid_format")
+    }
+    assert _fields(await admin.patch(every_url, json={"all_schemas": False})) == {
+        ("schemas", "required")
+    }
+    await admin.post(f"{every_url}/check")
+    assert (fake.targets[-1].all_schemas, list(fake.targets[-1].schemas)) == (True, [])
+
+    listed = await create_connection(admin)
+    listed_url = f"{url}/{listed['id']}"
+    archive = [{"schema": "archive", "table": "notes", "column": None}]
+    assert _fields(await admin.patch(listed_url, json={"sample_exclusions": archive})) == {
+        ("sample_exclusions", "unknown_value")
+    }
+    await admin.post(f"{listed_url}/check")
+    assert (await refresh(admin, listed["id"])).status_code == 200
+    items = (await admin.get(url)).json()["items"]
+    (refreshed,) = [item for item in items if item["id"] == listed["id"]]
+    assert refreshed["refresh_available_at"] is not None
+    portal.clock.advance(seconds=1)
+    switched = await admin.patch(listed_url, json={"all_schemas": True})
+    assert switched.status_code == 200, switched.text
+    data = switched.json()
+    assert (data["all_schemas"], data["schemas"], data["rights"]["status"]) == (True, [], "unknown")
+    assert data["refresh_available_at"] is None
+    back = await admin.patch(listed_url, json={"all_schemas": False, "schemas": ["public"]})
+    assert (back.json()["all_schemas"], back.json()["schemas"]) == (False, ["public"])

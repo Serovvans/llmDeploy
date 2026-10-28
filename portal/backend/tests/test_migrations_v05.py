@@ -80,7 +80,7 @@ def test_both_migrations_in_one_run_keep_previous_version_data(settings: Setting
     def query(statement: str) -> list[Any]:
         return asyncio.run(_run(target, (statement,)))
 
-    assert query("SELECT version_num FROM alembic_version") == [("0011",)]
+    assert query("SELECT version_num FROM alembic_version") == [("0012",)]
     assert query(
         "SELECT d.kind, m.role, m.params, m.sql_run FROM messages m "
         "JOIN dialogs d ON d.id = m.dialog_id ORDER BY d.kind, m.position"

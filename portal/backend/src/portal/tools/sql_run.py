@@ -428,7 +428,7 @@ class SqlTestRunner:
         seen: set[tuple[str, str]] = set()
         chosen: list[tuple[Mapping[str, Any], Any]] = []
         for schema_name, name in block.tables:
-            table = resolve_table(source.connection, index, schema_name, name)
+            table = resolve_table(index, schema_name, name)
             if table is None:
                 block.reasons[name] = "not_in_snapshot"
                 continue

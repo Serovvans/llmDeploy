@@ -17,6 +17,7 @@ db_connections = sa.Table(
     sa.Column("username", sa.Text, nullable=False),
     sa.Column("password_encrypted", sa.LargeBinary, nullable=False),
     sa.Column("tls_mode", sa.Text, nullable=False),
+    sa.Column("all_schemas", sa.Boolean, nullable=False, server_default="false"),
     sa.Column("schemas", postgresql.ARRAY(sa.Text), nullable=False),
     sa.Column("samples_allowed", sa.Boolean, nullable=False, server_default="false"),
     sa.Column(

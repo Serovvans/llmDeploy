@@ -22,9 +22,11 @@ from tests.code_support import code_portal, new_project
 from tests.db_support import (
     FakeCustomerDatabase,
     admin_client,
+    column,
     create_connection,
     db_settings,
     refresh,
+    table,
 )
 from tests.support import Portal, parse_events
 from tests.test_db_api import WRITE
@@ -227,6 +229,32 @@ async def test_preview_layer(settings: Settings) -> None:
         unusable = await client.get(path, params=query)
         assert unusable.json()["error"]["code"] == "db_connection_unusable"
         assert len(fake.calls) == calls
+
+
+async def test_preview_layer_of_any_schema_with_all_schemas(settings: Settings) -> None:
+    """«Все схемы»: слой берётся из отмеченной таблицы любой схемы снимка (§7.5.18)."""
+    fake = FakeCustomerDatabase()
+    fake.tables = [*fake.tables, table("archive", "plots", [column("id", primary_key=True)])]
+    async with code_portal(db_settings(settings), customer_database=fake) as (portal, _):
+        client = await portal.employee()
+        web = await _web(client)
+        admin = await admin_client(portal)
+        connection = await create_connection(
+            admin, all_schemas=True, schemas=[], samples_allowed=True
+        )
+        assert (await refresh(client, connection["id"])).status_code == 200
+        plots = {"schema": "archive", "name": "plots"}
+        patched = await client.patch(
+            f"/api/code/projects/{web['id']}",
+            json={"db": {"connection_id": connection["id"], "tables": [plots]}},
+        )
+        assert patched.status_code == 200, patched.text
+        layer = await client.get(
+            f"/api/code/projects/{web['id']}/preview-layer",
+            params={"schema": "archive", "table": "plots"},
+        )
+        assert layer.status_code == 200, layer.text
+        assert fake.calls[-1] == ("sample", [("plots", ("id",), None)])
 
 
 async def test_preview_layer_flags(settings: Settings) -> None:
