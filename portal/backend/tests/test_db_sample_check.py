@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from portal.core.settings import Settings, SqlSandboxSettings
-from portal.databases.domain import snapshot_body
+from portal.databases.domain import find_table, snapshot_body
 from portal.databases.ports import DbUnavailableError, SampleRequest, SampleRows
 from portal.llm.ports import ContentDelta, Finished
 from portal.tools.ports import SandboxQueryError, SandboxRun, SandboxTable
@@ -270,6 +270,42 @@ async def test_all_schemas_order_selection_and_table_without_schema(
     )
     # По списку: `parcels` — из `cadastre`, `notes` — из `archive`, хотя есть в `public`.
     assert await sampled() == [("parcels", ("id", "status", "area", "geom")), ("notes", ("id",))]
+
+
+async def test_narrowing_all_schemas_to_list_hides_dropped_schema_without_refresh(
+    portal: Portal, fake: FakeCustomerDatabase
+) -> None:
+    """«Все схемы» → список без `secret`, снимок прежний: таблицы `secret` не отдаются, не
+    выбираются, не читаются образцом и не дают слоя (§7.6.1, §7.4, §7.5.18)."""
+    fake.tables = [*fake.tables, table("secret", "salaries", [column("id"), column("amount")])]
+    admin = await admin_client(portal)
+    connection = (await create_connection(admin, all_schemas=True, schemas=[]))["id"]
+    employee = await portal.employee()
+    assert (await refresh(employee, connection)).status_code == 200
+    dialog = await new_tool_dialog(employee, "sql")
+    secret = {
+        "db": {"connection_id": connection, "tables": [{"schema": "secret", "name": "salaries"}]}
+    }
+    assert (await employee.patch(f"/api/dialogs/{dialog}", json=secret)).status_code == 200
+    narrowed = await admin.patch(
+        f"/api/admin/db-connections/{connection}",
+        json={"all_schemas": False, "schemas": ["cadastre", "public"]},
+    )
+    assert narrowed.status_code == 200, narrowed.text
+
+    body = (await employee.get(f"/api/db/connections/{connection}/snapshot")).json()
+    assert all(item["schema"] != "secret" for item in body["tables"])
+    again = await employee.patch(f"/api/dialogs/{dialog}", json=secret)
+    assert again.status_code == 422
+    assert again.json()["error"]["fields"][0]["code"] == "unknown_value"
+    calls = len(fake.calls)
+    for sql in ("SELECT * FROM secret.salaries", "SELECT * FROM salaries"):
+        _reply(portal, f"```sql\n{sql}\n```")
+        await post_events(employee, f"/api/dialogs/{dialog}/messages", QUESTION)
+    assert "salaries" not in repr(fake.calls[calls:])
+    narrowed_connection: Any = SimpleNamespace(all_schemas=False, schemas=["cadastre", "public"])
+    stored: Any = SimpleNamespace(tables=fake.tables)
+    assert find_table(narrowed_connection, stored, "secret", "salaries") is None
 
 
 async def test_question_rules_with_selection(portal: Portal) -> None:
