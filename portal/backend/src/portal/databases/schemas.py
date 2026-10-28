@@ -38,6 +38,7 @@ class ConnectionRequest(RequestModel):
     username: str | None = None
     password: str | None = Field(default=None, repr=False)
     tls_mode: Literal["verify", "require", "disable"] | None = None
+    all_schemas: bool | None = None
     schemas: list[str] | None = None
     samples_allowed: bool | None = None
     sample_exclusions: list[ExclusionIn] | None = None
@@ -55,7 +56,7 @@ class ConnectionRequest(RequestModel):
                 ]
             elif name == "access" and value is not None:
                 value = AccessInput(value.all, tuple(value.user_ids or ()))
-            elif name in ("samples_allowed", "description") and value is None:
+            elif name in ("samples_allowed", "description", "all_schemas") and value is None:
                 value = UNSET
             values[name] = value
         return ConnectionInput(**values)
@@ -111,6 +112,7 @@ class AdminDbConnectionOut(BaseModel):
     database: str
     username: str
     tls_mode: str
+    all_schemas: bool
     schemas: list[str]
     samples_allowed: bool
     sample_exclusions: list[dict[str, str | None]]
@@ -135,6 +137,7 @@ class AdminDbConnectionOut(BaseModel):
             database=connection.database,
             username=connection.username,
             tls_mode=connection.tls_mode,
+            all_schemas=connection.all_schemas,
             schemas=connection.schemas,
             samples_allowed=connection.samples_allowed,
             sample_exclusions=connection.sample_exclusions,

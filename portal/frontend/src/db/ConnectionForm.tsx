@@ -1,3 +1,4 @@
+import { IconWarningTriangleRegular16 } from '@skbkontur/icons/IconWarningTriangleRegular16';
 import {
   Button,
   Gapped,
@@ -15,7 +16,7 @@ import {
   TokenInput,
   TokenInputType,
 } from '@skbkontur/react-ui';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import { api, isApiError } from '../api/client';
 import type { AdminDbConnection, DbConnectionInput, DbSnapshot, DbTlsMode, PortalConfig, SampleExclusion } from '../api/types';
@@ -33,6 +34,10 @@ const DESCRIPTION_MAX = 500;
 const NAME_MAX_BYTES = 63;
 const TLS_MODES: DbTlsMode[] = ['verify', 'require', 'disable'];
 const USERS_SUGGESTED = 10;
+/** Сколько записей в предупреждении «Нет в загруженной схеме», дальше — «и ещё N» (§5.14). */
+const MISSING_SHOWN = 3;
+
+type SchemasMode = 'all' | 'list';
 
 type Person = { id: string; login: string; full_name: string };
 
@@ -45,6 +50,8 @@ interface Values {
   username: string;
   password: string;
   tls_mode: DbTlsMode;
+  /** (1.0.1) «Все схемы»; введённый список при этом хранится, пока форма открыта (§5.14). */
+  all_schemas: boolean;
   schemas: string[];
   samples_allowed: boolean;
   exclusions: string[];
@@ -70,6 +77,22 @@ export function parseExclusion(text: string): SampleExclusion | null {
     return null;
   }
   return { schema: parts[0] ?? '', table: parts[1] ?? '', column: parts[2] ?? null };
+}
+
+/**
+ * Записи «Не копировать никогда», которых нет в загруженной схеме: имя сравнивается точно, как у сервера
+ * (Д-76). Предупреждение, а не ошибка: таблица может появиться после «Обновить схему».
+ */
+export function missingExclusions(exclusions: string[], snapshot: DbSnapshot): string[] {
+  const tables = new Map(snapshot.tables.map((table) => [`${table.schema}\u0000${table.name}`, table]));
+  return exclusions.filter((text) => {
+    const parsed = parseExclusion(text);
+    if (!parsed) {
+      return false;
+    }
+    const table = tables.get(`${parsed.schema}\u0000${parsed.table}`);
+    return !table || (parsed.column !== null && !table.columns.some((column) => column.name === parsed.column));
+  });
 }
 
 /** Проверка формы до отправки — те же правила, что у сервера (контракт §7.6.2). */
@@ -100,11 +123,14 @@ export function validateConnection(values: Values, isNew: boolean): Errors {
   if (isNew && !values.password) {
     errors.password = e.password;
   }
-  const invalidSchema = values.schemas.find((name) => !name || bytes(name) > NAME_MAX_BYTES || CONTROL.test(name));
-  if (values.schemas.length === 0) {
-    errors.schemas = e.schemas;
-  } else if (invalidSchema !== undefined) {
-    errors.schemas = e.schemaInvalid(invalidSchema);
+  // При «Все схемы» список скрыт и не проверяется (§5.14).
+  if (!values.all_schemas) {
+    const invalidSchema = values.schemas.find((name) => !name || bytes(name) > NAME_MAX_BYTES || CONTROL.test(name));
+    if (values.schemas.length === 0) {
+      errors.schemas = e.schemas;
+    } else if (invalidSchema !== undefined) {
+      errors.schemas = e.schemaInvalid(invalidSchema);
+    }
   }
   if (values.samples_allowed) {
     for (const text of values.exclusions) {
@@ -113,7 +139,8 @@ export function validateConnection(values: Values, isNew: boolean): Errors {
         errors.exclusions = e.exclusionFormat;
         break;
       }
-      if (!values.schemas.includes(parsed.schema)) {
+      // При «Все схемы» схема исключения со списком не сверяется (Д-76, контракт §7.6.2).
+      if (!values.all_schemas && !values.schemas.includes(parsed.schema)) {
         errors.exclusions = e.exclusionSchema(parsed.schema);
         break;
       }
@@ -135,6 +162,8 @@ function initialValues(connection: AdminDbConnection | null, tlsDefault: DbTlsMo
     username: connection?.username ?? '',
     password: '',
     tls_mode: connection?.tls_mode ?? tlsDefault,
+    // У нового — «Только перечисленные» (Д-75).
+    all_schemas: connection?.all_schemas ?? false,
     schemas: connection?.schemas ?? [],
     samples_allowed: connection?.samples_allowed ?? false,
     exclusions: (connection?.sample_exclusions ?? []).map(exclusionText),
@@ -153,7 +182,8 @@ function toInput(values: Values): DbConnectionInput {
     username: values.username.trim(),
     ...(values.password ? { password: values.password } : {}),
     tls_mode: values.tls_mode,
-    schemas: values.schemas,
+    // При «Все схемы» список не отправляется; переход к списку — `all_schemas: false` вместе со `schemas` (§7.6.2).
+    ...(values.all_schemas ? { all_schemas: true } : { all_schemas: false, schemas: values.schemas }),
     samples_allowed: values.samples_allowed,
     sample_exclusions: values.exclusions.flatMap((text) => {
       const parsed = parseExclusion(text);
@@ -234,6 +264,9 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
   const check = useRef<HTMLHeadingElement>(null);
   const result = useRef<HTMLDivElement>(null);
   const [checked, setChecked] = useState(0);
+  // Фокус в первое поле с ошибкой — только после отправки, не при снятии ошибки сменой режима схем.
+  const focusError = useRef(false);
+  const missingId = useId();
 
   useEffect(() => {
     if (focusCheck) {
@@ -262,6 +295,10 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
 
   // Ошибки — в первое поле с ошибкой.
   useEffect(() => {
+    if (!focusError.current) {
+      return;
+    }
+    focusError.current = false;
     const first = ORDER.find((key) => errors[key]);
     if (first) {
       form.current?.querySelector<HTMLElement>(`[data-field="${first}"] :is(input, textarea)`)?.focus();
@@ -270,9 +307,23 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
 
   const set = <K extends keyof Values>(key: K, value: Values[K]) => setValues((current) => ({ ...current, [key]: value }));
 
+  const setSchemasMode = (mode: SchemasMode) => {
+    set('all_schemas', mode === 'all');
+    if (mode === 'all') {
+      setErrors((current) => ({ ...current, schemas: undefined }));
+    }
+  };
+
+  const missing = useMemo(() => (snapshot ? missingExclusions(values.exclusions, snapshot) : []), [snapshot, values.exclusions]);
+  const missingText =
+    missing.length > MISSING_SHOWN
+      ? `${missing.slice(0, MISSING_SHOWN).join(', ')} ${texts.db.picker.andMore(missing.length - MISSING_SHOWN)}`
+      : missing.join(', ');
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     const found = validateConnection({ ...values, password: saved && !newPassword ? 'saved' : values.password }, saved === null);
+    focusError.current = true;
     setErrors(found);
     setFailure(null);
     if (Object.keys(found).length > 0) {
@@ -299,6 +350,7 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
     } catch (error) {
       const fields = serverErrors(error, values);
       if (fields) {
+        focusError.current = true;
         setErrors(fields);
       } else if (isApiError(error, 'feature_disabled')) {
         onFeatureOff();
@@ -321,7 +373,7 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
     setLoadingSnapshot(true);
     try {
       const loaded = await api.refreshDbSnapshot(saved.id);
-      SingleToast.push(texts.db.picker.refreshed(loaded.tables.length));
+      SingleToast.push(texts.db.picker.refreshed(loaded.tables.length, loaded.truncated));
       setSnapshot(loaded);
       setSaved({ ...saved, snapshot: { taken_at: loaded.taken_at, tables: loaded.tables.length, truncated: loaded.truncated } });
       onChanged();
@@ -484,22 +536,38 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
                 </RadioGroup>
               </fieldset>
               {values.tls_mode === 'disable' && <Notice kind="warning">{f.noTlsWarning}</Notice>}
-              <div data-field="schemas">
-                <Field label={f.schemas} error={errors.schemas} hint={f.schemasHint}>
-                  {(control) => (
-                    <TokenInput<string>
-                      id={control.id}
-                      aria-describedby={control['aria-describedby']}
-                      error={control.error}
-                      width="100%"
-                      type={TokenInputType.WithoutReference}
-                      selectedItems={values.schemas}
-                      disabled={pending}
-                      onValueChange={(items) => set('schemas', [...new Set(items.map((item) => item.trim()).filter(Boolean))])}
-                    />
-                  )}
-                </Field>
-              </div>
+              <fieldset className={styles.radios}>
+                <legend className={styles.label}>{f.schemas}</legend>
+                <RadioGroup<SchemasMode> value={values.all_schemas ? 'all' : 'list'} disabled={pending} onValueChange={setSchemasMode}>
+                  <Gapped vertical gap={8}>
+                    <Radio<SchemasMode> value="all">
+                      <span className={styles.radioCaption}>
+                        {f.schemasModes.all}
+                        <span className={styles.note}>{f.allSchemasNote}</span>
+                      </span>
+                    </Radio>
+                    <Radio<SchemasMode> value="list">{f.schemasModes.list}</Radio>
+                  </Gapped>
+                </RadioGroup>
+                {!values.all_schemas && (
+                  <div data-field="schemas">
+                    <Field label={f.schemas} hideLabel error={errors.schemas} hint={f.schemasHint}>
+                      {(control) => (
+                        <TokenInput<string>
+                          id={control.id}
+                          aria-describedby={control['aria-describedby']}
+                          error={control.error}
+                          width="100%"
+                          type={TokenInputType.WithoutReference}
+                          selectedItems={values.schemas}
+                          disabled={pending}
+                          onValueChange={(items) => set('schemas', [...new Set(items.map((item) => item.trim()).filter(Boolean))])}
+                        />
+                      )}
+                    </Field>
+                  </div>
+                )}
+              </fieldset>
             </fieldset>
 
             <fieldset className={styles.group}>
@@ -517,7 +585,9 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
                     {(control) => (
                       <TokenInput<string>
                         id={control.id}
-                        aria-describedby={control['aria-describedby']}
+                        aria-describedby={
+                          [control['aria-describedby'], missing.length > 0 ? missingId : null].filter(Boolean).join(' ') || undefined
+                        }
                         error={control.error}
                         width="100%"
                         type={snapshot ? TokenInputType.Combined : TokenInputType.WithoutReference}
@@ -528,6 +598,17 @@ export function ConnectionForm({ connection, config, focusCheck = false, onChang
                       />
                     )}
                   </Field>
+                  {missing.length > 0 && (
+                    <div id={missingId} className={styles.missing}>
+                      <span className={styles.warningIcon} aria-hidden="true">
+                        <IconWarningTriangleRegular16 />
+                      </span>
+                      <span>
+                        <span className={styles.note}>{f.notInSnapshot(missingText)}</span>
+                        <span className={styles.note}>{f.notInSnapshotNote}</span>
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
             </fieldset>

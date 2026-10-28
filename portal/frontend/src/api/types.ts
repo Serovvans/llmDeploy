@@ -890,6 +890,8 @@ export interface AdminDbConnection {
   database: string;
   username: string;
   tls_mode: DbTlsMode;
+  /** (1.0.1) `true` — «все схемы», которые учётной записи разрешено читать; тогда `schemas` — `[]`. */
+  all_schemas: boolean;
   schemas: string[];
   samples_allowed: boolean;
   sample_exclusions: SampleExclusion[];
@@ -917,7 +919,9 @@ export interface DbConnectionInput {
   username: string;
   password?: string;
   tls_mode: DbTlsMode;
-  schemas: string[];
+  /** (1.0.1) При `true` `schemas` не отправляется; переход к списку — `false` вместе со `schemas` (контракт §7.6.2). */
+  all_schemas: boolean;
+  schemas?: string[];
   samples_allowed: boolean;
   sample_exclusions: SampleExclusion[];
   access: { all: true } | { all: false; user_ids: string[] };

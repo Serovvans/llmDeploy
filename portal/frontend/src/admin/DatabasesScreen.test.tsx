@@ -20,6 +20,7 @@ function connection(patch: Partial<AdminDbConnection> = {}): AdminDbConnection {
     database: 'cadastre',
     username: 'portal_reader',
     tls_mode: 'verify',
+    all_schemas: false,
     schemas: ['cadastre'],
     samples_allowed: true,
     sample_exclusions: [{ schema: 'cadastre', table: 'owners', column: null }],
@@ -153,6 +154,95 @@ describe('базы данных (администратор)', () => {
     expect(screen.getByRole('button', { name: texts.db.rights.loadSnapshot })).toBeInTheDocument();
     // Итог проверки объявляется и принимает фокус (§9).
     await waitFor(() => expect(screen.getByText(texts.db.rights.readOnly).closest('[role="status"]')).toHaveFocus());
+  });
+
+  it('1.0.1: «все схемы» под адресом; схема не целиком — «не все» с пояснением по режиму и в сообщении об обновлении', async () => {
+    const all = connection({ id: 'c-4', title: 'ГИС (вся база)', all_schemas: true, schemas: [], snapshot: { taken_at: '2026-10-28T09:12:00Z', tables: 3000, truncated: true } });
+    const list = connection({ snapshot: { taken_at: '2026-10-28T09:12:00Z', tables: 2000, truncated: true } });
+    const { user } = setup({
+      'GET /api/admin/db-connections': () => ok({ items: [all, list] }),
+      'POST /api/db/connections/c-4/snapshot': () => ok({ connection_id: 'c-4', taken_at: '2026-10-28T09:20:00Z', truncated: true, tables: [] }),
+    });
+
+    const allRow = within(await row('ГИС (вся база)'));
+    expect(allRow.getByText(a.allSchemas)).toBeInTheDocument();
+    const truncated = allRow.getByText(a.snapshotTables(3000, true));
+    expect(truncated).toHaveTextContent('3000 таблиц — не все');
+    await user.hover(truncated);
+    expect(await screen.findByText(a.truncatedHint.all)).toBeInTheDocument();
+    await user.unhover(truncated);
+
+    const listRow = within(await row('Кадастр (рабочая)'));
+    expect(listRow.queryByText(a.allSchemas)).not.toBeInTheDocument();
+    await user.hover(listRow.getByText(a.snapshotTables(2000, true)));
+    expect(await screen.findByText(a.truncatedHint.list)).toBeInTheDocument();
+
+    await user.click(allRow.getByRole('button', { name: `${texts.users.actions}: ГИС (вся база)` }));
+    await user.click(await screen.findByText(a.menu.refresh));
+    expect(await screen.findByText('Схема обновлена: 0 таблиц — не все')).toBeInTheDocument();
+  });
+
+  it('1.0.1: новое подключение — «Только перечисленные»; при «Все схемы» список скрыт, его ошибка снята, `schemas` не уходит', async () => {
+    const created = connection({ id: 'c-3', title: 'Новая', all_schemas: true, schemas: [], snapshot: null });
+    const { user, server } = setup({
+      'POST /api/admin/db-connections': () => ok(created, 201),
+      'POST /api/admin/db-connections/c-3/check': () => ok(created),
+    });
+    await user.click(await screen.findByRole('button', { name: a.add }));
+    const f = texts.db.form;
+    expect(screen.getByRole('radio', { name: f.schemasModes.list })).toBeChecked();
+    expect(screen.getByText(f.allSchemasNote)).toBeInTheDocument();
+
+    await user.type(screen.getAllByRole('textbox')[0] as HTMLElement, 'Новая');
+    await user.type(screen.getByPlaceholderText(f.hostPlaceholder), 'db.local');
+    await user.type(screen.getByLabelText(f.database), 'gis');
+    await user.type(screen.getByLabelText(f.username), 'reader');
+    await user.type(screen.getByLabelText(f.password), 'secret');
+    await user.click(screen.getByRole('button', { name: f.save }));
+    expect(await screen.findByText(f.errors.schemas)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('radio', { name: new RegExp(f.schemasModes.all) }));
+    expect(screen.queryByLabelText(f.schemas)).not.toBeInTheDocument();
+    expect(screen.queryByText(f.errors.schemas)).not.toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: new RegExp(f.schemasModes.all) })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: f.save }));
+
+    await waitFor(() => expect(server.callsTo('POST /api/admin/db-connections')).toHaveLength(1));
+    const body = server.callsTo('POST /api/admin/db-connections')[0]?.body as Record<string, unknown>;
+    expect(body).toMatchObject({ all_schemas: true, database: 'gis' });
+    expect(body).not.toHaveProperty('schemas');
+  });
+
+  it('1.0.1: смена режима у сохранённого — только изменённые поля; переход к списку — вместе со `schemas`', async () => {
+    const all = connection({ id: 'c-4', title: 'ГИС (вся база)', all_schemas: true, schemas: [], snapshot: null });
+    const { user, server } = setup({
+      'GET /api/admin/db-connections': () => ok({ items: [all, connection()] }),
+      'PATCH /api/admin/db-connections/c-1': () => ok(connection({ all_schemas: true, schemas: [] })),
+      'POST /api/admin/db-connections/c-1/check': () => ok(connection({ all_schemas: true, schemas: [] })),
+      'PATCH /api/admin/db-connections/c-4': () => ok({ ...all, all_schemas: false, schemas: ['cadastre'] }),
+      'POST /api/admin/db-connections/c-4/check': () => ok({ ...all, all_schemas: false, schemas: ['cadastre'] }),
+    });
+    const f = texts.db.form;
+    const edit = async (title: string) => {
+      await user.click(within(await row(title)).getByRole('button', { name: `${texts.users.actions}: ${title}` }));
+      await user.click(await screen.findByText(a.menu.edit));
+    };
+
+    await edit('Кадастр (рабочая)');
+    await user.click(await screen.findByRole('radio', { name: new RegExp(f.schemasModes.all) }));
+    await user.click(screen.getByRole('button', { name: f.save }));
+    await waitFor(() => expect(server.callsTo('PATCH /api/admin/db-connections/c-1')).toHaveLength(1));
+    expect(server.callsTo('PATCH /api/admin/db-connections/c-1')[0]?.body).toEqual({ all_schemas: true });
+    await user.click(screen.getByRole('button', { name: texts.common.cancel }));
+
+    await edit('ГИС (вся база)');
+    expect(await screen.findByRole('radio', { name: new RegExp(f.schemasModes.all) })).toBeChecked();
+    expect(screen.queryByLabelText(f.schemas)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: f.schemasModes.list }));
+    await user.type(screen.getByLabelText(f.schemas), 'cadastre,');
+    await user.click(screen.getByRole('button', { name: f.save }));
+    await waitFor(() => expect(server.callsTo('PATCH /api/admin/db-connections/c-4')).toHaveLength(1));
+    expect(server.callsTo('PATCH /api/admin/db-connections/c-4')[0]?.body).toEqual({ all_schemas: false, schemas: ['cadastre'] });
   });
 
   it('пусто — приглашение добавить; сбой — «Повторить»', async () => {

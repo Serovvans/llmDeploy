@@ -278,11 +278,20 @@ _TABLES = """
 SELECT c.oid, n.nspname, c.relname, c.relkind,
        pg_catalog.left(pg_catalog.obj_description(c.oid, 'pg_class'), $2) AS comment
 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = ANY($1::pg_catalog.text[])
+WHERE (n.nspname = ANY($1::pg_catalog.text[])
+       OR ($4::pg_catalog.bool
+           AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                           WHERE d.classid = 'pg_catalog.pg_namespace'::pg_catalog.regclass
+                             AND d.objid = n.oid AND d.deptype = 'e')
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                           WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                             AND d.objid = c.oid AND d.deptype = 'e')))
   AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
   AND pg_catalog.has_schema_privilege(n.oid, 'USAGE')
   AND pg_catalog.has_any_column_privilege(c.oid, 'SELECT')
-ORDER BY pg_catalog.array_position($1::pg_catalog.text[], n.nspname::pg_catalog.text), c.relname
+ORDER BY pg_catalog.array_position($1::pg_catalog.text[], n.nspname::pg_catalog.text),
+         n.nspname <> 'public', n.nspname, c.relname
 LIMIT $3
 """
 _COLUMNS = """
@@ -760,10 +769,13 @@ class AsyncpgCustomerDatabase:
         return report
 
     async def check(self, target: DbTarget) -> RightsReport:
-        """Проверка подключения: права, затем схемы (§7.6.2)."""
+        """Проверка подключения: права, затем схемы списка (§7.6.2).
+
+        При «всех схемах» схемы не проверяются: это те, что учётной записи разрешено читать.
+        """
         async with self._access(target) as connection:
             report = await self._rights(connection)
-            if report.findings:
+            if report.findings or target.all_schemas:
                 return report
             missing = [row["s"] for row in await connection.fetch(_MISSING_SCHEMAS, target.schemas)]
             if missing:
@@ -780,6 +792,7 @@ class AsyncpgCustomerDatabase:
                 list(target.schemas),
                 settings.comment_max_chars,
                 settings.snapshot_max_tables + 1,
+                target.all_schemas,
             )
             truncated = len(relations) > settings.snapshot_max_tables
             relations = relations[: settings.snapshot_max_tables]

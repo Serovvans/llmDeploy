@@ -105,6 +105,7 @@ class Connection:
     username: str
     password_encrypted: bytes = field(repr=False)
     tls_mode: TlsMode
+    all_schemas: bool
     schemas: list[str]
     samples_allowed: bool
     sample_exclusions: list[dict[str, str | None]]
@@ -225,7 +226,16 @@ def column_excluded(exclusions: ExclusionMap, schema: str, table: str, column: s
 
 
 def visible_tables(connection: Connection, snapshot: StoredSnapshot) -> list[dict[str, Any]]:
-    """Таблицы снимка схем подключения в порядке `schemas` (снятые схемы не отдаются)."""
+    """Таблицы снимка подключения в порядке отдачи и поиска (§7.6.1).
+
+    Список схем — в порядке `schemas`, снятые схемы не отдаются. «Все схемы» — все таблицы
+    снимка: `public`, затем остальные схемы по кодам символов (А-157). Внутри — по имени.
+    """
+    if connection.all_schemas:
+        return sorted(
+            snapshot.tables,
+            key=lambda item: (item["schema"] != "public", item["schema"], item["name"]),
+        )
     order = {schema: position for position, schema in enumerate(connection.schemas)}
     tables = [item for item in snapshot.tables if item["schema"] in order]
     return sorted(tables, key=lambda item: (order[item["schema"]], item["name"]))
@@ -267,28 +277,44 @@ def snapshot_body(connection: Connection, snapshot: StoredSnapshot) -> dict[str,
     }
 
 
-TableIndex = dict[tuple[str, str], dict[str, Any]]
+@dataclass(frozen=True)
+class TableIndex:
+    """Таблицы снимка подключения по `(схема, имя)` и по имени без схемы.
+
+    По имени — первая таблица с этим именем в порядке `visible_tables` (§7.4, шаг 1).
+    """
+
+    by_key: dict[tuple[str, str], dict[str, Any]]
+    by_name: dict[str, dict[str, Any]]
+
+    def get(self, key: tuple[str, str]) -> dict[str, Any] | None:
+        """Таблица по `(схема, имя)` или `None`."""
+        return self.by_key.get(key)
+
+    def __contains__(self, key: object) -> bool:
+        """Есть ли таблица `(схема, имя)` среди таблиц снимка подключения."""
+        return key in self.by_key
 
 
 def table_index(connection: Connection, snapshot: StoredSnapshot) -> TableIndex:
-    """Таблицы снимка по `(схема, имя)` — только среди схем подключения.
+    """Таблицы снимка подключения (`visible_tables`) по ключу и по имени.
 
     Строится один раз на проверку: поиск каждой таблицы запроса — по словарю, а не
     перебором снимка (запрос сотрудника может назвать тысячи таблиц).
     """
-    schemas = set(connection.schemas)
-    return {
-        (item["schema"], item["name"]): item
-        for item in snapshot.tables
-        if item["schema"] in schemas
-    }
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    by_name: dict[str, dict[str, Any]] = {}
+    for item in visible_tables(connection, snapshot):
+        by_key[(item["schema"], item["name"])] = item
+        by_name.setdefault(item["name"], item)
+    return TableIndex(by_key, by_name)
 
 
 def find_table(
     connection: Connection, snapshot: StoredSnapshot, schema: str, name: str
 ) -> dict[str, Any] | None:
-    """Таблица снимка по точному имени — только среди схем подключения."""
-    if schema not in connection.schemas:
+    """Таблица снимка по точному имени — только среди таблиц снимка подключения."""
+    if not connection.all_schemas and schema not in connection.schemas:
         return None
     return next(
         (item for item in snapshot.tables if item["schema"] == schema and item["name"] == name),
@@ -389,21 +415,16 @@ def selected_tables(
     return found
 
 
-def resolve_table(
-    connection: Connection, index: TableIndex, schema: str | None, name: str
-) -> dict[str, Any] | None:
+def resolve_table(index: TableIndex, schema: str | None, name: str) -> dict[str, Any] | None:
     """Таблица запроса в снимке (§7.4, «Проверка на образце», шаг 1).
 
-    Имя со схемой — точно; без схемы — по порядку `schemas` подключения. Имена уже
-    приведены по правилам PostgreSQL (без кавычек — в нижнем регистре).
+    Имя со схемой — точно; без схемы — первая таблица с этим именем в порядке таблиц
+    снимка подключения: по `schemas`, при «всех схемах» — `public`, затем по имени схемы.
+    Имена уже приведены по правилам PostgreSQL (без кавычек — в нижнем регистре).
     """
     if schema is not None:
         return index.get((schema, name))
-    for candidate in connection.schemas:
-        found = index.get((candidate, name))
-        if found is not None:
-            return found
-    return None
+    return index.by_name.get(name)
 
 
 InventedReason = Literal["not_in_snapshot", "excluded", "samples_not_allowed", "table_limit"]

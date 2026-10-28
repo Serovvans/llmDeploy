@@ -123,7 +123,7 @@ function Databases() {
   const refresh = async (connection: AdminDbConnection) => {
     try {
       const snapshot = await api.refreshDbSnapshot(connection.id);
-      SingleToast.push(texts.db.picker.refreshed(snapshot.tables.length));
+      SingleToast.push(texts.db.picker.refreshed(snapshot.tables.length, snapshot.truncated));
       reload();
     } catch (error) {
       if (isApiError(error, 'db_snapshot_too_soon')) {
@@ -228,6 +228,7 @@ function Databases() {
                   <span className="p-mono">
                     {connection.host}:{connection.port}/{connection.database}
                   </span>
+                  {connection.all_schemas && <span className={styles.muted}>{a.allSchemas}</span>}
                   {connection.tls_mode === 'disable' && (
                     <span className={styles.secondLine}>
                       <span className={styles.warningIcon} aria-hidden="true">
@@ -259,7 +260,14 @@ function Databases() {
                 <td>
                   {connection.snapshot ? (
                     <>
-                      {a.snapshotTables(connection.snapshot.tables)}
+                      {connection.snapshot.truncated ? (
+                        // Схема загружена не целиком (Д-77): пояснение — по режиму схем, по наведению и фокусу.
+                        <TitleHint text={connection.all_schemas ? a.truncatedHint.all : a.truncatedHint.list} always>
+                          <span tabIndex={0}>{a.snapshotTables(connection.snapshot.tables, true)}</span>
+                        </TitleHint>
+                      ) : (
+                        a.snapshotTables(connection.snapshot.tables)
+                      )}
                       <span className={styles.muted}>{snapshotDay(connection.snapshot.taken_at)}</span>
                     </>
                   ) : (

@@ -224,6 +224,54 @@ async def test_selection_is_untrusted_data_and_counted_in_memory(
     assert question.count("</схема>") == 1
 
 
+async def test_all_schemas_order_selection_and_table_without_schema(
+    portal: Portal, fake: FakeCustomerDatabase
+) -> None:
+    """«Все схемы»: `public`, затем схемы по кодам символов; таблица без схемы — первая в
+    этом порядке, при списке — по списку (§7.4, §7.6.1, А-157)."""
+    archived = [column("id", primary_key=True), column("archived_on", "date")]
+    fake.tables = [
+        *fake.tables,
+        table("archive", "parcels", archived),
+        table("archive", "notes", [column("id", primary_key=True)]),
+        table("alpha", "x", [column("id")]),
+        table("Zeta", "x", [column("id")]),
+    ]
+    admin = await admin_client(portal)
+    connection = (await create_connection(admin, all_schemas=True, schemas=[]))["id"]
+    employee = await portal.employee()
+    snapshot = await refresh(employee, connection)
+    assert [(item["schema"], item["name"]) for item in snapshot.json()["tables"]] == [
+        ("public", "notes"),
+        ("Zeta", "x"),
+        ("alpha", "x"),
+        ("archive", "notes"),
+        ("archive", "parcels"),
+        ("cadastre", "owners"),
+        ("cadastre", "parcels"),
+    ]
+    dialog = await new_tool_dialog(employee, "sql")
+    tables = [{"schema": "archive", "name": "parcels"}, {"schema": "Zeta", "name": "x"}]
+    selected = await employee.patch(
+        f"/api/dialogs/{dialog}", json={"db": {"connection_id": connection, "tables": tables}}
+    )
+    assert selected.status_code == 200, selected.text
+
+    async def sampled() -> list[tuple[str, tuple[str, ...]]]:
+        _reply(portal, "```sql\nSELECT * FROM parcels JOIN notes ON true\n```")
+        await post_events(employee, f"/api/dialogs/{dialog}/messages", QUESTION)
+        return [(name, columns) for name, columns, _ in fake.calls[-1][1]]
+
+    notes = ("notes", ("id", "body"))
+    assert await sampled() == [("parcels", ("id", "archived_on")), notes]
+    await admin.patch(
+        f"/api/admin/db-connections/{connection}",
+        json={"all_schemas": False, "schemas": ["cadastre", "archive", "public"]},
+    )
+    # По списку: `parcels` — из `cadastre`, `notes` — из `archive`, хотя есть в `public`.
+    assert await sampled() == [("parcels", ("id", "status", "area", "geom")), ("notes", ("id",))]
+
+
 async def test_question_rules_with_selection(portal: Portal) -> None:
     employee, dialog, _ = await _selected(portal)
     path = f"/api/dialogs/{dialog}/messages"
@@ -381,7 +429,7 @@ async def test_thousands_of_tables_against_full_snapshot_take_linear_time() -> N
     )
     exclusions = [{"schema": "cadastre", "table": f"x{i}", "column": None} for i in range(500)]
     connection: Any = SimpleNamespace(
-        schemas=schemas, samples_allowed=True, sample_exclusions=exclusions
+        schemas=schemas, all_schemas=False, samples_allowed=True, sample_exclusions=exclusions
     )
     requested: list[SampleRequest] = []
 
@@ -408,7 +456,7 @@ async def test_tables_over_the_limit_get_invented_data() -> None:
         tables=[table("cadastre", name, [column("id", primary_key=True)]) for name in "abc"]
     )
     connection: Any = SimpleNamespace(
-        schemas=["cadastre"], samples_allowed=True, sample_exclusions=[]
+        schemas=["cadastre"], all_schemas=False, samples_allowed=True, sample_exclusions=[]
     )
     requested: list[SampleRequest] = []
 
@@ -436,7 +484,7 @@ def test_exclusions_are_grouped_once_per_answer() -> None:
     ]
     exclusions.append({"schema": "cadastre", "table": "t0", "column": None})
     connection: Any = SimpleNamespace(
-        id=uuid4(), schemas=["cadastre"], sample_exclusions=exclusions
+        id=uuid4(), schemas=["cadastre"], all_schemas=False, sample_exclusions=exclusions
     )
     snapshot: Any = SimpleNamespace(taken_at=None, truncated=False, tables=tables)
     started = time.monotonic()

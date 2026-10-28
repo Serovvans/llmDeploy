@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import { ApiError } from '../api/client';
-import type { AdminDbConnection } from '../api/types';
+import type { AdminDbConnection, DbSnapshot } from '../api/types';
 import { texts } from '../texts';
-import { parseExclusion, serverErrors, validateConnection } from './ConnectionForm';
+import { missingExclusions, parseExclusion, serverErrors, validateConnection } from './ConnectionForm';
 import { dbCheckUnavailable, dbRefusal } from './refusal';
 import { clipboardText, findingLine, reasonText } from './rights';
 import { availableAt, connectionOf, dbValue, refreshedAt } from './selection';
@@ -20,6 +20,7 @@ function connection(patch: Partial<AdminDbConnection> = {}): AdminDbConnection {
     database: 'cadastre',
     username: 'portal_reader',
     tls_mode: 'verify',
+    all_schemas: false,
     schemas: ['cadastre'],
     samples_allowed: false,
     sample_exclusions: [],
@@ -154,6 +155,7 @@ describe('форма подключения', () => {
     username: 'portal_reader',
     password: 'secret',
     tls_mode: 'verify' as const,
+    all_schemas: false,
     schemas: ['cadastre'],
     samples_allowed: true,
     exclusions: ['cadastre.owners', 'cadastre.contacts.phone'],
@@ -178,6 +180,33 @@ describe('форма подключения', () => {
     // Исключения без разрешённых образцов не проверяются: они сохраняются как есть.
     expect(validateConnection({ ...VALID, samples_allowed: false, exclusions: ['bad'] }, true).exclusions).toBeUndefined();
     expect(validateConnection({ ...VALID, schemas: ['a\u0001'] }, true).schemas).toBe(e.schemaInvalid('a\u0001'));
+  });
+
+  it('1.0.1: при «Все схемы» список не проверяется, схема исключения — любая', () => {
+    const all = { ...VALID, all_schemas: true, schemas: [], exclusions: ['archive.notes', 'Zeta.t.c'] };
+    expect(validateConnection(all, true)).toEqual({});
+    expect(validateConnection({ ...all, exclusions: ['notes'] }, true).exclusions).toBe(texts.db.form.errors.exclusionFormat);
+  });
+
+  it('1.0.1: «Нет в загруженной схеме» — точное имя таблицы и столбца', () => {
+    const snapshot: DbSnapshot = {
+      connection_id: 'c-1',
+      taken_at: '2026-10-28T09:12:00Z',
+      truncated: false,
+      tables: [
+        {
+          schema: 'cadastre',
+          name: 'owners',
+          kind: 'table',
+          comment: null,
+          samples_excluded: true,
+          columns: [{ name: 'phone', type: 'text', not_null: false, primary_key: false, references: null, comment: null, geometry: null, excluded: true }],
+        },
+      ],
+    };
+    expect(
+      missingExclusions(['cadastre.owners', 'cadastre.owners.phone', 'Cadastre.owners', 'cadastre.owners.mail', 'cadastre.ownres', 'bad'], snapshot),
+    ).toEqual(['Cadastre.owners', 'cadastre.owners.mail', 'cadastre.ownres']);
   });
 
   it('ошибка сервера по полю «Адрес»: внутренний адрес портала — свой текст', () => {

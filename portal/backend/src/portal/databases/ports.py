@@ -46,7 +46,8 @@ class DbTarget:
     username: str
     password: str = field(repr=False)
     tls_mode: Literal["verify", "require", "disable"]
-    schemas: Sequence[str]
+    schemas: Sequence[str]  # при all_schemas — пусто
+    all_schemas: bool  # `$4` запроса снимка (§7.6.7)
 
 
 @dataclass(frozen=True)

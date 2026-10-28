@@ -73,7 +73,16 @@ _ACCESS_USERS_MAX = 1000
 _FORBIDDEN = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 _HOST_NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
 # Смена этих полей — смена параметров входа (§7.6.2).
-LOGIN_FIELDS = ("host", "port", "database", "username", "password", "tls_mode", "schemas")
+LOGIN_FIELDS = (
+    "host",
+    "port",
+    "database",
+    "username",
+    "password",
+    "tls_mode",
+    "all_schemas",
+    "schemas",
+)
 
 
 class _Unset:
@@ -103,6 +112,7 @@ class ConnectionInput:
     username: Any = UNSET
     password: Any = field(default=UNSET, repr=False)
     tls_mode: Any = UNSET
+    all_schemas: Any = UNSET
     schemas: Any = UNSET
     samples_allowed: Any = UNSET
     sample_exclusions: Any = UNSET
@@ -252,10 +262,13 @@ class DbService:
                 raise not_found()
             return await self._admin_view(uow, connection)
 
-    def _validate(
-        self, data: ConnectionInput, schemas: Sequence[str], *, creating: bool
-    ) -> list[FieldError]:
-        """Поля подключения по §7.6.2; `schemas` — итоговые схемы для исключений."""
+    def _validate(self, data: ConnectionInput, current: Connection | None) -> list[FieldError]:
+        """Поля подключения по §7.6.2; `current` — подключение до `PATCH`, `None` у `POST`.
+
+        Режим схем проверяется по итогу тела: у `PATCH` — с текущими значениями
+        непереданных полей.
+        """
+        creating = current is None
         problems: list[FieldError] = []
 
         def check(name: str, code: str | None) -> None:
@@ -307,9 +320,20 @@ class DbService:
                 check("tls_mode", "required")
             elif data.tls_mode == "verify" and not self.tls_verify_available():
                 check("tls_mode", "invalid_format")
-        if creating or data.schemas is not UNSET:
+        all_schemas = _all_schemas(data, current)
+        if all_schemas:
+            if data.schemas is not UNSET and data.schemas != []:
+                check("schemas", "invalid_format")
+        elif data.schemas is not UNSET or current is None or current.all_schemas:
+            # Переход к списку — только со списком: `required`, если его нет в теле.
             check("schemas", self._schemas_error(data.schemas))
         if data.sample_exclusions is not UNSET:
+            schemas: Sequence[str] | None = None  # «все схемы»: любое корректное имя
+            if not all_schemas:
+                if isinstance(data.schemas, list):
+                    schemas = data.schemas
+                else:
+                    schemas = [] if current is None else current.schemas
             check("sample_exclusions", self._exclusions_error(data.sample_exclusions, schemas))
         if creating or data.access is not UNSET:
             access = data.access
@@ -332,7 +356,8 @@ class DbService:
         return None
 
     @staticmethod
-    def _exclusions_error(exclusions: Any, schemas: Sequence[str]) -> str | None:
+    def _exclusions_error(exclusions: Any, schemas: Sequence[str] | None) -> str | None:
+        """Исключения образцов; `schemas` — итоговый список, `None` — «все схемы»."""
         if not isinstance(exclusions, list):
             return "invalid_format"
         if len(exclusions) > _EXCLUSIONS_MAX:
@@ -343,7 +368,11 @@ class DbService:
         for schema, table, column in keys:
             if _name_error(table) or (column is not None and _name_error(column)):
                 return "invalid_format"
-            if schema not in schemas:
+            if schemas is None:
+                # «Все схемы»: каталог базы при сохранении не читается — любое корректное имя.
+                if _name_error(schema):
+                    return "invalid_format"
+            elif schema not in schemas:
                 return "unknown_value"
         return None
 
@@ -356,9 +385,9 @@ class DbService:
 
     async def create(self, actor: CurrentUser, data: ConnectionInput) -> AdminView:
         """Новое подключение; права — `unknown` до первой проверки (§7.6.2)."""
-        schemas = data.schemas if isinstance(data.schemas, list) else []
-        if problems := self._validate(data, schemas, creating=True):
+        if problems := self._validate(data, None):
             raise validation_error(problems)
+        all_schemas = _all_schemas(data, None)
         access: AccessInput = data.access
         now = self._clock.now()
         connection_id = uuid4()
@@ -372,7 +401,8 @@ class DbService:
             username=data.username,
             password_encrypted=self._cipher.encrypt(connection_id, data.password),
             tls_mode=data.tls_mode,
-            schemas=list(data.schemas),
+            all_schemas=all_schemas,
+            schemas=[] if all_schemas else list(data.schemas),
             samples_allowed=False if data.samples_allowed is UNSET else data.samples_allowed,
             sample_exclusions=[] if data.sample_exclusions is UNSET else data.sample_exclusions,
             access_all=access.all,
@@ -409,8 +439,7 @@ class DbService:
             connection = await uow.db.get(connection_id, lock=True)
             if connection is None:
                 raise not_found()
-            schemas = data.schemas if isinstance(data.schemas, list) else connection.schemas
-            if problems := self._validate(data, schemas, creating=False):
+            if problems := self._validate(data, connection):
                 raise validation_error(problems)
             changed: dict[str, Any] = {}
             for name in given:
@@ -425,6 +454,8 @@ class DbService:
                     await uow.db.set_access(connection.id, [] if value.all else value.user_ids)
                 else:
                     changed[name] = value
+            if _all_schemas(data, connection):
+                changed["schemas"] = []
             now = self._clock.now()
             if any(name in LOGIN_FIELDS for name in given):
                 changed.update(
@@ -513,6 +544,7 @@ class DbService:
             self._cipher.decrypt(connection.id, connection.password_encrypted),
             connection.tls_mode,
             list(connection.schemas),
+            connection.all_schemas,
         )
 
     async def access[T](
@@ -843,6 +875,13 @@ class DbService:
             else {"column": spatial["name"], "type": spatial["geometry"]["type"]},
             "features": {"type": "FeatureCollection", "features": features},
         }
+
+
+def _all_schemas(data: ConnectionInput, current: Connection | None) -> bool:
+    """Итоговый режим «все схемы»: из тела, иначе текущий (у нового — список)."""
+    if data.all_schemas is not UNSET:
+        return bool(data.all_schemas)
+    return current is not None and current.all_schemas
 
 
 def _status(report: RightsReport | None) -> Literal["read_only", "excess"] | None:

@@ -9,6 +9,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -216,6 +217,7 @@ def _target(settings: Settings, role: str) -> DbTarget:
         "unused",
         "disable",
         ("shop", "public"),
+        False,
     )
 
 
@@ -609,6 +611,88 @@ async def test_snapshot_keeps_keys_and_types_from_real_catalog_rows(
         "area": "numeric(12,2)",
         "made": "date",
     }
+
+
+# «Все схемы» (1.0.1, §7.6.7): своя база, чтобы члены расширения не задели другие тесты.
+SCHEMAS_DATABASE = "customer_schemas_test"
+SCHEMAS = """
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+CREATE TABLE public.notes (id int);
+CREATE TABLE public.ext_member (id int);
+CREATE TABLE public.hidden (id int);
+CREATE SCHEMA zeta;
+CREATE TABLE zeta.parcels (id int);
+CREATE SCHEMA "Alpha";
+CREATE TABLE "Alpha".parcels (id int);
+CREATE SCHEMA archive;
+CREATE TABLE archive.parcels (id int);
+CREATE TABLE archive.notes (id int);
+CREATE SCHEMA closed;
+CREATE TABLE closed.secrets (id int);
+CREATE SCHEMA ext_schema;
+CREATE TABLE ext_schema.lookup (id int);
+ALTER EXTENSION plpgsql ADD SCHEMA ext_schema;
+ALTER EXTENSION plpgsql ADD TABLE public.ext_member;
+GRANT USAGE ON SCHEMA zeta, "Alpha", archive, ext_schema TO cust_reader;
+GRANT SELECT ON public.notes, public.ext_member, zeta.parcels, "Alpha".parcels,
+    archive.parcels, archive.notes, closed.secrets, ext_schema.lookup TO cust_reader;
+"""
+
+
+@pytest.fixture
+async def schemas_database(settings: Settings, prepared: None) -> AsyncIterator[str]:
+    """База со схемами разного доступа и членами расширения `plpgsql`."""
+    admin = await _admin(settings)
+    try:
+        await admin.execute(f"DROP DATABASE IF EXISTS {SCHEMAS_DATABASE} WITH (FORCE)")
+        await admin.execute(f"CREATE DATABASE {SCHEMAS_DATABASE}")
+        inside = await _admin(settings, SCHEMAS_DATABASE)
+        try:
+            await inside.execute(SCHEMAS)
+        finally:
+            await inside.close()
+        yield SCHEMAS_DATABASE
+    finally:
+        await admin.execute(f"DROP DATABASE IF EXISTS {SCHEMAS_DATABASE} WITH (FORCE)")
+        await admin.close()
+
+
+def _names(tables: list[dict[str, Any]]) -> list[str]:
+    return [f"{item['schema']}.{item['name']}" for item in tables]
+
+
+async def test_all_schemas_snapshot_skips_service_closed_and_extension_objects(
+    settings: Settings, schemas_database: str
+) -> None:
+    """Все схемы с `USAGE`, кроме служебных и членов расширения; `public` первой (А-156, А-157).
+
+    Со списком те же объекты — как в 1.0: член расширения в схеме списка входит.
+    """
+    target = _target(settings, _role("reader"))
+    every = replace(target, database=schemas_database, schemas=(), all_schemas=True)
+    listed = replace(target, database=schemas_database, schemas=("ext_schema", "public"))
+
+    _, content = await _adapter(settings).snapshot(every)
+    assert _names(content.tables) == [
+        "public.notes",
+        "Alpha.parcels",
+        "archive.notes",
+        "archive.parcels",
+        "zeta.parcels",
+    ]
+    assert content.truncated is False
+    _, cut = await _adapter(settings, snapshot_max_tables=2).snapshot(every)
+    assert (_names(cut.tables), cut.truncated) == (["public.notes", "Alpha.parcels"], True)
+    _, content = await _adapter(settings).snapshot(listed)
+    assert _names(content.tables) == ["ext_schema.lookup", "public.ext_member", "public.notes"]
+    # Проверка при «всех схемах» схем не ищет; со списком недоступная схема — отказ.
+    assert (await _adapter(settings).check(every)).findings == []
+    with pytest.raises(DbUnavailableError) as raised:
+        await _adapter(settings).check(replace(listed, schemas=("closed", "public")))
+    assert (raised.value.reason, raised.value.details) == (
+        "schemas_unavailable",
+        {"schemas": ["closed"]},
+    )
 
 
 @pytest.mark.parametrize(
